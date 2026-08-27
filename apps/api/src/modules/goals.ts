@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { Database } from "../db.js";
 import { hasAnyRole } from "./auth.js";
+import { canReadGoals, pendingGoalSql, pendingGoalValues, resolveGoalAccess } from "./authorization.js";
 
 const levelSchema = z.enum(["sales_manager", "department", "group", "personal"]);
 const createSchema = z.object({
@@ -15,6 +16,7 @@ const createSchema = z.object({
 const signatureSchema = z.object({ signatureText: z.string().trim().min(1).max(100) });
 const decisionSchema = z.object({ decision: z.enum(["approved", "rejected"]), comment: z.string().trim().max(500).optional().default("") });
 const requestSchema = z.object({ requestedAmount: z.number().finite().min(0).max(99_999_999_999.99).optional(), reason: z.string().trim().min(1).max(500) });
+const listSchema = z.object({ pendingOnly: z.stringbool().optional().default(false) });
 
 const editorRoles: Record<z.infer<typeof levelSchema>, readonly string[]> = {
   sales_manager: ["sales_manager"],
@@ -26,6 +28,10 @@ const editorRoles: Record<z.infer<typeof levelSchema>, readonly string[]> = {
 export async function registerGoals(app: FastifyInstance, db: Database) {
   app.get("/api/goals", async (request, reply) => {
     if (!request.currentUser) return reply.code(401).send({ message: "尚未登录" });
+    const query = listSchema.safeParse(request.query);
+    if (!query.success) return reply.code(400).send({ message: "目标查询条件无效" });
+    const access = await resolveGoalAccess(db, request.currentUser);
+    if (!canReadGoals(access)) return reply.code(403).send({ message: "当前角色没有目标查看权限" });
     const result = await db.query(
       `select g.id::text, to_char(g.period_month, 'YYYY-MM') as "periodMonth", g.goal_level as level,
               u.username as "ownerUsername", u.display_name as "ownerName", g.parent_goal_id::text as "parentGoalId",
@@ -36,9 +42,12 @@ export async function registerGoals(app: FastifyInstance, db: Database) {
                         where cg.parent_goal_id=g.id),0)::text as "allocatedAmount"
        from goals g join users u on u.id=g.owner_user_id
        join lateral (select * from goal_versions where goal_id=g.id and status <> 'superseded' order by version_no desc limit 1) v on true
+       where ($1::boolean or g.owner_person_id=any($2::bigint[]))
+         and (not $3::boolean or ${pendingGoalSql("g", "v", 4)})
        order by g.period_month desc,
                 case g.goal_level when 'sales_manager' then 1 when 'department' then 2 when 'group' then 3 else 4 end,
                 u.display_name`,
+      [access.all, access.ownerPersonIds, query.data.pendingOnly, ...pendingGoalValues(request.currentUser)],
     );
     return { goals: result.rows };
   });
@@ -51,15 +60,15 @@ export async function registerGoals(app: FastifyInstance, db: Database) {
     const client = await db.connect();
     try {
       await client.query("begin");
-      const owner = await client.query<{ id: string }>("select id::text from users where lower(username)=lower($1) and is_active", [parsed.data.ownerUsername]);
+      const owner = await client.query<{ id: string; person_id: string }>("select u.id::text,p.id::text as person_id from users u join people p on p.user_id=u.id where lower(u.username)=lower($1) and u.is_active", [parsed.data.ownerUsername]);
       if (!owner.rows[0]) { await client.query("rollback"); return reply.code(404).send({ message: "目标责任人账号不存在" }); }
       if (parsed.data.level === "sales_manager" && owner.rows[0].id !== request.currentUser.id) { await client.query("rollback"); return reply.code(403).send({ message: "销售经理只能录入并签收自己的总目标" }); }
       const month = `${parsed.data.periodMonth}-01`;
       const goal = await client.query<{ id: string }>(
-        `insert into goals (period_month, goal_level, owner_user_id, parent_goal_id)
-         values ($1,$2,$3,$4) on conflict (period_month, goal_level, owner_user_id)
+        `insert into goals (period_month, goal_level, owner_user_id, owner_person_id, parent_goal_id)
+         values ($1,$2,$3,$4,$5) on conflict (period_month, goal_level, owner_user_id)
          do update set parent_goal_id=excluded.parent_goal_id returning id::text`,
-        [month, parsed.data.level, owner.rows[0].id, parsed.data.parentGoalId ?? null],
+        [month, parsed.data.level, owner.rows[0].id, owner.rows[0].person_id, parsed.data.parentGoalId ?? null],
       );
       const pending = await client.query("select 1 from goal_versions where goal_id=$1 and status in ('pending_signature','pending_gm','pending_hr')", [goal.rows[0]!.id]);
       if (pending.rowCount) { await client.query("rollback"); return reply.code(409).send({ message: "该目标已有待确认或待审批版本" }); }

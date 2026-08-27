@@ -8,31 +8,30 @@ import {
   type PerformanceState,
 } from "../domain/performance.js";
 import { hasAnyRole, PERFORMANCE_EDITOR_ROLES } from "./auth.js";
+import { canReadPerformance, pendingGoalSql, pendingGoalValues, performanceScopeSql, performanceScopeValues, resolvePerformanceAccess } from "./authorization.js";
+import { loadFormalReport } from "./formal-reports.js";
+import { OrganizationResolutionError, resolveOrganization } from "./organization.js";
 
 const moneySchema = z.number().finite().min(0).max(99_999_999_999.99);
 const dateSchema = z.iso.date();
 
-const createOrderSchema = z.object({
+const createOrderSchema = z.strictObject({
   orderNo: z.string().trim().min(1).max(100),
   customerName: z.string().trim().min(1).max(200),
   customerUnit: z.string().trim().min(1).max(300),
-  salespersonName: z.string().trim().min(1).max(100),
+  salespersonPersonId: z.coerce.number().int().positive(),
   serviceType: z.string().trim().max(200).optional().default(""),
   sourceReceivedOn: dateSchema,
   amount: moneySchema,
-  departmentName: z.string().trim().min(1).max(100),
-  groupName: z.string().trim().min(1).max(100),
-  leaderName: z.string().trim().max(100).optional().default(""),
-  supervisorName: z.string().trim().max(100).optional().default(""),
   reason: z.string().trim().max(500).optional().default("首次录入"),
 });
 
-const eventBase = { occurredOn: dateSchema, reason: z.string().trim().min(1).max(500), departmentName:z.string().trim().min(1).max(100), groupName:z.string().trim().min(1).max(100), leaderName:z.string().trim().max(100).optional().default(""), supervisorName:z.string().trim().max(100).optional().default("") };
+const eventBase = { occurredOn: dateSchema, reason: z.string().trim().min(1).max(500) };
 const eventSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("revenue_change"), newAmount: moneySchema, ...eventBase }),
-  z.object({ type: z.literal("pause"), ...eventBase }),
-  z.object({ type: z.literal("restart"), ...eventBase }),
-  z.object({ type: z.literal("first_include"), amount: moneySchema.positive(), ...eventBase }),
+  z.strictObject({ type: z.literal("revenue_change"), newAmount: moneySchema, ...eventBase }),
+  z.strictObject({ type: z.literal("pause"), ...eventBase }),
+  z.strictObject({ type: z.literal("restart"), ...eventBase }),
+  z.strictObject({ type: z.literal("first_include"), amount: moneySchema.positive(), ...eventBase }),
 ]);
 
 type OrderRow = {
@@ -40,6 +39,7 @@ type OrderRow = {
   qingflow_order_no: string;
   customer_name: string;
   customer_unit: string;
+  salesperson_person_id: string;
   salesperson_name: string;
   service_type: string | null;
   source_received_on: string;
@@ -66,30 +66,62 @@ function requireEditor(request: { currentUser: import("./auth.js").CurrentUser |
 }
 
 export async function registerPerformance(app: FastifyInstance, db: Database) {
+  app.get("/api/performance/people", async (request, reply) => {
+    const denied = requireEditor(request, reply);
+    if (denied) return denied;
+    const result = await db.query(
+      `select distinct p.id::text as id,p.display_name as "displayName"
+       from people p join org_memberships m on m.person_id=p.id
+       order by p.display_name,p.id`,
+    );
+    return { people: result.rows };
+  });
+
+  app.get("/api/performance/formal-reports/:goalId", async (request, reply) => {
+    if (!request.currentUser) return reply.code(401).send({ message: "尚未登录" });
+    const params = z.object({ goalId: z.coerce.number().int().positive() }).safeParse(request.params);
+    if (!params.success) return reply.code(400).send({ message: "目标标识无效" });
+    const result = await loadFormalReport(db, request.currentUser, params.data.goalId);
+    if (!result.ok) return reply.code(result.statusCode).send(result.body);
+    return result.report;
+  });
+
   app.get("/api/performance/dashboard", async (request, reply) => {
     if (!request.currentUser) return reply.code(401).send({ message: "尚未登录" });
-    const latest = await db.query<{ month: string | null }>("select max(accounting_month)::text as month from performance_events");
+    const access = await resolvePerformanceAccess(db, request.currentUser);
+    if (!canReadPerformance(access)) return reply.code(403).send({ message: "当前角色没有业务查看权限" });
+    const scopeValues = performanceScopeValues(access);
+    const latest = await db.query<{ month: string | null }>(
+      `select max(accounting_month)::text as month from performance_events e where ${performanceScopeSql("e", 1)}`,
+      scopeValues,
+    );
     const month = latest.rows[0]?.month ?? new Date().toISOString().slice(0, 7) + "-01";
     const [metrics, monthly, groups, recent, pending] = await Promise.all([
       db.query<{ total: string; event_count: string; negative_total: string }>(
         `select coalesce(sum(delta_amount),0)::text as total, count(*)::text as event_count,
                 coalesce(sum(delta_amount) filter (where delta_amount < 0),0)::text as negative_total
-         from performance_events where accounting_month = $1`, [month]),
+         from performance_events e where accounting_month = $1 and ${performanceScopeSql("e", 2)}`, [month, ...scopeValues]),
       db.query<{ month: string; total: string }>(
         `select to_char(accounting_month, 'YYYY-MM') as month, sum(delta_amount)::text as total
-         from performance_events where extract(year from accounting_month) = extract(year from $1::date)
-         group by accounting_month order by accounting_month`, [month]),
+         from performance_events e where extract(year from accounting_month) = extract(year from $1::date)
+           and ${performanceScopeSql("e", 2)}
+         group by accounting_month order by accounting_month`, [month, ...scopeValues]),
       db.query<{ name: string; total: string }>(
         `select group_name as name, sum(delta_amount)::text as total
-         from performance_events where accounting_month = $1 group by group_name
-         order by sum(delta_amount) desc limit 5`, [month]),
+         from performance_events e where accounting_month = $1 and ${performanceScopeSql("e", 2)} group by group_name
+         order by sum(delta_amount) desc limit 5`, [month, ...scopeValues]),
       db.query(
         `select o.qingflow_order_no as "orderNo", e.salesperson_name as "salespersonName",
                 e.event_type as "eventType", to_char(e.accounting_month, 'YYYY-MM') as month,
                 e.delta_amount::text as amount, e.group_name as "groupName"
          from performance_events e join performance_orders o on o.id = e.order_id
-         order by e.created_at desc, e.id desc limit 8`),
-      db.query<{ count: string }>("select count(*)::text as count from goal_versions where status in ('pending_signature','pending_gm','pending_hr')"),
+         where ${performanceScopeSql("e", 1)}
+         order by e.created_at desc, e.id desc limit 8`, scopeValues),
+      db.query<{ count: string }>(
+        `select count(*)::text as count from goal_versions v join goals g on g.id=v.goal_id
+         where ${pendingGoalSql("g", "v", 1)}`,
+        pendingGoalValues(request.currentUser),
+      ),
     ]);
     return {
       month: month.slice(0, 7),
@@ -102,28 +134,33 @@ export async function registerPerformance(app: FastifyInstance, db: Database) {
 
   app.get("/api/performance/orders", async (request, reply) => {
     if (!request.currentUser) return reply.code(401).send({ message: "尚未登录" });
+    const access = await resolvePerformanceAccess(db, request.currentUser);
+    if (!canReadPerformance(access)) return reply.code(403).send({ message: "当前角色没有业务查看权限" });
     const query = z.object({ search: z.string().trim().max(100).optional(), limit: z.coerce.number().int().min(1).max(100).default(30) }).safeParse(request.query);
     if (!query.success) return reply.code(400).send({ message: "查询条件无效" });
     const term = query.data.search ? `%${query.data.search}%` : null;
     const result = await db.query(
       `select id::text, qingflow_order_no as "orderNo", customer_name as "customerName",
-              customer_unit as "customerUnit", salesperson_name as "salespersonName", service_type as "serviceType",
+              customer_unit as "customerUnit", performance_orders.salesperson_name as "salespersonName", service_type as "serviceType",
               source_received_on as "sourceReceivedOn", original_amount::text as "originalAmount",
               current_revenue::text as "currentRevenue", counted_amount::text as "countedAmount",
               lifecycle_state as "lifecycleState", posted_at as "postedAt",
               latest.department_name as "departmentName", latest.group_name as "groupName",
               latest.leader_name as "leaderName", latest.supervisor_name as "supervisorName"
        from performance_orders
-       left join lateral (select department_name,group_name,leader_name,supervisor_name from performance_events where order_id=performance_orders.id order by occurred_on desc,id desc limit 1) latest on true
-       where ($1::text is null or qingflow_order_no ilike $1 or salesperson_name ilike $1 or customer_name ilike $1)
+       left join lateral (select salesperson_person_id,department_unit_id,group_unit_id,salesperson_name,department_name,group_name,leader_name,supervisor_name from performance_events where order_id=performance_orders.id order by occurred_on desc,id desc limit 1) latest on true
+       where ($1::text is null or performance_orders.qingflow_order_no ilike $1 or performance_orders.salesperson_name ilike $1 or performance_orders.customer_name ilike $1)
+         and ${performanceScopeSql("latest", 3)}
        order by posted_at desc nulls last, id desc limit $2`,
-      [term, query.data.limit],
+      [term, query.data.limit, ...performanceScopeValues(access)],
     );
     return { orders: result.rows };
   });
 
   app.get("/api/performance/orders/:id/events", async (request, reply) => {
     if (!request.currentUser) return reply.code(401).send({ message: "尚未登录" });
+    const access = await resolvePerformanceAccess(db, request.currentUser);
+    if (!canReadPerformance(access)) return reply.code(403).send({ message: "当前角色没有业务查看权限" });
     const params = z.object({ id: z.coerce.number().int().positive() }).safeParse(request.params);
     if (!params.success) return reply.code(400).send({ message: "订单标识无效" });
     const result = await db.query(
@@ -132,9 +169,10 @@ export async function registerPerformance(app: FastifyInstance, db: Database) {
               resulting_counted_amount::text as "resultingCountedAmount", accounting_month as "accountingMonth",
               occurred_on as "occurredOn", reason, salesperson_name as "salespersonName",
               department_name as "departmentName", group_name as "groupName", created_at as "createdAt"
-       from performance_events where order_id = $1 order by occurred_on, id`,
-      [params.data.id],
+       from performance_events e where order_id = $1 and ${performanceScopeSql("e", 2)} order by occurred_on, id`,
+      [params.data.id, ...performanceScopeValues(access)],
     );
+    if (!result.rowCount) return reply.code(404).send({ message: "订单不存在" });
     return { events: result.rows };
   });
 
@@ -148,26 +186,29 @@ export async function registerPerformance(app: FastifyInstance, db: Database) {
     const client = await db.connect();
     try {
       await client.query("begin");
+      const organization = await resolveOrganization(client, String(input.salespersonPersonId), input.sourceReceivedOn);
       const order = await client.query<{ id: string }>(
         `insert into performance_orders
-          (qingflow_order_no, customer_name, customer_unit, salesperson_name, service_type, source_received_on,
+          (qingflow_order_no, customer_name, customer_unit, salesperson_person_id, salesperson_name, service_type, source_received_on,
            original_amount, current_revenue, counted_amount, lifecycle_state, created_by, posted_at)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now()) returning id::text`,
-        [input.orderNo, input.customerName, input.customerUnit, input.salespersonName, input.serviceType || null,
-         input.sourceReceivedOn, input.amount, decision.next.currentRevenue, decision.next.countedAmount,
-         decision.next.lifecycle, request.currentUser!.id],
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,now()) returning id::text`,
+        [input.orderNo, input.customerName, input.customerUnit, organization.personId, organization.salespersonName,
+         input.serviceType || null, input.sourceReceivedOn, input.amount, decision.next.currentRevenue,
+         decision.next.countedAmount, decision.next.lifecycle, request.currentUser!.id],
       );
       const orderId = order.rows[0]!.id;
       await client.query(
         `insert into performance_events
           (order_id, event_type, delta_amount, resulting_current_revenue, resulting_counted_amount,
            accounting_month, occurred_on, reason, salesperson_name, department_name, group_name,
-           leader_name, supervisor_name, created_by)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+           leader_name, supervisor_name, created_by, salesperson_person_id, department_unit_id,
+           group_unit_id, leader_person_id, supervisor_person_id)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
         [orderId, decision.eventType, decision.deltaAmount, decision.next.currentRevenue,
          decision.next.countedAmount, monthStart(input.sourceReceivedOn), input.sourceReceivedOn, input.reason,
-         input.salespersonName, input.departmentName, input.groupName, input.leaderName || null,
-         input.supervisorName || null, request.currentUser!.id],
+         organization.salespersonName, organization.departmentName, organization.groupName, organization.leaderName,
+         organization.supervisorName, request.currentUser!.id, organization.personId, organization.departmentId,
+         organization.groupId, organization.leaderPersonId, organization.supervisorPersonId],
       );
       await client.query(
         `insert into audit_logs (actor_user_id, action, entity_type, entity_id, after_data, ip_address)
@@ -179,6 +220,7 @@ export async function registerPerformance(app: FastifyInstance, db: Database) {
     } catch (error) {
       await client.query("rollback");
       if ((error as { code?: string }).code === "23505") return reply.code(409).send({ message: "订单编号已存在" });
+      if (error instanceof OrganizationResolutionError) return reply.code(409).send({ message: error.message });
       throw error;
     } finally {
       client.release();
@@ -195,7 +237,7 @@ export async function registerPerformance(app: FastifyInstance, db: Database) {
     try {
       await client.query("begin");
       const found = await client.query<OrderRow>(
-        `select id::text, qingflow_order_no, customer_name, customer_unit, salesperson_name, service_type,
+        `select id::text, qingflow_order_no, customer_name, customer_unit, salesperson_person_id::text, salesperson_name, service_type,
                 source_received_on::text, original_amount::text, current_revenue::text,
                 counted_amount::text, lifecycle_state
          from performance_orders where id = $1 for update`,
@@ -212,16 +254,19 @@ export async function registerPerformance(app: FastifyInstance, db: Database) {
         lifecycle: order.lifecycle_state,
       };
       const decision = decidePerformanceEvent(state, commandFromBody(parsed.data));
+      const organization = await resolveOrganization(client, order.salesperson_person_id, parsed.data.occurredOn);
       await client.query(
         `insert into performance_events
           (order_id, event_type, delta_amount, resulting_current_revenue, resulting_counted_amount,
            accounting_month, occurred_on, reason, salesperson_name, department_name, group_name,
-           leader_name, supervisor_name, created_by)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+           leader_name, supervisor_name, created_by, salesperson_person_id, department_unit_id,
+           group_unit_id, leader_person_id, supervisor_person_id)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
         [params.data.id, decision.eventType, decision.deltaAmount, decision.next.currentRevenue,
          decision.next.countedAmount, monthStart(parsed.data.occurredOn), parsed.data.occurredOn,
-         parsed.data.reason, order.salesperson_name, parsed.data.departmentName, parsed.data.groupName,
-         parsed.data.leaderName || null, parsed.data.supervisorName || null, request.currentUser!.id],
+         parsed.data.reason, organization.salespersonName, organization.departmentName, organization.groupName,
+         organization.leaderName, organization.supervisorName, request.currentUser!.id, organization.personId,
+         organization.departmentId, organization.groupId, organization.leaderPersonId, organization.supervisorPersonId],
       );
       await client.query(
         `update performance_orders set current_revenue = $2, counted_amount = $3, lifecycle_state = $4 where id = $1`,
@@ -237,6 +282,7 @@ export async function registerPerformance(app: FastifyInstance, db: Database) {
     } catch (error) {
       await client.query("rollback");
       if (error instanceof PerformanceRuleError) return reply.code(409).send({ message: error.message });
+      if (error instanceof OrganizationResolutionError) return reply.code(409).send({ message: error.message });
       throw error;
     } finally {
       client.release();

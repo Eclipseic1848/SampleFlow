@@ -66,10 +66,35 @@ test("干净隔离数据库可应用全部现有迁移", async () => {
         "007_temporary_password_expiry.sql",
         "008_session_csrf.sql",
         "009_authentication_state.sql",
+        "010_stable_people_and_organization.sql",
+        "011_organization_import_tracking.sql",
+        "012_organization_coverage_constraints.sql",
+        "013_require_owner_for_active_org_units.sql",
       ]);
     } finally {
       await client.end();
     }
+  });
+});
+
+test("既有启用组织在负责人治理前可升级并安全转为停用",async()=>{
+  await withTestDatabase(async(database)=>{
+    const client=new Client({connectionString:database.url});
+    await client.connect();
+    try{
+      for(const name of [
+        "001_bootstrap.sql","002_identity_and_organization.sql","003_performance_ledger.sql","004_target_workflow.sql",
+        "005_legacy_import_tracking.sql","006_bootstrap_organization_from_ledger.sql","007_temporary_password_expiry.sql",
+        "008_session_csrf.sql","009_authentication_state.sql","010_stable_people_and_organization.sql",
+        "011_organization_import_tracking.sql","012_organization_coverage_constraints.sql",
+      ])await client.query(await readFile(`${migrationsRoot}${name}`,"utf8"));
+      const department=await client.query<{id:string}>("insert into org_units(name,unit_type) values('待治理旧部门','department') returning id::text");
+      await client.query("insert into org_units(name,unit_type,parent_id) values('待治理旧小组','group',$1)",[department.rows[0]!.id]);
+
+      await client.query(await readFile(`${migrationsRoot}013_require_owner_for_active_org_units.sql`,"utf8"));
+      const result=await client.query<{active:string}>("select count(*) filter(where is_active)::text as active from org_units");
+      assert.equal(result.rows[0]!.active,"0");
+    }finally{await client.end();}
   });
 });
 

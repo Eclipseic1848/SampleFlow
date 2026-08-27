@@ -3,17 +3,19 @@ import { z } from "zod";
 import type { Database } from "../db.js";
 import { generateTemporaryPassword, hashPassword, TEMPORARY_PASSWORD_TTL_MS } from "../security/password.js";
 import { hasAnyRole } from "./auth.js";
+import { BUSINESS_DATE_SQL, canReadPerformance, resolveGoalAccess, resolvePerformanceAccess, ROLE_PERMISSION_MATRIX } from "./authorization.js";
 
-const createUserSchema = z.strictObject({ username:z.string().trim().min(2).max(100), displayName:z.string().trim().min(1).max(100), roles:z.array(z.string().trim().min(1)).min(1) });
+const createUserSchema = z.strictObject({ username:z.string().trim().min(2).max(100), displayName:z.string().trim().min(1).max(100), roles:z.array(z.string().trim().min(1)).min(1), personId:z.coerce.number().int().positive().nullable().optional() });
 const statusSchema = z.object({ isActive:z.boolean() });
 const resetSchema = z.strictObject({});
 const unitSchema = z.object({ name:z.string().trim().min(1).max(100), unitType:z.enum(["department","group"]), parentId:z.coerce.number().int().positive().nullable().optional() });
-const assignmentSchema = z.object({ username:z.string().trim().min(1), departmentId:z.coerce.number().int().positive().nullable().optional(), groupId:z.coerce.number().int().positive().nullable().optional(), leaderUsername:z.string().trim().optional(), supervisorUsername:z.string().trim().optional(), effectiveFrom:z.iso.date(), effectiveTo:z.iso.date().nullable().optional() });
+const assignmentSchema = z.strictObject({ personId:z.coerce.number().int().positive(), departmentId:z.coerce.number().int().positive(), groupId:z.coerce.number().int().positive(), leaderPersonId:z.coerce.number().int().positive(), supervisorPersonId:z.coerce.number().int().positive(), effectiveFrom:z.iso.date(), effectiveTo:z.iso.date().nullable().optional() });
 
 function requireAdmin(request:{currentUser:import("./auth.js").CurrentUser|null},reply:{code:(status:number)=>{send:(body:unknown)=>unknown}}){if(!request.currentUser)return reply.code(401).send({message:"尚未登录"});if(!hasAnyRole(request.currentUser,["system_admin"]))return reply.code(403).send({message:"仅系统管理员可执行此操作"});return null;}
 
 export async function registerAdmin(app:FastifyInstance,db:Database){
-  app.get("/api/admin/users",async(request,reply)=>{const denied=requireAdmin(request,reply);if(denied)return denied;const [users,roles]=await Promise.all([db.query(`select u.id::text,u.username,u.display_name as "displayName",u.is_active as "isActive",u.must_change_password as "mustChangePassword",coalesce(array_agg(ur.role_code) filter(where ur.role_code is not null),'{}') as roles from users u left join user_roles ur on ur.user_id=u.id group by u.id order by u.display_name`),db.query(`select code,name from roles order by code`)]);return{users:users.rows,roles:roles.rows};});
+  app.get("/api/admin/users",async(request,reply)=>{const denied=requireAdmin(request,reply);if(denied)return denied;const [users,roles]=await Promise.all([db.query(`select u.id::text,u.username,u.display_name as "displayName",u.is_active as "isActive",u.must_change_password as "mustChangePassword",coalesce(array_agg(ur.role_code) filter(where ur.role_code is not null),'{}') as roles from users u left join user_roles ur on ur.user_id=u.id group by u.id order by u.display_name`),db.query(`select code,name from roles order by code`)]);return{users:users.rows,roles:roles.rows,permissionMatrix:ROLE_PERMISSION_MATRIX};});
+  app.get("/api/admin/people",async(request,reply)=>{const denied=requireAdmin(request,reply);if(denied)return denied;const result=await db.query(`select p.id::text,p.display_name as "displayName",u.username from people p left join users u on u.id=p.user_id order by p.display_name,p.id`);return{people:result.rows};});
   app.post("/api/admin/users",async(request,reply)=>{
     const denied=requireAdmin(request,reply);if(denied)return denied;
     const parsed=createUserSchema.safeParse(request.body);if(!parsed.success)return reply.code(400).send({message:"账号信息不完整或格式无效"});
@@ -22,10 +24,19 @@ export async function registerAdmin(app:FastifyInstance,db:Database){
       await client.query("begin");
       const valid=await client.query<{code:string}>("select code from roles where code=any($1::text[])",[parsed.data.roles]);
       if(valid.rowCount!==new Set(parsed.data.roles).size){await client.query("rollback");return reply.code(400).send({message:"包含不存在的角色"});}
+      if(parsed.data.personId){
+        const person=await client.query<{user_id:string|null}>("select user_id::text from people where id=$1 for update",[parsed.data.personId]);
+        if(!person.rows[0]){await client.query("rollback");return reply.code(404).send({message:"待绑定人员身份不存在"});}
+        if(person.rows[0].user_id){await client.query("rollback");return reply.code(409).send({message:"该人员身份已绑定登录账号"});}
+      }
       const password=await hashPassword(temporaryPassword);
       const user=await client.query<{id:string}>(`insert into users(username,display_name,password_hash,password_salt,must_change_password,temporary_password_expires_at) values($1,$2,$3,$4,true,$5) returning id::text`,[parsed.data.username,parsed.data.displayName,password.hash,password.salt,temporaryPasswordExpiresAt]);
+      if(parsed.data.personId){
+        await client.query("delete from people where user_id=$1 and source_key=$2",[user.rows[0]!.id,`user:${user.rows[0]!.id}`]);
+        await client.query("update people set user_id=$2 where id=$1",[parsed.data.personId,user.rows[0]!.id]);
+      }
       for(const role of parsed.data.roles)await client.query(`insert into user_roles(user_id,role_code,assigned_by) values($1,$2,$3)`,[user.rows[0]!.id,role,request.currentUser!.id]);
-      await client.query(`insert into audit_logs(actor_user_id,action,entity_type,entity_id,after_data,ip_address) values($1,'auth.account_created','user',$2,jsonb_build_object('roles',$3::text[]),$4)`,[request.currentUser!.id,user.rows[0]!.id,parsed.data.roles,request.ip]);
+      await client.query(`insert into audit_logs(actor_user_id,action,entity_type,entity_id,after_data,ip_address) values($1,'auth.account_created','user',$2,jsonb_build_object('roles',$3::text[],'personId',$4::bigint),$5)`,[request.currentUser!.id,user.rows[0]!.id,parsed.data.roles,parsed.data.personId??null,request.ip]);
       await client.query("commit");
       return reply.code(201).send({id:user.rows[0]!.id,temporaryPassword,temporaryPasswordExpiresAt:temporaryPasswordExpiresAt.toISOString()});
     }catch(error){await client.query("rollback");if((error as{code?:string}).code==="23505")return reply.code(409).send({message:"账号名已存在"});throw error;}finally{client.release();}
@@ -61,7 +72,75 @@ export async function registerAdmin(app:FastifyInstance,db:Database){
       return{ok:true,temporaryPassword,temporaryPasswordExpiresAt:temporaryPasswordExpiresAt.toISOString()};
     }catch(error){await client.query("rollback");throw error;}finally{client.release();}
   });
-  app.get("/api/organization",async(request,reply)=>{if(!request.currentUser)return reply.code(401).send({message:"尚未登录"});const [units,assignments]=await Promise.all([db.query(`select u.id::text,u.name,u.unit_type as "unitType",u.parent_id::text as "parentId",p.name as "parentName",u.is_active as "isActive" from org_units u left join org_units p on p.id=u.parent_id order by u.unit_type,u.name`),db.query(`select a.id::text,u.username,u.display_name as "displayName",d.name as "departmentName",g.name as "groupName",a.effective_from as "effectiveFrom",a.effective_to as "effectiveTo" from org_assignments a join users u on u.id=a.user_id left join org_units d on d.id=a.department_id left join org_units g on g.id=a.group_id order by a.effective_from desc,u.display_name`)]);return{units:units.rows,assignments:assignments.rows};});
-  app.post("/api/admin/organization/units",async(request,reply)=>{const denied=requireAdmin(request,reply);if(denied)return denied;const parsed=unitSchema.safeParse(request.body);if(!parsed.success)return reply.code(400).send({message:"组织单元信息无效"});if(parsed.data.unitType==="group"&&!parsed.data.parentId)return reply.code(400).send({message:"小组必须指定所属部门"});try{const result=await db.query(`insert into org_units(name,unit_type,parent_id) values($1,$2,$3) returning id::text`,[parsed.data.name,parsed.data.unitType,parsed.data.parentId??null]);return reply.code(201).send({id:result.rows[0]!.id});}catch(error){if((error as{code?:string}).code==="23505")return reply.code(409).send({message:"同名组织单元已存在"});throw error;}});
-  app.post("/api/admin/organization/assignments",async(request,reply)=>{const denied=requireAdmin(request,reply);if(denied)return denied;const parsed=assignmentSchema.safeParse(request.body);if(!parsed.success)return reply.code(400).send({message:"组织任职信息无效"});const users=await db.query<{id:string;username:string}>("select id::text,username from users where lower(username)=any($1::text[])",[[parsed.data.username,parsed.data.leaderUsername,parsed.data.supervisorUsername].filter(Boolean).map(x=>x!.toLowerCase())]);const find=(name?:string)=>users.rows.find(user=>user.username.toLowerCase()===name?.toLowerCase())?.id;const userId=find(parsed.data.username);if(!userId)return reply.code(404).send({message:"人员账号不存在"});await db.query(`insert into org_assignments(user_id,department_id,group_id,leader_user_id,supervisor_user_id,effective_from,effective_to,created_by) values($1,$2,$3,$4,$5,$6,$7,$8)`,[userId,parsed.data.departmentId??null,parsed.data.groupId??null,find(parsed.data.leaderUsername),find(parsed.data.supervisorUsername),parsed.data.effectiveFrom,parsed.data.effectiveTo??null,request.currentUser!.id]);return reply.code(201).send({ok:true});});
+  app.get("/api/organization",async(request,reply)=>{
+    if(!request.currentUser)return reply.code(401).send({message:"尚未登录"});
+    const [performanceAccess,goalAccess]=await Promise.all([resolvePerformanceAccess(db,request.currentUser),resolveGoalAccess(db,request.currentUser)]);
+    const all=request.currentUser.roles.includes("system_admin")||performanceAccess.all||goalAccess.all;
+    if(!all&&!canReadPerformance(performanceAccess)&&goalAccess.ownerPersonIds.length===0)return reply.code(403).send({message:"当前角色没有组织查看权限"});
+    const [units,assignments]=await Promise.all([
+      db.query(`select u.id::text,u.name,u.unit_type as "unitType",u.parent_id::text as "parentId",p.name as "parentName",u.is_active as "isActive" from org_units u left join org_units p on p.id=u.parent_id where ($1::boolean or u.id=any($3::bigint[]) or u.id=any($4::bigint[]) or exists(select 1 from org_memberships m where m.person_id=$2 and (m.department_id=u.id or m.group_id=u.id))) order by u.unit_type,u.name`,[all,request.currentUser.personId,performanceAccess.groupIds,performanceAccess.departmentIds]),
+      db.query(`select m.id::text,u.username,p.display_name as "displayName",d.name as "departmentName",g.name as "groupName",m.effective_from as "effectiveFrom",m.effective_to as "effectiveTo" from org_memberships m join people p on p.id=m.person_id left join users u on u.id=p.user_id join org_units d on d.id=m.department_id join org_units g on g.id=m.group_id where ($1::boolean or m.person_id=$2 or ((m.group_id=any($3::bigint[]) or m.department_id=any($4::bigint[])) and m.effective_from<=${BUSINESS_DATE_SQL} and (m.effective_to is null or m.effective_to>=${BUSINESS_DATE_SQL}))) order by m.effective_from desc,p.display_name`,[all,request.currentUser.personId,performanceAccess.groupIds,performanceAccess.departmentIds]),
+    ]);
+    return{units:units.rows,assignments:assignments.rows};
+  });
+  app.post("/api/admin/organization/units",async(request,reply)=>{
+    const denied=requireAdmin(request,reply);if(denied)return denied;
+    const parsed=unitSchema.safeParse(request.body);if(!parsed.success)return reply.code(400).send({message:"组织单元信息无效"});
+    if(parsed.data.unitType==="group"&&!parsed.data.parentId)return reply.code(400).send({message:"小组必须指定所属部门"});
+    const client=await db.connect();
+    try{
+      await client.query("begin");
+      const result=await client.query<{id:string}>(`insert into org_units(name,unit_type,parent_id,is_active) values($1,$2,$3,false) returning id::text`,[parsed.data.name,parsed.data.unitType,parsed.data.parentId??null]);
+      await client.query(`insert into audit_logs(actor_user_id,action,entity_type,entity_id,after_data,ip_address) values($1,'organization.unit_created','org_unit',$2,$3::jsonb,$4)`,[request.currentUser!.id,result.rows[0]!.id,JSON.stringify({...parsed.data,isActive:false}),request.ip]);
+      await client.query("commit");return reply.code(201).send({id:result.rows[0]!.id});
+    }catch(error){await client.query("rollback");if((error as{code?:string}).code==="23505")return reply.code(409).send({message:"同名组织单元已存在"});throw error;}finally{client.release();}
+  });
+  app.post("/api/admin/organization/assignments",async(request,reply)=>{
+    const denied=requireAdmin(request,reply);if(denied)return denied;
+    const parsed=assignmentSchema.safeParse(request.body);if(!parsed.success)return reply.code(400).send({message:"组织任职信息无效"});
+    const personIds=[parsed.data.personId,parsed.data.leaderPersonId,parsed.data.supervisorPersonId];
+    const people=await db.query<{id:string}>("select id::text from people where id=any($1::bigint[])",[personIds]);
+    if(new Set(people.rows.map((person)=>person.id)).size!==new Set(personIds.map(String)).size)return reply.code(404).send({message:"成员或负责人身份不存在"});
+    const client=await db.connect();
+    try{
+      await client.query("begin");
+      for(const [personId,unitId,type] of [[parsed.data.leaderPersonId,parsed.data.groupId,"leader"],[parsed.data.supervisorPersonId,parsed.data.departmentId,"supervisor"]] as const){
+        const existing=await client.query(
+          `select 1 from org_responsibilities where person_id=$1 and org_unit_id=$2 and responsibility_type=$3
+             and effective_from<=$4::date
+             and (($5::date is null and effective_to is null)
+                  or ($5::date is not null and (effective_to is null or effective_to>=$5::date)))`,
+          [personId,unitId,type,parsed.data.effectiveFrom,parsed.data.effectiveTo??null],
+        );
+        if(!existing.rowCount){
+          const responsibility=await client.query<{id:string}>(
+            `insert into org_responsibilities(person_id,org_unit_id,responsibility_type,effective_from,effective_to,created_by)
+             values($1,$2,$3,$4,$5,$6) returning id::text`,
+            [personId,unitId,type,parsed.data.effectiveFrom,parsed.data.effectiveTo??null,request.currentUser!.id],
+          );
+          await client.query(
+            `insert into audit_logs(actor_user_id,action,entity_type,entity_id,after_data,ip_address)
+             values($1,'organization.responsibility_created','org_responsibility',$2,$3::jsonb,$4)`,
+            [request.currentUser!.id,responsibility.rows[0]!.id,JSON.stringify({personId,orgUnitId:unitId,responsibilityType:type,effectiveFrom:parsed.data.effectiveFrom,effectiveTo:parsed.data.effectiveTo??null}),request.ip],
+          );
+        }
+      }
+      const membership=await client.query<{id:string}>(
+        `insert into org_memberships(person_id,department_id,group_id,effective_from,effective_to,created_by)
+         values($1,$2,$3,$4,$5,$6) returning id::text`,
+        [parsed.data.personId,parsed.data.departmentId,parsed.data.groupId,parsed.data.effectiveFrom,parsed.data.effectiveTo??null,request.currentUser!.id],
+      );
+      const activated=await client.query<{id:string}>("update org_units set is_active=true where id=any($1::bigint[]) and not is_active returning id::text",[[parsed.data.departmentId,parsed.data.groupId]]);
+      for(const unit of activated.rows){
+        await client.query(
+          `insert into audit_logs(actor_user_id,action,entity_type,entity_id,before_data,after_data,ip_address)
+           values($1,'organization.unit_activated','org_unit',$2,$3::jsonb,$4::jsonb,$5)`,
+          [request.currentUser!.id,unit.id,JSON.stringify({isActive:false}),JSON.stringify({isActive:true}),request.ip],
+        );
+      }
+      await client.query(`insert into audit_logs(actor_user_id,action,entity_type,entity_id,after_data,ip_address) values($1,'organization.assignment_created','org_membership',$2,$3::jsonb,$4)`,[request.currentUser!.id,membership.rows[0]!.id,JSON.stringify(parsed.data),request.ip]);
+      await client.query("commit");
+      return reply.code(201).send({ok:true});
+    }catch(error){await client.query("rollback");if(["23P01","23514","23503","P0001"].includes((error as{code?:string}).code??""))return reply.code(409).send({message:"组织层级、成员任职或负责人有效期冲突"});throw error;}finally{client.release();}
+  });
 }

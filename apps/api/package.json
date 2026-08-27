@@ -13,11 +13,13 @@
     "db:seed": "tsx src/cli/seed.ts",
     "admin:bootstrap": "tsx src/cli/bootstrap-admin.ts",
     "db:import-legacy": "tsx src/cli/import-legacy.ts",
+    "organization:preflight": "tsx src/cli/preflight-organization.ts",
     "auth:cleanup-sessions": "tsx src/cli/cleanup-sessions.ts"
   },
   "dependencies": {
     "@fastify/cookie": "^11.1.2",
     "fastify": "^5.12.1",
+    "fflate": "^0.8.3",
     "pg": "^8.23.0",
     "read-excel-file": "^9.3.10",
     "zod": "^4.4.3"
