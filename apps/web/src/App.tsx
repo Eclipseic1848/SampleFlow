@@ -1,10 +1,16 @@
-import { FormEvent, type ReactNode, useCallback, useEffect, useState } from "react";
-import { Activity, BarChart3, ChevronRight, ClipboardCheck, Database, FileClock, LogOut, Network, PauseCircle, PlayCircle, Plus, RefreshCw, ShieldCheck, Target, UsersRound } from "lucide-react";
+import { FormEvent, type ReactNode, useCallback, useEffect, useId, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { Activity, BarChart3, ChevronRight, ClipboardCheck, Database, FileClock, LogOut, Network, PauseCircle, PlayCircle, Plus, RefreshCw, Search, ShieldCheck, Target, UsersRound, X } from "lucide-react";
 
 type Capabilities = { viewPerformance:boolean; viewGoals:boolean; viewOrganization:boolean; viewApprovals:boolean; editPerformance:boolean; exportPerformance:boolean; exportGoals:boolean; manageAccounts:boolean; manageOrganization:boolean };
 type User = { id: string; personId:string; username: string; displayName: string; mustChangePassword: boolean; roles: string[]; capabilities:Capabilities };
 type AuthState = { status: "loading" } | { status: "guest" } | { status: "authenticated"; user: User };
-type Order = { id: string; orderNo: string; customerName: string; customerUnit: string; salespersonName: string; serviceType: string | null; sourceReceivedOn: string; originalAmount: string; currentRevenue: string; countedAmount: string; lifecycleState: "draft" | "active" | "paused" | "zero"; postedAt: string; departmentName:string; groupName:string; leaderName:string|null; supervisorName:string|null };
+type OrderLifecycle = "draft" | "active" | "paused" | "zero" | "historical_review_required";
+type Order = { id: string; orderNo: string; customerName: string; customerUnit: string; salespersonName: string; serviceType: string | null; sourceReceivedOn: string; originalAmount: string; currentRevenue: string; countedAmount: string; lifecycleState: OrderLifecycle; postedAt: string; departmentName:string; groupName:string; leaderName:string|null; supervisorName:string|null };
+type PerformanceEvent = { id:string; sequence:number; eventType:string; deltaAmount:string; resultingCurrentRevenue:string; resultingCountedAmount:string; resultingLifecycleState:OrderLifecycle|null; accountingMonth:string; occurredOn:string; occurredAt:string; reason:string|null; actorName:string|null; salespersonName:string; departmentName:string|null; groupName:string|null; leaderName:string|null; supervisorName:string|null };
+type AccountingPeriod={periodMonth:string;status:"open"|"closed";version:number;needsReclose:boolean;verifiedAt:string|null;verifiedBy:string|null;closedAt:string|null;closedBy:string|null};
+type AccountingCorrection={id:string;periodMonth:string;orderId:string;orderNo:string;eventType:string;occurredOn:string;reason:string;status:"pending"|"approved"|"rejected"|"consumed"|"revoked";requestedBy:string;reviewedBy:string|null;reviewNote:string|null;expiresAt:string|null};
+type HistoricalReview={id:string;orderId:string;orderNo:string;lifecycleState:"active"|"paused"|"zero";currentRevenue:string;conclusion:string;evidence:string;reason:string;status:"pending"|"approved"|"rejected";requestedBy:string;reviewedBy:string|null;reviewNote:string|null};
 type DashboardData = { month: string; metrics: { total: string; eventCount: number; negativeTotal: string; pendingApprovals: number }; monthly: Array<{ month: string; total: string }>; groups: Array<{ name: string; total: string }>; recent: Array<{ orderNo: string; salespersonName: string; eventType: string; month: string; amount: string; groupName: string }> };
 type Goal = { id: string; periodMonth: string; level: "sales_manager"|"department"|"group"|"personal"; ownerUsername: string; ownerName: string; parentGoalId: string|null; versionId: string; versionNo: string; amount: string; status: string; signatureText: string|null; signedAt: string|null; changeReason: string; allocatedAmount: string };
 type FormalReport = { goalId:string; periodMonth:string; level:Goal["level"]; ownerName:string; targetAmount:string; actualAmount:string; achievementRate:string|null };
@@ -98,7 +104,7 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
   const [active, setActive] = useState<PageId>(user.capabilities.manageAccounts ? "accounts" : pages[0]?.id??"overview");
   async function logout() { await apiFetch("/api/auth/logout", { method: "POST" }); onLogout(); }
   const content = active === "orders"
-    ? <OrdersPage canEdit={user.capabilities.editPerformance} />
+    ? <OrdersPage user={user} />
     : active === "goals"
       ? <GoalsPage user={user} pendingOnly={false} />
       : active === "approvals"
@@ -172,31 +178,117 @@ function Overview({ canEdit, canExport, onEnterOrders }: { canEdit: boolean; can
     </main>;
 }
 
-function OrdersPage({ canEdit }: { canEdit: boolean }) {
+function OrdersPage({ user }: { user: User }) {
+  const canEdit=user.capabilities.editPerformance;
   const [orders, setOrders] = useState<Order[]>([]);
   const [selected, setSelected] = useState<Order | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [message, setMessage] = useState("");
-  const load = useCallback(async () => {
-    const response = await fetch("/api/performance/orders?limit=100");
-    const data = await response.json() as { orders?: Order[]; message?: string };
-    if (!response.ok) throw new Error(data.message ?? "订单加载失败");
-    setOrders(data.orders ?? []);
-  }, []);
-  useEffect(() => { load().catch((error) => setMessage(error instanceof Error ? error.message : "订单加载失败")); }, [load]);
-  async function refresh() { setMessage(""); await load(); }
+  const initialSearch = new URLSearchParams(window.location.search).get("orderSearch") ?? "";
+  const [search, setSearch] = useState(initialSearch);
+  const [committedSearch, setCommittedSearch] = useState(initialSearch);
+  const [isComposing, setIsComposing] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [refreshVersion, setRefreshVersion] = useState(0);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const commitSearch = useCallback((value:string, historyMode:"push"|"replace"="push") => {
+    const normalized=value.trim();
+    const params=new URLSearchParams(window.location.search);
+    if(normalized)params.set("orderSearch",normalized);else params.delete("orderSearch");
+    const next=`${window.location.pathname}${params.size?`?${params.toString()}`:""}${window.location.hash}`;
+    window.history[historyMode==="push"?"pushState":"replaceState"]({},"",next);
+    setCommittedSearch(normalized);
+  },[]);
+  useEffect(()=>{
+    const restore=()=>{const value=new URLSearchParams(window.location.search).get("orderSearch")??"";setSearch(value);setCommittedSearch(value);};
+    window.addEventListener("popstate",restore);return()=>window.removeEventListener("popstate",restore);
+  },[]);
+  useEffect(()=>{
+    if(isComposing||search.trim()===committedSearch)return;
+    const timer=window.setTimeout(()=>commitSearch(search),300);
+    return()=>window.clearTimeout(timer);
+  },[search,isComposing,committedSearch,commitSearch]);
+  useEffect(() => {
+    const controller=new AbortController();setLoading(true);setMessage("");
+    const params=new URLSearchParams({limit:"100"});if(committedSearch)params.set("search",committedSearch);
+    fetch(`/api/performance/orders?${params.toString()}`,{signal:controller.signal}).then(async(response)=>{
+      const data=await response.json() as {orders?:Order[];message?:string};
+      if(!response.ok)throw new Error(data.message??"订单加载失败");
+      setOrders(data.orders??[]);
+    }).catch((error)=>{if(error instanceof DOMException&&error.name==="AbortError")return;setMessage(error instanceof Error?error.message:"订单加载失败");})
+      .finally(()=>{if(!controller.signal.aborted)setLoading(false);});
+    return()=>controller.abort();
+  }, [committedSearch,refreshVersion]);
+  async function refresh() { setRefreshVersion((value)=>value+1); }
+  function clearSearch(){setSearch("");commitSearch("");window.requestAnimationFrame(()=>searchRef.current?.focus());}
   return <main className="dashboard orders-page"><header><div><h1>订单业绩</h1><p>按订单编号维护不可变业绩事件；已入账记录不能覆盖或删除</p></div>{canEdit ? <button className="primary-action" onClick={() => setShowCreate(true)}><Plus size={16}/>录入新订单</button> : null}</header>
     {message ? <p className="page-message" role="status">{message}</p> : null}
     {!canEdit ? <div className="permission-note"><ShieldCheck size={18}/>当前角色仅可查看。只有销售助理及销售助理组长可以录入或调整业绩。</div> : null}
-    <section className="orders-card"><div className="orders-toolbar"><div><h2>订单台账</h2><span>{orders.length} 笔订单</span></div><button className="icon-action" onClick={() => refresh()} aria-label="刷新"><RefreshCw size={17}/></button></div>
-      <div className="orders-table-wrap"><table><thead><tr><th>订单编号</th><th>客户</th><th>业务员</th><th>当前营业额</th><th>计入业绩</th><th>状态</th><th>操作</th></tr></thead><tbody>{orders.length === 0 ? <tr><td colSpan={7} className="empty-cell">暂无订单，请录入第一笔业绩</td></tr> : orders.map((order) => <tr key={order.id}><td>{order.orderNo}</td><td>{order.customerName}</td><td>{order.salespersonName}</td><td>{formatMoney(order.currentRevenue)}</td><td>{formatMoney(order.countedAmount)}</td><td><Status state={order.lifecycleState}/></td><td><button className="table-action" onClick={() => setSelected(order)}>查看 / 调整</button></td></tr>)}</tbody></table></div>
+    <LedgerGovernancePanel user={user} orders={orders} onChanged={refresh}/>
+    <section className="orders-card" aria-labelledby="orders-table-title"><div className="orders-toolbar"><div><h2 id="orders-table-title">订单台账</h2><span role="status">{loading?"正在查询…":`${orders.length} 笔订单`}</span></div><button className="icon-action" onClick={() => refresh()} aria-label="刷新订单"><RefreshCw size={17}/></button></div>
+      <form className="order-search" role="search" noValidate onSubmit={(event)=>{event.preventDefault();if(!isComposing)commitSearch(search);}}><label htmlFor="order-search-input">定位订单</label><div><Search size={17} aria-hidden="true"/><input ref={searchRef} id="order-search-input" type="search" value={search} placeholder="输入订单编号、客户或业务员" onChange={(event)=>setSearch(event.target.value)} onCompositionStart={()=>setIsComposing(true)} onCompositionEnd={(event)=>{setIsComposing(false);setSearch(event.currentTarget.value);}}/>{search?<button type="button" onClick={clearSearch} aria-label="清除订单搜索"><X size={16}/></button>:null}</div><button type="submit">搜索</button></form>
+      <div className="orders-table-wrap"><table><thead><tr><th scope="col">订单编号</th><th scope="col">客户</th><th scope="col">业务员</th><th scope="col">当前营业额</th><th scope="col">计入业绩</th><th scope="col">状态</th><th scope="col">操作</th></tr></thead><tbody>{!loading&&orders.length === 0 ? <tr><td colSpan={7} className="empty-cell">{committedSearch?`没有找到与“${committedSearch}”匹配的订单。`:"暂无订单，请录入第一笔业绩。"}</td></tr> : orders.map((order) => <tr key={order.id}><td>{order.orderNo}</td><td>{order.customerName}</td><td>{order.salespersonName}</td><td>{formatMoney(order.currentRevenue)}</td><td>{formatMoney(order.countedAmount)}</td><td><Status state={order.lifecycleState}/></td><td><button className="table-action" onClick={() => setSelected(order)}>查看 / 调整</button></td></tr>)}</tbody></table></div>
     </section>
     {showCreate ? <CreateOrder onClose={() => setShowCreate(false)} onSaved={async () => { setShowCreate(false); await refresh(); }} /> : null}
     {selected ? <AdjustOrder order={selected} canEdit={canEdit} onClose={() => setSelected(null)} onSaved={async () => { setSelected(null); await refresh(); }} /> : null}
   </main>;
 }
 
-const initialOrder = { orderNo: "", customerName: "", customerUnit: "", salespersonPersonId: "", serviceType: "", sourceReceivedOn: "2026-08-27", amount: "", reason: "首次录入" };
+const initialOrder = { orderNo: "", customerName: "", customerUnit: "", salespersonPersonId: "", serviceType: "", sourceReceivedOn: businessDateToday(), amount: "", reason: "首次录入" };
+
+function previousBusinessMonth():string{const [year,month]=businessDateToday().slice(0,7).split("-").map(Number);return new Date(Date.UTC(year!,month!-2,1)).toISOString().slice(0,7);}
+
+function LedgerGovernancePanel({user,orders,onChanged}:{user:User;orders:Order[];onChanged:()=>Promise<void>}){
+  const isLeader=user.roles.includes("sales_assistant_leader");
+  const isHr=user.roles.includes("hr");
+  const[periods,setPeriods]=useState<AccountingPeriod[]>([]);
+  const[corrections,setCorrections]=useState<AccountingCorrection[]>([]);
+  const[reviews,setReviews]=useState<HistoricalReview[]>([]);
+  const[month,setMonth]=useState(previousBusinessMonth());
+  const[periodNote,setPeriodNote]=useState("");
+  const[decisionNote,setDecisionNote]=useState("");
+  const[message,setMessage]=useState("");
+  const[busy,setBusy]=useState(false);
+  const[correction,setCorrection]=useState({orderId:"",eventType:"revenue_change",occurredOn:`${previousBusinessMonth()}-01`,reason:""});
+  const[review,setReview]=useState({orderId:"",lifecycleState:"active",currentRevenue:"",conclusion:"",evidence:"",reason:""});
+  const[execution,setExecution]=useState<AccountingCorrection|null>(null);
+  const[executionAmount,setExecutionAmount]=useState("");
+  const[executionReason,setExecutionReason]=useState("");
+  const load=useCallback(async()=>{
+    if(!isLeader&&!isHr)return;
+    const responses=await Promise.all([fetch("/api/accounting-periods"),fetch("/api/accounting-corrections"),fetch("/api/historical-order-reviews")]);
+    const data=await Promise.all(responses.map((response)=>response.json()));
+    const failed=responses.findIndex((response)=>!response.ok);
+    if(failed>=0)throw new Error((data[failed] as {message?:string}).message??"账本治理数据加载失败");
+    setPeriods((data[0] as {periods:AccountingPeriod[]}).periods??[]);
+    setCorrections((data[1] as {corrections:AccountingCorrection[]}).corrections??[]);
+    setReviews((data[2] as {reviews:HistoricalReview[]}).reviews??[]);
+  },[isHr,isLeader]);
+  useEffect(()=>{load().catch((error)=>setMessage(error instanceof Error?error.message:"账本治理数据加载失败"));},[load]);
+  useEffect(()=>{if(orders[0]){setCorrection((current)=>current.orderId?current:{...current,orderId:orders[0]!.id});setReview((current)=>current.orderId?current:{...current,orderId:orders[0]!.id});}},[orders]);
+  if(!isLeader&&!isHr)return null;
+  async function post(url:string,payload:unknown){
+    setBusy(true);setMessage("");
+    try{const response=await apiFetch(url,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(payload)});const data=await response.json() as {message?:string};if(!response.ok)throw new Error(data.message??"操作失败");await load();await onChanged();setMessage("操作已记录并刷新。");return true;}
+    catch(error){setMessage(error instanceof Error?error.message:"操作失败");return false;}
+    finally{setBusy(false);}
+  }
+  async function submitCorrection(event:FormEvent){event.preventDefault();const ok=await post("/api/accounting-corrections",{periodMonth:month,orderId:Number(correction.orderId),eventType:correction.eventType,occurredOn:correction.occurredOn,reason:correction.reason});if(ok)setCorrection((current)=>({...current,reason:""}));}
+  async function submitReview(event:FormEvent){event.preventDefault();const ok=await post("/api/historical-order-reviews",{orderId:Number(review.orderId),lifecycleState:review.lifecycleState,currentRevenue:Number(review.currentRevenue),conclusion:review.conclusion,evidence:review.evidence,reason:review.reason});if(ok)setReview((current)=>({...current,currentRevenue:"",conclusion:"",evidence:"",reason:""}));}
+  async function executeCorrection(event:FormEvent){event.preventDefault();if(!execution)return;const payload={type:execution.eventType,reason:executionReason,idempotencyKey:crypto.randomUUID(),correctionRequestId:Number(execution.id),...(execution.eventType==="revenue_change"?{newAmount:Number(executionAmount)}:{}),...(execution.eventType==="first_include"?{amount:Number(executionAmount)}:{})};const ok=await post(`/api/performance/orders/${execution.orderId}/events`,payload);if(ok){setExecution(null);setExecutionAmount("");setExecutionReason("");}}
+  const reviewableOrders=orders.filter((order)=>order.lifecycleState==="historical_review_required");
+  return <section className="governance-card" aria-labelledby="ledger-governance-title"><div className="orders-toolbar"><div><h2 id="ledger-governance-title">记账治理工作台</h2><span>关账、更正与历史核对均保留职责分离和审计</span></div><button className="icon-action" onClick={()=>load().catch((error)=>setMessage(error instanceof Error?error.message:"刷新失败"))} aria-label="刷新记账治理"><RefreshCw size={17}/></button></div>
+    {message?<p className="page-message" role="status">{message}</p>:null}
+    <div className="governance-grid"><form noValidate onSubmit={(event)=>event.preventDefault()}><h3>{isLeader&&isHr?"期间核对与关账":isHr?"人事关账":"组长核对确认"}</h3><label className="field"><span>记账月份</span><input type="month" value={month} onChange={(event)=>{setMonth(event.target.value);setCorrection((current)=>({...current,occurredOn:`${event.target.value}-01`}));}}/></label><Field label={isLeader&&isHr?"核对或关账说明":isHr?"关账说明":"核对说明"} value={periodNote} onChange={setPeriodNote}/>{isLeader?<button type="button" disabled={busy} onClick={()=>post(`/api/accounting-periods/${month}/confirm-close`,{note:periodNote})}>提交核对确认</button>:null}{isHr?<button type="button" disabled={busy} onClick={()=>post(`/api/accounting-periods/${month}/close`,{note:periodNote})}>关闭记账期间</button>:null}</form>
+      {isLeader?<form noValidate onSubmit={submitCorrection}><h3>申请关闭月更正</h3><OrderSelect orders={orders} value={correction.orderId} onChange={(orderId)=>setCorrection((current)=>({...current,orderId}))}/><label className="field"><span>更正类型</span><select value={correction.eventType} onChange={(event)=>setCorrection((current)=>({...current,eventType:event.target.value}))}><option value="revenue_change">营业额修改</option><option value="pause">整单暂停</option><option value="restart">订单重启</option><option value="first_include">首次计入</option></select></label><Field label="原业务日期" type="date" value={correction.occurredOn} onChange={(occurredOn)=>setCorrection((current)=>({...current,occurredOn}))}/><Field label="申请原因" value={correction.reason} onChange={(reason)=>setCorrection((current)=>({...current,reason}))}/><button type="submit" disabled={busy}>提交更正申请</button></form>:null}
+      {isLeader?<form noValidate onSubmit={submitReview}><h3>提交历史订单核对</h3><OrderSelect orders={reviewableOrders} value={review.orderId} onChange={(orderId)=>setReview((current)=>({...current,orderId}))}/><label className="field"><span>核对后状态</span><select value={review.lifecycleState} onChange={(event)=>setReview((current)=>({...current,lifecycleState:event.target.value}))}><option value="active">正向计入</option><option value="paused">已暂停</option><option value="zero">零金额</option></select></label><Field label="核对后当前营业额" type="number" value={review.currentRevenue} onChange={(currentRevenue)=>setReview((current)=>({...current,currentRevenue}))}/><Field label="核对结论" value={review.conclusion} onChange={(conclusion)=>setReview((current)=>({...current,conclusion}))}/><Field label="核对依据" value={review.evidence} onChange={(evidence)=>setReview((current)=>({...current,evidence}))}/><Field label="核对原因" value={review.reason} onChange={(reason)=>setReview((current)=>({...current,reason}))}/><button type="submit" disabled={busy||!reviewableOrders.length}>提交人事审批</button></form>:null}</div>
+    {isHr?<label className="field governance-decision"><span>审批意见</span><input value={decisionNote} onChange={(event)=>setDecisionNote(event.target.value)} placeholder="批准、驳回或撤销前填写"/></label>:null}
+    <div className="governance-lists"><div><h3>记账期间</h3>{periods.length?<ul>{periods.map((period)=><li key={period.periodMonth}><strong>{period.periodMonth.slice(0,7)}</strong><span>{period.status==="closed"?`已关闭 · 版本 ${period.version}`:"开放"}{period.needsReclose?" · 待重新关账":""}</span></li>)}</ul>:<p>尚无期间治理记录。</p>}</div><div><h3>更正申请</h3>{corrections.length?<ul>{corrections.map((item)=><li key={item.id}><strong>{item.orderNo} · {eventTypeName(item.eventType)}</strong><span>{item.periodMonth.slice(0,7)} · {item.status} · 申请人 {item.requestedBy}</span><div className="row-actions">{isHr&&item.status==="pending"?<><button onClick={()=>post(`/api/accounting-corrections/${item.id}/approve`,{note:decisionNote})}>批准</button><button onClick={()=>post(`/api/accounting-corrections/${item.id}/reject`,{note:decisionNote})}>驳回</button></>:null}{isHr&&item.status==="approved"?<button onClick={()=>post(`/api/accounting-corrections/${item.id}/revoke`,{note:decisionNote})}>撤销</button>:null}{isLeader&&item.status==="approved"?<button onClick={()=>setExecution(item)}>执行更正</button>:null}</div></li>)}</ul>:<p>暂无更正申请。</p>}</div><div><h3>历史核对</h3>{reviews.length?<ul>{reviews.map((item)=><li key={item.id}><strong>{item.orderNo} · {item.conclusion}</strong><span>{item.status} · 核对人 {item.requestedBy} · 依据 {item.evidence}</span>{isHr&&item.status==="pending"?<div className="row-actions"><button onClick={()=>post(`/api/historical-order-reviews/${item.id}/approve`,{note:decisionNote})}>批准并解析</button><button onClick={()=>post(`/api/historical-order-reviews/${item.id}/reject`,{note:decisionNote})}>驳回</button></div>:null}</li>)}</ul>:<p>暂无历史核对记录。</p>}</div></div>
+    {execution?<Modal title={`执行更正 · ${execution.orderNo}`} note={`获批范围：${execution.periodMonth.slice(0,7)} / ${eventTypeName(execution.eventType)}`} onClose={()=>setExecution(null)}><form noValidate className="business-form" onSubmit={executeCorrection}>{["revenue_change","first_include"].includes(execution.eventType)?<Field label={execution.eventType==="revenue_change"?"调整后营业额":"首次计入金额"} type="number" value={executionAmount} onChange={setExecutionAmount}/>:null}<Field label="执行原因" value={executionReason} onChange={setExecutionReason}/><div className="modal-actions"><button type="button" onClick={()=>setExecution(null)}>取消</button><button type="submit" disabled={busy}>确认追加更正事件</button></div></form></Modal>:null}
+  </section>;
+}
+
+function OrderSelect({orders,value,onChange}:{orders:Order[];value:string;onChange:(value:string)=>void}){return <label className="field"><span>订单</span><select aria-label="订单" value={orders.some((order)=>order.id===value)?value:""} onChange={(event)=>onChange(event.target.value)}><option value="">请选择当前列表中的订单</option>{orders.map((order)=><option key={order.id} value={order.id}>{order.orderNo} · {order.customerName}</option>)}</select></label>;}
 
 function CreateOrder({ onClose, onSaved }: { onClose: () => void; onSaved: () => Promise<void> }) {
   const [form, setForm] = useState(initialOrder);
@@ -223,28 +315,44 @@ function CreateOrder({ onClose, onSaved }: { onClose: () => void; onSaved: () =>
 }
 
 function AdjustOrder({ order, canEdit, onClose, onSaved }: { order: Order; canEdit: boolean; onClose: () => void; onSaved: () => Promise<void> }) {
-  const allowed = order.lifecycleState === "active" ? ["revenue_change","pause"] : order.lifecycleState === "paused" ? ["restart"] : order.lifecycleState === "zero" ? ["first_include"] : [];
-  const [type, setType] = useState(allowed[0] ?? "");
+  const [events,setEvents]=useState<PerformanceEvent[]>([]);
+  const [allowed,setAllowed]=useState<string[]>([]);
+  const [lifecycle,setLifecycle]=useState<OrderLifecycle>(order.lifecycleState);
+  const [loading,setLoading]=useState(true);
+  const [type, setType] = useState("");
   const [amount, setAmount] = useState("");
-  const [occurredOn, setOccurredOn] = useState("2026-08-27");
   const [reason, setReason] = useState("");
   const [error, setError] = useState("");
+  const [saving,setSaving]=useState(false);
+  const idempotencyKey=useRef(crypto.randomUUID());
+  useEffect(()=>{
+    const controller=new AbortController();
+    fetch(`/api/performance/orders/${order.id}/events`,{signal:controller.signal}).then(async(response)=>{
+      const data=await response.json() as {events?:PerformanceEvent[];lifecycleState?:OrderLifecycle;allowedActions?:string[];message?:string};
+      if(!response.ok)throw new Error(data.message??"事件链加载失败");
+      const nextAllowed=data.allowedActions??[];setEvents(data.events??[]);setLifecycle(data.lifecycleState??order.lifecycleState);setAllowed(nextAllowed);setType((current)=>nextAllowed.includes(current)?current:(nextAllowed[0]??""));
+    }).catch((failure)=>{if(failure instanceof DOMException&&failure.name==="AbortError")return;setError(failure instanceof Error?failure.message:"事件链加载失败");}).finally(()=>{if(!controller.signal.aborted)setLoading(false);});
+    return()=>controller.abort();
+  },[order.id,order.lifecycleState]);
   async function submit(event: FormEvent) {
-    event.preventDefault(); setError("");
-    const payload = { type, occurredOn, reason, ...(type === "revenue_change" ? { newAmount: Number(amount) } : {}), ...(type === "first_include" ? { amount: Number(amount) } : {}) };
-    const response = await apiFetch(`/api/performance/orders/${order.id}/events`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
-    const data = await response.json() as { message?: string };
-    if (!response.ok) { setError(data.message ?? "调整入账失败"); return; }
-    await onSaved();
+    event.preventDefault();if(saving)return;setSaving(true);setError("");
+    const payload = { type, reason, idempotencyKey:idempotencyKey.current, ...(type === "revenue_change" ? { newAmount: Number(amount) } : {}), ...(type === "first_include" ? { amount: Number(amount) } : {}) };
+    try{
+      const response = await apiFetch(`/api/performance/orders/${order.id}/events`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
+      const data = await response.json() as { message?: string };
+      if (!response.ok) { setError(data.message ?? "调整入账失败"); return; }
+      await onSaved();
+    }finally{setSaving(false);}
   }
-  return <Modal title={order.orderNo} note={`${order.customerName} · 当前营业额 ${formatMoney(order.currentRevenue)} · 计入 ${formatMoney(order.countedAmount)}`} onClose={onClose}>{canEdit && allowed.length ? <form noValidate className="business-form" onSubmit={submit}><div className="event-options">{allowed.includes("revenue_change") ? <button type="button" className={type==="revenue_change"?"selected":""} onClick={() => setType("revenue_change")}><RefreshCw size={17}/>修改营业额</button> : null}{allowed.includes("pause") ? <button type="button" className={type==="pause"?"selected":""} onClick={() => setType("pause")}><PauseCircle size={17}/>整单暂停</button> : null}{allowed.includes("restart") ? <button type="button" className={type==="restart"?"selected":""} onClick={() => setType("restart")}><PlayCircle size={17}/>订单重启</button> : null}{allowed.includes("first_include") ? <button type="button" className={type==="first_include"?"selected":""} onClick={() => setType("first_include")}><Plus size={17}/>首次计入</button> : null}</div><p className="form-note">本次组织归属将按业务员和事件日期自动解析。</p><div className="form-grid">{type === "revenue_change" || type === "first_include" ? <Field label={type === "revenue_change" ? "调整后营业额" : "首次计入金额"} value={amount} type="number" onChange={setAmount}/> : null}<Field label="事件发生日期" value={occurredOn} type="date" onChange={setOccurredOn}/><Field label="原因（必填）" value={reason} onChange={setReason}/></div>{error ? <p className="form-error">{error}</p> : null}<div className="modal-actions"><button type="button" onClick={onClose}>取消</button><button type="submit">确认追加事件</button></div></form> : <div className="permission-note">当前订单状态没有可执行操作，或当前角色仅可查看。</div>}</Modal>;
+  return <Modal title={order.orderNo} note={`${order.customerName} · 当前营业额 ${formatMoney(order.currentRevenue)} · 计入 ${formatMoney(order.countedAmount)}`} onClose={onClose}><section className="event-ledger" aria-labelledby="event-ledger-title"><div className="event-ledger-heading"><div><h3 id="event-ledger-title">不可变事件链</h3><p>{loading?"正在读取事件…":`${events.length} 条事件 · 按服务端账本序号排列`}</p></div><Status state={lifecycle}/></div>{!loading&&events.length?<ol>{events.map((item)=><li key={item.id}><span className="event-sequence" aria-label={`第 ${item.sequence} 条事件`}>{item.sequence}</span><div className="event-content"><div className="event-summary"><strong>{eventTypeName(item.eventType)}</strong><b className={Number(item.deltaAmount)<0?"negative":""}>{Number(item.deltaAmount)>0?"+":""}{formatMoney(item.deltaAmount)}</b>{item.resultingLifecycleState?<Status state={item.resultingLifecycleState}/>:<span className="legacy-semantic-note">原始状态未推断</span>}</div><dl><div><dt>业务日 / 记账月</dt><dd>{item.occurredOn} / {item.accountingMonth.slice(0,7)}</dd></div><div><dt>操作时间</dt><dd>{formatOperationTime(item.occurredAt)}</dd></div><div><dt>投影结果</dt><dd>营业额 {formatMoney(item.resultingCurrentRevenue)} · 计入 {formatMoney(item.resultingCountedAmount)}</dd></div><div><dt>原因 / 操作者</dt><dd>{item.reason||"—"} / {item.actorName||"历史导入"}</dd></div><div><dt>组织快照</dt><dd>{[item.departmentName,item.groupName].filter(Boolean).join(" / ")||"—"} · 组长 {item.leaderName||"—"} · 主管 {item.supervisorName||"—"}</dd></div></dl></div></li>)}</ol>:!loading&&!error?<p className="event-empty">没有可显示的事件。</p>:null}</section>{error ? <p className="form-error event-error" role="alert">{error}</p> : null}{!loading&&canEdit && allowed.length ? <form noValidate className="business-form event-form" onSubmit={submit}><div className="event-options">{allowed.includes("revenue_change") ? <button type="button" className={type==="revenue_change"?"selected":""} onClick={() => setType("revenue_change")}><RefreshCw size={17}/>修改营业额</button> : null}{allowed.includes("pause") ? <button type="button" className={type==="pause"?"selected":""} onClick={() => setType("pause")}><PauseCircle size={17}/>整单暂停</button> : null}{allowed.includes("restart") ? <button type="button" className={type==="restart"?"selected":""} onClick={() => setType("restart")}><PlayCircle size={17}/>订单重启</button> : null}{allowed.includes("first_include") ? <button type="button" className={type==="first_include"?"selected":""} onClick={() => setType("first_include")}><Plus size={17}/>首次计入</button> : null}</div><p className="form-note">操作时间和记账月由服务器确定，组织快照按该业务日的有效任职自动解析。</p><div className="form-grid">{type === "revenue_change" || type === "first_include" ? <Field label={type === "revenue_change" ? "调整后营业额" : "首次计入金额"} value={amount} type="number" onChange={setAmount}/> : null}<Field label="原因（必填）" value={reason} onChange={setReason}/></div><div className="modal-actions"><button type="button" onClick={onClose}>取消</button><button type="submit" disabled={saving} aria-busy={saving}>{saving?"正在追加…":"确认追加事件"}</button></div></form> : !loading?<div className="permission-note">{lifecycle==="historical_review_required"?"该历史订单需要先完成核对与人事批准，当前不能追加事件。":"当前订单状态没有可执行操作，或当前角色仅可查看。"}</div>:null}</Modal>;
 }
 
 function Field({ label, value, onChange, type="text" }: { label: string; value: string; onChange: (value: string) => void; type?: string }) { return <label className="field"><span>{label}</span><input required value={value} type={type} min={type === "number" ? "0" : undefined} step={type === "number" ? "0.01" : undefined} onChange={(event) => onChange(event.target.value)}/></label>; }
-function Modal({ title, note, onClose, children }: { title: string; note: string; onClose: () => void; children: ReactNode }) { return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="modal" role="dialog" aria-modal="true"><header><div><h2>{title}</h2><p>{note}</p></div><button onClick={onClose} aria-label="关闭">×</button></header>{children}</section></div>; }
-function Status({ state }: { state: Order["lifecycleState"] }) { const names = { draft:"草稿", active:"正向计入", paused:"已暂停", zero:"零金额" }; return <span className={`status status-${state}`}>{names[state]}</span>; }
+function Modal({ title, note, onClose, children }: { title: string; note: string; onClose: () => void; children: ReactNode }) { const titleId=useId();const noteId=useId();const dialogRef=useRef<HTMLElement>(null);const closeRef=useRef(onClose);closeRef.current=onClose;useEffect(()=>{const prior=document.activeElement instanceof HTMLElement?document.activeElement:null;const root=document.getElementById("root");const priorOverflow=document.body.style.overflow;root?.setAttribute("inert","");root?.setAttribute("aria-hidden","true");document.body.style.overflow="hidden";const dialog=dialogRef.current;dialog?.focus();function keydown(event:KeyboardEvent){if(event.key==="Escape"){event.preventDefault();closeRef.current();return;}if(event.key!=="Tab"||!dialog)return;const controls=[...dialog.querySelectorAll<HTMLElement>('button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[href],[tabindex]:not([tabindex="-1"])')].filter((item)=>!item.hasAttribute("hidden"));if(!controls.length){event.preventDefault();dialog.focus();return;}const first=controls[0]!;const last=controls.at(-1)!;if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus();}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus();}}document.addEventListener("keydown",keydown);return()=>{document.removeEventListener("keydown",keydown);root?.removeAttribute("inert");root?.removeAttribute("aria-hidden");document.body.style.overflow=priorOverflow;prior?.focus();};},[]);return createPortal(<div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section ref={dialogRef} tabIndex={-1} className="modal" role="dialog" aria-modal="true" aria-labelledby={titleId} aria-describedby={noteId}><header><div><h2 id={titleId}>{title}</h2><p id={noteId}>{note}</p></div><button onClick={onClose} aria-label="关闭">×</button></header>{children}</section></div>,document.body); }
+function Status({ state }: { state: OrderLifecycle }) { const names:Record<OrderLifecycle,string> = { draft:"草稿", active:"正向计入", paused:"已暂停", zero:"零金额",historical_review_required:"待历史核对" }; return <span className={`status status-${state}`}>{names[state]}</span>; }
 function formatMoney(value: string | number) { return new Intl.NumberFormat("zh-CN", { style: "currency", currency: "CNY", minimumFractionDigits: 2 }).format(Number(value)); }
-function eventTypeName(type: string) { return ({ initial:"首次录入", revenue_change:"营业额修改", pause:"整单暂停", restart:"订单重启", first_include:"首次计入", legacy_adjustment:"历史迁移" } as Record<string,string>)[type] ?? type; }
+function formatOperationTime(value:string){return new Intl.DateTimeFormat("zh-CN",{timeZone:"Asia/Shanghai",year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false}).format(new Date(value));}
+function eventTypeName(type: string) { return ({ initial:"首次录入", revenue_change:"营业额修改", pause:"整单暂停", restart:"订单重启", first_include:"首次计入", legacy_adjustment:"历史迁移",historical_review_resolution:"历史核对解析" } as Record<string,string>)[type] ?? type; }
 function goalLevelName(level: string) { return ({ sales_manager:"销售经理总目标", department:"部门目标", group:"小组目标", personal:"个人目标" } as Record<string,string>)[level] ?? level; }
 function goalStatusName(status: string) { return ({ draft:"草稿", pending_signature:"待责任人签名", pending_gm:"待总经理审批", pending_hr:"待人事审批", active:"已生效", rejected:"已拒绝", superseded:"已替代" } as Record<string,string>)[status] ?? status; }
 

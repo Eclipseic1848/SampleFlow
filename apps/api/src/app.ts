@@ -7,6 +7,7 @@ import { registerAuth } from "./modules/auth.js";
 import { registerExports } from "./modules/exports.js";
 import { registerGoals } from "./modules/goals.js";
 import { registerPerformance } from "./modules/performance.js";
+import { registerAccountingPeriods } from "./modules/accounting-periods.js";
 
 type BuildAppOptions = {
   clock?: () => Date;
@@ -21,7 +22,8 @@ export async function buildApp(options: BuildAppOptions = {}) {
 
   await app.register(cookie);
   await registerAuth(app, database, options.clock);
-  await registerPerformance(app, database);
+  await registerAccountingPeriods(app, database, options.clock);
+  await registerPerformance(app, database, options.clock);
   await registerGoals(app, database);
   await registerAdmin(app, database);
   await registerExports(app, database);

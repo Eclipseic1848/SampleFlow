@@ -327,7 +327,7 @@ test("人员跨组后对旧订单暂停，正负事件分别归属发生时组�
       assert.equal(created.statusCode, 201, created.body);
       const paused = await app.inject({
         method:"POST", url:`/api/performance/orders/${created.json().id}/events`, headers,
-        payload:{ type:"pause", occurredOn:"2026-09-01", reason:"转组后暂停" },
+        payload:{ type:"pause", reason:"转组后暂停",idempotencyKey:"transfer-pause" },
       });
       assert.equal(paused.statusCode, 201, paused.body);
 
@@ -343,7 +343,7 @@ test("人员跨组后对旧订单暂停，正负事件分别归属发生时组�
         { group_name:"乙组", total:"-100.00" },
         { group_name:"甲组", total:"100.00" },
       ]);
-    });
+    },{clock:()=>new Date("2026-09-01T01:00:00.000Z")});
   });
 });
 
@@ -492,12 +492,14 @@ test("账号管理接口返回与服务端授权同源的只读角色权限矩�
       const cookie = await loginCookie(app, "scope_admin");
       const response = await app.inject({ method: "GET", url: "/api/admin/users", headers: { cookie } });
       assert.equal(response.statusCode, 200, response.body);
-      const matrix = response.json().permissionMatrix as Array<{ code: string; businessScope: string; forbidden: string[] }>;
+      const matrix = response.json().permissionMatrix as Array<{ code: string; businessScope: string; businessOperations:string[]; forbidden: string[] }>;
       assert.equal(matrix.find((role) => role.code === "system_admin")?.businessScope, "none");
       assert.ok(matrix.find((role) => role.code === "system_admin")?.forbidden.includes("业务查看与导出"));
       assert.equal(matrix.find((role) => role.code === "salesperson")?.businessScope, "self");
       assert.equal(matrix.find((role) => role.code === "sales_leader")?.businessScope, "group");
       assert.equal(matrix.find((role) => role.code === "sales_supervisor")?.businessScope, "department");
+      assert.ok(matrix.find((role) => role.code === "sales_assistant_leader")?.businessOperations.includes("月度核对与关闭月更正"));
+      assert.ok(matrix.find((role) => role.code === "hr")?.businessOperations.includes("记账期间关闭与更正审批"));
     });
   });
 });
