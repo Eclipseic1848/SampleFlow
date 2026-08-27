@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.env
+.env.*.local
+coverage/
+*.log
+*.tsbuildinfo
+.vite/
+.sampleflow/
+
+# 原始业务数据与需求材料只保留在本地，禁止提交到公开仓库
+*.xlsx
+*.docx
+~$*

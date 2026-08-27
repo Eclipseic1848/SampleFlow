@@ -1,0 +1,12 @@
+import type { FastifyInstance } from "fastify";
+import { db } from "../db.js";
+import { hasAnyRole } from "./auth.js";
+
+function csvCell(value:unknown):string{if(value===null||value===undefined)return "";let text=String(value);if(/^[=+\-@]/.test(text))text=`'${text}`;return `"${text.replaceAll('"','""')}"`;}
+function csv(rows:unknown[][]):string{return "\ufeff"+rows.map((row)=>row.map(csvCell).join(",")).join("\r\n");}
+function requireExporter(request:{currentUser:import("./auth.js").CurrentUser|null},reply:{code:(status:number)=>{send:(body:unknown)=>unknown}}){if(!request.currentUser)return reply.code(401).send({message:"尚未登录"});if(!hasAnyRole(request.currentUser,["hr","general_manager"]))return reply.code(403).send({message:"仅人事部及总经理可导出数据"});return null;}
+
+export async function registerExports(app:FastifyInstance){
+  app.get("/api/exports/performance.csv",async(request,reply)=>{const denied=requireExporter(request,reply);if(denied)return denied;const result=await db.query(`select o.qingflow_order_no,e.occurred_on::text,e.accounting_month::text,e.event_type,e.delta_amount::text,e.resulting_current_revenue::text,e.resulting_counted_amount::text,e.salesperson_name,e.department_name,e.group_name,e.reason from performance_events e join performance_orders o on o.id=e.order_id order by e.occurred_on,e.id`);const rows:unknown[][]=[["订单编号","发生日期","记账月份","事件类型","变动金额","当前营业额","计入业绩","业务员","部门","小组","原因"],...result.rows.map((row)=>Object.values(row))];return reply.header("content-type","text/csv; charset=utf-8").header("content-disposition",`attachment; filename="sampleflow-performance-${new Date().toISOString().slice(0,10)}.csv"`).send(csv(rows));});
+  app.get("/api/exports/goals.csv",async(request,reply)=>{const denied=requireExporter(request,reply);if(denied)return denied;const result=await db.query(`select g.period_month::text,g.goal_level,u.username,u.display_name,v.version_no::text,v.amount::text,v.status,v.signature_text,v.signed_at::text,v.change_reason from goals g join users u on u.id=g.owner_user_id join goal_versions v on v.goal_id=g.id order by g.period_month,g.goal_level,u.display_name,v.version_no`);const rows:unknown[][]=[["目标月份","目标层级","责任人账号","责任人姓名","版本","金额","状态","签名","签名时间","变更原因"],...result.rows.map((row)=>Object.values(row))];return reply.header("content-type","text/csv; charset=utf-8").header("content-disposition",`attachment; filename="sampleflow-goals-${new Date().toISOString().slice(0,10)}.csv"`).send(csv(rows));});
+}

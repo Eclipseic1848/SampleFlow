@@ -1,0 +1,7 @@
+node_modules
+apps/*/node_modules
+apps/*/dist
+.git
+.env
+*.log
+原始数据.xlsx

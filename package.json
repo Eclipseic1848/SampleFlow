@@ -1,0 +1,27 @@
+{
+  "name": "sampleflow",
+  "version": "1.0.0",
+  "private": true,
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "workspaces": [
+    "apps/api",
+    "apps/web"
+  ],
+  "scripts": {
+    "dev": "concurrently --kill-others --names API,WEB --prefix-colors blue,green \"npm:dev:api\" \"npm:dev:web\"",
+    "dev:api": "npm run dev --workspace @sampleflow/api",
+    "dev:web": "npm run dev --workspace @sampleflow/web",
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "db:migrate": "npm run db:migrate --workspace @sampleflow/api",
+    "db:seed": "npm run db:seed --workspace @sampleflow/api",
+    "db:import-legacy": "npm run db:import-legacy --workspace @sampleflow/api"
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.5",
+    "typescript": "^7.0.2"
+  }
+}
