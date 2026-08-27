@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: superseded by ADR-0022
 ---
 
 # 轻流持有订单基础事实，SampleFlow 初期人工转录

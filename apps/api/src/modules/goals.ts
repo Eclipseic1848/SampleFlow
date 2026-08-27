@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { db } from "../db.js";
+import type { Database } from "../db.js";
 import { hasAnyRole } from "./auth.js";
 
 const levelSchema = z.enum(["sales_manager", "department", "group", "personal"]);
@@ -23,7 +23,7 @@ const editorRoles: Record<z.infer<typeof levelSchema>, readonly string[]> = {
   personal: ["sales_leader", "sales_supervisor"],
 };
 
-export async function registerGoals(app: FastifyInstance) {
+export async function registerGoals(app: FastifyInstance, db: Database) {
   app.get("/api/goals", async (request, reply) => {
     if (!request.currentUser) return reply.code(401).send({ message: "尚未登录" });
     const result = await db.query(

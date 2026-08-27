@@ -242,6 +242,8 @@ th { color: #68778a; background: #fafbfc; font-weight: 600; }
 .orders-table-wrap { overflow-x: auto; }
 .empty-cell { padding: 54px 20px; color: var(--muted); text-align: center; }
 .table-action { padding: 6px 9px; border: 1px solid #bfd0f4; border-radius: 5px; color: var(--blue); background: #f6f9ff; cursor: pointer; }
+.table-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.password-strength { margin: 8px 0 0; color: #596779; font-size: 12px; }
 .status { padding: 4px 8px; border-radius: 999px; font-size: 11px; font-weight: 700; }
 .status-active { color: #147465; background: #e3f5f1; }
 .status-paused { color: #a63232; background: #fdeaea; }
@@ -262,6 +264,9 @@ th { color: #68778a; background: #fafbfc; font-weight: 600; }
 .modal-actions { margin-top: 24px; display: flex; justify-content: flex-end; gap: 10px; }
 .modal-actions button { width: auto; height: 40px; margin: 0; border: 1px solid var(--line); border-radius: 6px; color: #39495d; background: #fff; }
 .modal-actions button[type="submit"] { border-color: var(--blue); color: #fff; background: var(--blue); }
+.temporary-password-result { padding: 22px 24px 24px; display: grid; gap: 12px; }
+.temporary-password-result p, .temporary-password-result span { margin: 0; color: var(--muted); font-size: 13px; }
+.temporary-password-result strong { padding: 12px; border: 1px solid #bfd0f4; border-radius: 6px; color: #173f7a; background: #f6f9ff; font-family: Consolas, monospace; font-size: 17px; overflow-wrap: anywhere; }
 .event-options { margin-bottom: 20px; display: flex; flex-wrap: wrap; gap: 9px; }
 .event-options button { width: auto; height: 40px; margin: 0; border: 1px solid var(--line); color: #536176; background: #fff; }
 .event-options button.selected { border-color: var(--blue); color: var(--blue); background: #eef4ff; }

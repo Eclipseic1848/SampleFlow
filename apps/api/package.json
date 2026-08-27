@@ -8,9 +8,12 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test src/**/*.test.ts",
+    "test:integration": "node --import tsx --test src/**/*.integration.test.ts",
     "db:migrate": "tsx src/cli/migrate.ts",
     "db:seed": "tsx src/cli/seed.ts",
-    "db:import-legacy": "tsx src/cli/import-legacy.ts"
+    "admin:bootstrap": "tsx src/cli/bootstrap-admin.ts",
+    "db:import-legacy": "tsx src/cli/import-legacy.ts",
+    "auth:cleanup-sessions": "tsx src/cli/cleanup-sessions.ts"
   },
   "dependencies": {
     "@fastify/cookie": "^11.1.2",

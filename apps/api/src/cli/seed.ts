@@ -13,6 +13,10 @@ const roles = [
   ["general_manager", "总经理"],
 ] as const;
 
+if ((process.env.NODE_ENV ?? "development") === "production") {
+  throw new Error("生产环境禁止运行 db:seed；请使用显式 admin:bootstrap 作业");
+}
+
 for (const [code, name] of roles) {
   await db.query(
     `insert into roles (code, name) values ($1, $2)
@@ -21,44 +25,29 @@ for (const [code, name] of roles) {
   );
 }
 
-if ((process.env.NODE_ENV ?? "development") !== "production") {
-  const password = "SampleFlow@2026";
-  for (const [roleCode, roleName] of roles) {
-    const username = roleCode;
-    const existing = await db.query<{ id: string }>(
-      "select id::text from users where lower(username) = lower($1)",
-      [username],
-    );
-    let userId = existing.rows[0]?.id;
-    if (!userId) {
-      const { hash, salt } = await hashPassword(password);
-      const inserted = await db.query<{ id: string }>(
-        `insert into users (username, display_name, password_hash, password_salt, must_change_password)
-         values ($1, $2, $3, $4, false) returning id::text`,
-        [username, `${roleName}演示`, hash, salt],
-      );
-      userId = inserted.rows[0]!.id;
-    }
-    await db.query(
-      `insert into user_roles (user_id, role_code) values ($1, $2)
-       on conflict (user_id, role_code) do nothing`,
-      [userId, roleCode],
-    );
-  }
-  console.log("[种子] 演示账号已就绪，统一密码 SampleFlow@2026");
-} else {
-  const username = process.env.BOOTSTRAP_ADMIN_USERNAME ?? "sampleflow-admin";
-  const password = process.env.BOOTSTRAP_ADMIN_PASSWORD;
-  if (!password || password.length < 12) throw new Error("生产环境必须设置至少 12 位的 BOOTSTRAP_ADMIN_PASSWORD");
-  const existing = await db.query<{ id: string }>("select id::text from users where lower(username)=lower($1)", [username]);
+const password = "SampleFlow@2026";
+for (const [roleCode, roleName] of roles) {
+  const username = roleCode;
+  const existing = await db.query<{ id: string }>(
+    "select id::text from users where lower(username) = lower($1)",
+    [username],
+  );
   let userId = existing.rows[0]?.id;
   if (!userId) {
-    const secured = await hashPassword(password);
-    const inserted = await db.query<{ id: string }>(`insert into users(username,display_name,password_hash,password_salt,must_change_password) values($1,'系统管理员', $2,$3,true) returning id::text`, [username, secured.hash, secured.salt]);
+    const { hash, salt } = await hashPassword(password);
+    const inserted = await db.query<{ id: string }>(
+      `insert into users (username, display_name, password_hash, password_salt, must_change_password)
+       values ($1, $2, $3, $4, false) returning id::text`,
+      [username, `${roleName}演示`, hash, salt],
+    );
     userId = inserted.rows[0]!.id;
   }
-  await db.query(`insert into user_roles(user_id,role_code) values($1,'system_admin') on conflict do nothing`, [userId]);
-  console.log("[种子] 生产环境系统管理员账号已就绪");
+  await db.query(
+    `insert into user_roles (user_id, role_code) values ($1, $2)
+     on conflict (user_id, role_code) do nothing`,
+    [userId, roleCode],
+  );
 }
+console.log("[种子] 演示账号已就绪，统一密码 SampleFlow@2026");
 
 await db.end();

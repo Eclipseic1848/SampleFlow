@@ -1,0 +1,58 @@
+import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import test from "node:test";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
+import { withTestApi } from "./test-support/test-api.js";
+import { withMigratedTestDatabase, withTestDatabase } from "./test-support/test-database.js";
+
+const execFileAsync = promisify(execFile);
+const apiRoot = fileURLToPath(new URL("../", import.meta.url));
+
+test("数据库结构未迁移时 API 进程停止且不输出内部栈", async () => {
+  await withTestDatabase(async (database) => {
+    await assert.rejects(
+      execFileAsync(process.execPath, ["--import", "tsx", "src/server.ts"], {
+        cwd: apiRoot,
+        env: { ...process.env, API_PORT: "3103", DATABASE_URL: database.url, NODE_ENV: "production" },
+        encoding: "utf8",
+        timeout: 5_000,
+      }),
+      (error: unknown) => {
+        const failure = error as { code?: number; stderr?: string };
+        assert.equal(failure.code, 1);
+        assert.match(failure.stderr ?? "", /请先显式执行 db:migrate 作业/);
+        assert.doesNotMatch(failure.stderr ?? "", /\n\s+at\s/);
+        return true;
+      },
+    );
+  });
+});
+
+test("数据库结构未迁移时就绪检查拒绝流量并给出运维提示", async () => {
+  await withTestDatabase(async (database) => {
+    await withTestApi(database.url, async (app) => {
+      const response = await app.inject({ method: "GET", url: "/api/ready" });
+
+      assert.equal(response.statusCode, 503);
+      assert.deepEqual(response.json(), {
+        status: "not_ready",
+        database: "schema_outdated",
+        message: "数据库结构未就绪，请先执行 db:migrate 作业",
+      });
+    });
+  });
+});
+
+test("API 可在同一进程重复连接隔离数据库", async () => {
+  await withMigratedTestDatabase(async (database) => {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await withTestApi(database.url, async (app) => {
+        const response = await app.inject({ method: "GET", url: "/api/ready" });
+
+        assert.equal(response.statusCode, 200);
+        assert.deepEqual(response.json(), { status: "ready", database: "connected" });
+      });
+    }
+  });
+});
