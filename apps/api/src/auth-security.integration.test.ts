@@ -506,41 +506,55 @@ test("会话清理命令仅删除过期或撤销超过三十天的记录", async
   });
 });
 
-test("生产初始化命令使用统一密码规则且不回显密码", async () => {
+test("生产初始化命令生成一次性临时密码并拒绝重复执行", async () => {
   await withMigratedTestDatabase(async (database) => {
-    const invalidPassword = "abcdefghijkl";
-    await assert.rejects(
-      execFileAsync(process.execPath, ["--import", "tsx", "src/cli/bootstrap-admin.ts"], {
-        cwd: apiRoot,
-        env: {
-          ...process.env,
-          DATABASE_URL: database.url,
-          NODE_ENV: "production",
-          BOOTSTRAP_ADMIN_USERNAME: "invalid_bootstrap_admin",
-          BOOTSTRAP_ADMIN_PASSWORD: invalidPassword,
-        },
-        encoding: "utf8",
-      }),
-      (error: unknown) => {
-        const output = String(error);
-        assert.doesNotMatch(output, new RegExp(invalidPassword));
-        assert.match(output, /密码须为 6—128 位/);
-        return true;
-      },
-    );
-
-    const valid = await execFileAsync(process.execPath, ["--import", "tsx", "src/cli/bootstrap-admin.ts"], {
+    const created = await execFileAsync(process.execPath, ["--import", "tsx", "src/cli/bootstrap-admin.ts"], {
       cwd: apiRoot,
       env: {
         ...process.env,
         DATABASE_URL: database.url,
         NODE_ENV: "production",
         BOOTSTRAP_ADMIN_USERNAME: "valid_bootstrap_admin",
-        BOOTSTRAP_ADMIN_PASSWORD: "Abc@12",
       },
       encoding: "utf8",
     });
-    assert.match(valid.stdout, /系统管理员账号已就绪/);
+    const temporaryPassword = created.stdout.match(/临时密码（仅显示一次）：([^\r\n]+)/)?.[1];
+    assert.ok(temporaryPassword);
+    assert.match(temporaryPassword, /^(?=.*[A-Za-z])(?=.*\d)(?=.*[^A-Za-z0-9])[\x21-\x7e]{16,128}$/);
+    assert.equal(created.stdout.split(temporaryPassword).length - 1, 1);
+    assert.match(created.stdout, /失效时间：\d{4}-\d{2}-\d{2}T/);
+
+    const client = new Client({ connectionString: database.url });
+    await client.connect();
+    try {
+      const user = await client.query<{ temporary_password_expires_at: Date }>(
+        "select temporary_password_expires_at from users where username=$1",
+        ["valid_bootstrap_admin"],
+      );
+      const expiresAt = user.rows[0]!.temporary_password_expires_at.getTime();
+      assert.ok(expiresAt >= Date.now() + 23 * 60 * 60 * 1000);
+      assert.ok(expiresAt <= Date.now() + 24 * 60 * 60 * 1000);
+      const audit = await client.query<{ after_data: unknown }>(
+        "select after_data from audit_logs where action='auth.admin_bootstrapped'",
+      );
+      assert.doesNotMatch(JSON.stringify(audit.rows), new RegExp(temporaryPassword));
+    } finally {
+      await client.end();
+    }
+
+    await withTestApi(database.url, async (app) => {
+      const login = await app.inject({
+        method: "POST",
+        url: "/api/auth/login",
+        headers: { origin: TEST_ORIGIN },
+        payload: { username: "valid_bootstrap_admin", password: temporaryPassword },
+      });
+      assert.equal(login.statusCode, 200);
+      const cookie = String(login.headers["set-cookie"]).split(";", 1)[0];
+      const me = await app.inject({ method: "GET", url: "/api/auth/me", headers: { cookie } });
+      assert.equal(me.json().user.mustChangePassword, true);
+    });
+
     await assert.rejects(
       execFileAsync(process.execPath, ["--import", "tsx", "src/cli/bootstrap-admin.ts"], {
         cwd: apiRoot,
@@ -549,7 +563,6 @@ test("生产初始化命令使用统一密码规则且不回显密码", async ()
           DATABASE_URL: database.url,
           NODE_ENV: "production",
           BOOTSTRAP_ADMIN_USERNAME: "valid_bootstrap_admin",
-          BOOTSTRAP_ADMIN_PASSWORD: "Abc@12",
         },
         encoding: "utf8",
       }),
@@ -572,7 +585,7 @@ test("同一来源 IP 的大量失败会暂停后续登录", async () => {
         const failed = await app.inject({
           method: "POST",
           url: "/api/auth/login",
-          headers: { origin: TEST_ORIGIN, "x-forwarded-for": "203.0.113.10" },
+          headers: { origin: TEST_ORIGIN, "x-forwarded-for": `198.51.100.${attempt}, 203.0.113.10` },
           payload: { username: `missing_user_${attempt}`, password: "Wrong@123" },
         });
         assert.equal(failed.statusCode, 401);
@@ -580,7 +593,7 @@ test("同一来源 IP 的大量失败会暂停后续登录", async () => {
       const blocked = await app.inject({
         method: "POST",
         url: "/api/auth/login",
-        headers: { origin: TEST_ORIGIN, "x-forwarded-for": "203.0.113.10" },
+        headers: { origin: TEST_ORIGIN, "x-forwarded-for": "198.51.100.250, 203.0.113.10" },
         payload: { username: "ip_limit_target", password: "Correct@123" },
       });
       assert.equal(blocked.statusCode, 429);
@@ -589,11 +602,11 @@ test("同一来源 IP 的大量失败会暂停后续登录", async () => {
       const otherSource = await app.inject({
         method: "POST",
         url: "/api/auth/login",
-        headers: { origin: TEST_ORIGIN, "x-forwarded-for": "203.0.113.11" },
+        headers: { origin: TEST_ORIGIN, "x-forwarded-for": "198.51.100.250, 203.0.113.11" },
         payload: { username: "ip_limit_target", password: "Correct@123" },
       });
       assert.equal(otherSource.statusCode, 200);
-    }, { trustProxy: true });
+    }, { trustProxy: "127.0.0.1" });
   });
 });
 

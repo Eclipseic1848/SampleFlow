@@ -23,7 +23,7 @@ services:
       NODE_ENV: production
       API_PORT: 3000
       APP_ORIGINS: ${APP_ORIGINS:?请设置允许访问系统的完整 Origin}
-      TRUST_PROXY: ${TRUST_PROXY:-true}
+      TRUST_PROXY_CIDR: ${TRUST_PROXY_CIDR:-172.16.0.0/12}
       DB_HOST: db
       DB_PORT: 5432
       DB_NAME: ${POSTGRES_DB:-sampleflow}
@@ -37,6 +37,24 @@ services:
       interval: 10s
       timeout: 5s
       retries: 12
+
+  db-migrate:
+    profiles: ["operations"]
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: "no"
+    environment:
+      NODE_ENV: production
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-sampleflow}
+      DB_USER: ${POSTGRES_USER:-sampleflow}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["node", "apps/api/dist/cli/migrate.js"]
 
   admin-bootstrap:
     profiles: ["operations"]
@@ -52,7 +70,6 @@ services:
       DB_USER: ${POSTGRES_USER:-sampleflow}
       DB_PASSWORD: ${POSTGRES_PASSWORD}
       BOOTSTRAP_ADMIN_USERNAME: ${BOOTSTRAP_ADMIN_USERNAME:-sampleflow-admin}
-      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?请在 .env 中设置 BOOTSTRAP_ADMIN_PASSWORD}
     depends_on:
       db:
         condition: service_healthy

@@ -1,7 +1,7 @@
 import cookie from "@fastify/cookie";
 import Fastify from "fastify";
 import { config } from "./config.js";
-import { checkDatabase, db, type Database } from "./db.js";
+import { checkDatabaseSchema, db, type Database } from "./db.js";
 import { registerAdmin } from "./modules/admin.js";
 import { registerAuth } from "./modules/auth.js";
 import { registerExports } from "./modules/exports.js";
@@ -12,7 +12,7 @@ type BuildAppOptions = {
   clock?: () => Date;
   database?: Database;
   logger?: boolean;
-  trustProxy?: boolean;
+  trustProxy?: boolean | string | string[];
 };
 
 export async function buildApp(options: BuildAppOptions = {}) {
@@ -34,11 +34,15 @@ export async function buildApp(options: BuildAppOptions = {}) {
 
   app.get("/api/ready", async (_request, reply) => {
     try {
-      await checkDatabase(database);
+      await checkDatabaseSchema(database);
       return { status: "ready", database: "connected" };
     } catch (error) {
       app.log.error(error);
-      return reply.code(503).send({ status: "not_ready", database: "unavailable" });
+      return reply.code(503).send({
+        status: "not_ready",
+        database: "schema_outdated",
+        message: "数据库结构未就绪，请先执行 db:migrate 作业",
+      });
     }
   });
 

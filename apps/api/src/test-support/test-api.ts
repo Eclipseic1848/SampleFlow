@@ -8,7 +8,7 @@ const { Pool } = pg;
 export async function withTestApi<T>(
   databaseUrl: string,
   run: (app: FastifyInstance) => Promise<T>,
-  options: Readonly<{ clock?: () => Date; trustProxy?: boolean }> = {},
+  options: Readonly<{ clock?: () => Date; trustProxy?: boolean | string | string[] }> = {},
 ): Promise<T> {
   if (process.env.NODE_ENV === "production") {
     throw new Error("生产环境禁止启动测试 API");

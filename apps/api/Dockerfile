@@ -16,6 +16,5 @@ COPY apps/web/package.json apps/web/package.json
 RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=build /app/apps/api/dist apps/api/dist
 COPY apps/api/migrations apps/api/migrations
-COPY 原始数据1.xlsx ./原始数据1.xlsx
 EXPOSE 3000
-CMD ["sh", "-c", "node apps/api/dist/cli/migrate.js && node apps/api/dist/cli/import-legacy.js && node apps/api/dist/server.js"]
+CMD ["node", "apps/api/dist/server.js"]

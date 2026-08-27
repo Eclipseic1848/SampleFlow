@@ -18,5 +18,5 @@ export const config = {
   allowedOrigins: process.env.APP_ORIGINS
     ? process.env.APP_ORIGINS.split(",").map((value) => value.trim()).filter(Boolean)
     : nodeEnv === "production" ? [] : developmentOrigins,
-  trustProxy: process.env.TRUST_PROXY === "true",
+  trustProxy: process.env.TRUST_PROXY_CIDR ?? false,
 } as const;

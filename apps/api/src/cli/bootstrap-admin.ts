@@ -1,15 +1,13 @@
 import { db } from "../db.js";
-import { hashPassword, isPasswordAllowed, PASSWORD_POLICY_MESSAGE, TEMPORARY_PASSWORD_TTL_MS } from "../security/password.js";
+import { generateTemporaryPassword, hashPassword, TEMPORARY_PASSWORD_TTL_MS } from "../security/password.js";
 
 if (process.env.NODE_ENV !== "production") {
   throw new Error("admin:bootstrap 只能在 NODE_ENV=production 的显式运维作业中运行");
 }
 
 const username = process.env.BOOTSTRAP_ADMIN_USERNAME ?? "sampleflow-admin";
-const password = process.env.BOOTSTRAP_ADMIN_PASSWORD;
-if (!password || !isPasswordAllowed(password)) {
-  throw new Error(`BOOTSTRAP_ADMIN_PASSWORD 无效：${PASSWORD_POLICY_MESSAGE}`);
-}
+const temporaryPassword = generateTemporaryPassword();
+const expiresAt = new Date(Date.now() + TEMPORARY_PASSWORD_TTL_MS);
 
 const client = await db.connect();
 try {
@@ -25,8 +23,7 @@ try {
     [username],
   );
   if (existing.rowCount) throw new Error("系统管理员 bootstrap 已完成，拒绝重复执行");
-  const secured = await hashPassword(password);
-  const expiresAt = new Date(Date.now() + TEMPORARY_PASSWORD_TTL_MS);
+  const secured = await hashPassword(temporaryPassword);
   const inserted = await client.query<{ id: string }>(
     `insert into users(username,display_name,password_hash,password_salt,must_change_password,temporary_password_expires_at)
      values($1,'系统管理员',$2,$3,true,$4) returning id::text`,
@@ -40,7 +37,9 @@ try {
     [userId, username, expiresAt],
   );
   await client.query("commit");
-  console.log("[管理员初始化] 系统管理员账号已就绪");
+  console.log(`[管理员初始化] 用户名：${username}`);
+  console.log(`[管理员初始化] 临时密码（仅显示一次）：${temporaryPassword}`);
+  console.log(`[管理员初始化] 失效时间：${expiresAt.toISOString()}`);
 } catch (error) {
   await client.query("rollback");
   throw error;
