@@ -23,6 +23,29 @@ services:
       NODE_ENV: production
       API_PORT: 3000
       APP_ORIGINS: ${APP_ORIGINS:?请设置允许访问系统的完整 Origin}
+      TRUST_PROXY: ${TRUST_PROXY:-true}
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-sampleflow}
+      DB_USER: ${POSTGRES_USER:-sampleflow}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  admin-bootstrap:
+    profiles: ["operations"]
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: "no"
+    environment:
+      NODE_ENV: production
       DB_HOST: db
       DB_PORT: 5432
       DB_NAME: ${POSTGRES_DB:-sampleflow}
@@ -33,11 +56,7 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
+    command: ["node", "apps/api/dist/cli/bootstrap-admin.js"]
 
   web:
     build:

@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import pg from "pg";
 import {
   assertTestDatabaseUrl,
@@ -8,6 +12,9 @@ import {
 } from "./test-support/test-database.js";
 
 const { Client } = pg;
+const execFileAsync = promisify(execFile);
+const apiRoot = fileURLToPath(new URL("../", import.meta.url));
+const migrationsRoot = fileURLToPath(new URL("../migrations/", import.meta.url));
 
 test("隔离数据库在测试失败后仍会被删除", async () => {
   let databaseName = "";
@@ -58,9 +65,63 @@ test("干净隔离数据库可应用全部现有迁移", async () => {
         "006_bootstrap_organization_from_ledger.sql",
         "007_temporary_password_expiry.sql",
         "008_session_csrf.sql",
+        "009_authentication_state.sql",
       ]);
     } finally {
       await client.end();
+    }
+  });
+});
+
+test("既有首次改密账号升级后获得到期时间且旧会话被撤销", async () => {
+  await withTestDatabase(async (database) => {
+    const client = new Client({ connectionString: database.url });
+    await client.connect();
+    try {
+      await client.query(`create table schema_migrations(name text primary key,applied_at timestamptz not null default now())`);
+      const legacyMigrations = [
+        "001_bootstrap.sql",
+        "002_identity_and_organization.sql",
+        "003_performance_ledger.sql",
+        "004_target_workflow.sql",
+        "005_legacy_import_tracking.sql",
+        "006_bootstrap_organization_from_ledger.sql",
+      ];
+      for (const name of legacyMigrations) {
+        await client.query(await readFile(`${migrationsRoot}${name}`, "utf8"));
+        await client.query("insert into schema_migrations(name) values($1)", [name]);
+      }
+      const user = await client.query<{ id: string }>(
+        `insert into users(username,display_name,password_hash,password_salt,must_change_password)
+         values('legacy_temp_user','遗留临时密码用户','hash','salt',true) returning id::text`,
+      );
+      await client.query(
+        `insert into sessions(user_id,token_hash,expires_at) values($1,'legacy-session',now()+interval '8 hours')`,
+        [user.rows[0]!.id],
+      );
+    } finally {
+      await client.end();
+    }
+
+    await execFileAsync(process.execPath, ["--import", "tsx", "src/cli/migrate.ts"], {
+      cwd: apiRoot,
+      env: { ...process.env, DATABASE_URL: database.url, NODE_ENV: "test" },
+      encoding: "utf8",
+    });
+
+    const verify = new Client({ connectionString: database.url });
+    await verify.connect();
+    try {
+      const user = await verify.query<{ temporary_password_expires_at: Date | null }>(
+        "select temporary_password_expires_at from users where username='legacy_temp_user'",
+      );
+      assert.ok(user.rows[0]!.temporary_password_expires_at);
+      const session = await verify.query<{ revoked_at: Date | null }>(
+        "select revoked_at from sessions where token_hash='legacy-session'",
+      );
+      assert.ok(session.rows[0]!.revoked_at);
+    } finally {
+      await verify.end();
     }
   });
 });

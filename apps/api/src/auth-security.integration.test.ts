@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { once } from "node:events";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -11,6 +12,7 @@ import { withMigratedTestDatabase } from "./test-support/test-database.js";
 const { Client } = pg;
 const execFileAsync = promisify(execFile);
 const apiRoot = fileURLToPath(new URL("../", import.meta.url));
+const TEST_ORIGIN = "http://127.0.0.1:4174";
 
 function authenticatedHeaders(response: {
   headers: Record<string, string | string[] | number | number[] | undefined>;
@@ -39,9 +41,18 @@ test("首次改密前直接调用业务 API 会被服务端拒绝", async () => 
     });
 
     await withTestApi(database.url, async (app) => {
+      const loginWithoutOrigin = await app.inject({
+        method: "POST",
+        url: "/api/auth/login",
+        payload: { username: "csrf_user", password: "Before@123" },
+      });
+      assert.equal(loginWithoutOrigin.statusCode, 403);
+      assert.equal(loginWithoutOrigin.json().code, "ORIGIN_INVALID");
+
       const login = await app.inject({
         method: "POST",
         url: "/api/auth/login",
+        headers: { origin: TEST_ORIGIN },
         payload: { username: "password_gate_user", password: "Temp@1" },
       });
       assert.equal(login.statusCode, 200);
@@ -88,6 +99,7 @@ test("改密接口统一执行六位字母数字符号规则", async () => {
       const login = await app.inject({
         method: "POST",
         url: "/api/auth/login",
+        headers: { origin: TEST_ORIGIN },
         payload: { username: "password_policy_user", password: "Temp@1" },
       });
       const headers = authenticatedHeaders(login);
@@ -140,6 +152,7 @@ test("管理员创建账号时由服务端返回一次性临时密码", async ()
       const adminLogin = await app.inject({
         method: "POST",
         url: "/api/auth/login",
+        headers: { origin: TEST_ORIGIN },
         payload: { username: "security_admin", password: "Admin@123" },
       });
       const adminHeaders = authenticatedHeaders(adminLogin);
@@ -162,6 +175,7 @@ test("管理员创建账号时由服务端返回一次性临时密码", async ()
       const userLogin = await app.inject({
         method: "POST",
         url: "/api/auth/login",
+        headers: { origin: TEST_ORIGIN },
         payload: { username: "generated_password_user", password: result.temporaryPassword },
       });
       assert.equal(userLogin.statusCode, 200);
@@ -188,6 +202,7 @@ test("临时密码过期后即使密码正确也不能登录", async () => {
       const login = await app.inject({
         method: "POST",
         url: "/api/auth/login",
+        headers: { origin: TEST_ORIGIN },
         payload: { username: "expired_password_user", password: "Expired@123" },
       });
       assert.equal(login.statusCode, 401);
@@ -213,6 +228,7 @@ test("会话连续三十分钟无活动后自动失效", async () => {
       const login = await app.inject({
         method: "POST",
         url: "/api/auth/login",
+        headers: { origin: TEST_ORIGIN },
         payload: { username: "idle_session_user", password: "Idle@123" },
       });
       const cookie = String(login.headers["set-cookie"]).split(";", 1)[0];
@@ -241,11 +257,14 @@ test("连续登录失败会触发账号级递增限速和暂停", async () => {
       roleName: "业务员",
     });
 
+    let now = new Date("2026-08-27T08:00:00.000Z");
+    const advance = (seconds: number) => { now = new Date(now.getTime() + seconds * 1000); };
     await withTestApi(database.url, async (app) => {
       for (let attempt = 1; attempt <= 5; attempt += 1) {
         const failed = await app.inject({
           method: "POST",
           url: "/api/auth/login",
+          headers: { origin: TEST_ORIGIN },
           payload: { username: "rate_limited_user", password: "Wrong@123" },
         });
         assert.equal(failed.statusCode, 401);
@@ -255,22 +274,27 @@ test("连续登录失败会触发账号级递增限速和暂停", async () => {
       const delayed = await app.inject({
         method: "POST",
         url: "/api/auth/login",
+        headers: { origin: TEST_ORIGIN },
         payload: { username: "rate_limited_user", password: "Wrong@123" },
       });
       assert.equal(delayed.statusCode, 429);
       assert.equal(delayed.headers["retry-after"], "1");
 
-      for (let attempt = 7; attempt <= 10; attempt += 1) {
-        await app.inject({
+      for (let failureCount = 6; failureCount <= 10; failureCount += 1) {
+        advance(failureCount === 6 ? 1 : 2 ** (failureCount - 6));
+        const failed = await app.inject({
           method: "POST",
           url: "/api/auth/login",
+          headers: { origin: TEST_ORIGIN },
           payload: { username: "rate_limited_user", password: "Wrong@123" },
         });
+        assert.equal(failed.statusCode, 401);
       }
 
       const suspended = await app.inject({
         method: "POST",
         url: "/api/auth/login",
+        headers: { origin: TEST_ORIGIN },
         payload: { username: "rate_limited_user", password: "Correct@123" },
       });
       assert.equal(suspended.statusCode, 429);
@@ -279,7 +303,26 @@ test("连续登录失败会触发账号级递增限速和暂停", async () => {
         code: "LOGIN_RATE_LIMITED",
         message: "登录尝试过多，请稍后再试",
       });
-    });
+
+      advance(16 * 60);
+      const stillSuspended = await app.inject({
+        method: "POST",
+        url: "/api/auth/login",
+        headers: { origin: TEST_ORIGIN },
+        payload: { username: "rate_limited_user", password: "Correct@123" },
+      });
+      assert.equal(stillSuspended.statusCode, 429);
+      assert.equal(stillSuspended.headers["retry-after"], "840");
+
+      advance(14 * 60);
+      const restored = await app.inject({
+        method: "POST",
+        url: "/api/auth/login",
+        headers: { origin: TEST_ORIGIN },
+        payload: { username: "rate_limited_user", password: "Correct@123" },
+      });
+      assert.equal(restored.statusCode, 200);
+    }, { clock: () => now });
   });
 });
 
@@ -298,6 +341,7 @@ test("Cookie 会话写请求必须同时通过 Origin 和 CSRF 校验", async ()
       const login = await app.inject({
         method: "POST",
         url: "/api/auth/login",
+        headers: { origin: TEST_ORIGIN },
         payload: { username: "csrf_user", password: "Before@123" },
       });
       const setCookies = login.headers["set-cookie"];
@@ -359,6 +403,7 @@ test("重置密码和停用账号会立即撤销目标账号会话", async () =>
       const targetLogin = await app.inject({
         method: "POST",
         url: "/api/auth/login",
+        headers: { origin: TEST_ORIGIN },
         payload: { username: "session_target", password: "Original@123" },
       });
       const targetHeaders = authenticatedHeaders(targetLogin);
@@ -366,6 +411,7 @@ test("重置密码和停用账号会立即撤销目标账号会话", async () =>
       const adminLogin = await app.inject({
         method: "POST",
         url: "/api/auth/login",
+        headers: { origin: TEST_ORIGIN },
         payload: { username: "session_admin", password: "Admin@123" },
       });
       const adminHeaders = authenticatedHeaders(adminLogin);
@@ -387,6 +433,7 @@ test("重置密码和停用账号会立即撤销目标账号会话", async () =>
       const oldPassword = await app.inject({
         method: "POST",
         url: "/api/auth/login",
+        headers: { origin: TEST_ORIGIN },
         payload: { username: "session_target", password: "Original@123" },
       });
       assert.equal(oldPassword.statusCode, 401);
@@ -394,6 +441,7 @@ test("重置密码和停用账号会立即撤销目标账号会话", async () =>
       const temporaryLogin = await app.inject({
         method: "POST",
         url: "/api/auth/login",
+        headers: { origin: TEST_ORIGIN },
         payload: { username: "session_target", password: temporaryPassword },
       });
       assert.equal(temporaryLogin.statusCode, 200);
@@ -462,7 +510,7 @@ test("生产初始化命令使用统一密码规则且不回显密码", async ()
   await withMigratedTestDatabase(async (database) => {
     const invalidPassword = "abcdefghijkl";
     await assert.rejects(
-      execFileAsync(process.execPath, ["--import", "tsx", "src/cli/seed.ts"], {
+      execFileAsync(process.execPath, ["--import", "tsx", "src/cli/bootstrap-admin.ts"], {
         cwd: apiRoot,
         env: {
           ...process.env,
@@ -481,7 +529,7 @@ test("生产初始化命令使用统一密码规则且不回显密码", async ()
       },
     );
 
-    const valid = await execFileAsync(process.execPath, ["--import", "tsx", "src/cli/seed.ts"], {
+    const valid = await execFileAsync(process.execPath, ["--import", "tsx", "src/cli/bootstrap-admin.ts"], {
       cwd: apiRoot,
       env: {
         ...process.env,
@@ -492,7 +540,21 @@ test("生产初始化命令使用统一密码规则且不回显密码", async ()
       },
       encoding: "utf8",
     });
-    assert.match(valid.stdout, /生产环境系统管理员账号已就绪/);
+    assert.match(valid.stdout, /系统管理员账号已就绪/);
+    await assert.rejects(
+      execFileAsync(process.execPath, ["--import", "tsx", "src/cli/bootstrap-admin.ts"], {
+        cwd: apiRoot,
+        env: {
+          ...process.env,
+          DATABASE_URL: database.url,
+          NODE_ENV: "production",
+          BOOTSTRAP_ADMIN_USERNAME: "valid_bootstrap_admin",
+          BOOTSTRAP_ADMIN_PASSWORD: "Abc@12",
+        },
+        encoding: "utf8",
+      }),
+      /bootstrap 已完成/,
+    );
   });
 });
 
@@ -510,6 +572,7 @@ test("同一来源 IP 的大量失败会暂停后续登录", async () => {
         const failed = await app.inject({
           method: "POST",
           url: "/api/auth/login",
+          headers: { origin: TEST_ORIGIN, "x-forwarded-for": "203.0.113.10" },
           payload: { username: `missing_user_${attempt}`, password: "Wrong@123" },
         });
         assert.equal(failed.statusCode, 401);
@@ -517,10 +580,71 @@ test("同一来源 IP 的大量失败会暂停后续登录", async () => {
       const blocked = await app.inject({
         method: "POST",
         url: "/api/auth/login",
+        headers: { origin: TEST_ORIGIN, "x-forwarded-for": "203.0.113.10" },
         payload: { username: "ip_limit_target", password: "Correct@123" },
       });
       assert.equal(blocked.statusCode, 429);
       assert.equal(blocked.headers["retry-after"], "1800");
+
+      const otherSource = await app.inject({
+        method: "POST",
+        url: "/api/auth/login",
+        headers: { origin: TEST_ORIGIN, "x-forwarded-for": "203.0.113.11" },
+        payload: { username: "ip_limit_target", password: "Correct@123" },
+      });
+      assert.equal(otherSource.statusCode, 200);
+    }, { trustProxy: true });
+  });
+});
+
+test("认证响应与真实服务日志不包含密码、会话令牌或内部栈", async () => {
+  await withMigratedTestDatabase(async (database) => {
+    await seedTestUser(database.url, {
+      username: "log_safety_user",
+      displayName: "日志安全用户",
+      password: "Correct@123",
+      roleCode: "salesperson",
+      roleName: "业务员",
     });
+    const passwordMarker = "NeverLogThis@456";
+    const api = spawn(process.execPath, ["--import", "tsx", "src/server.ts"], {
+      cwd: apiRoot,
+      env: { ...process.env, API_PORT: "3102", DATABASE_URL: database.url, NODE_ENV: "test" },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let logs = "";
+    api.stdout.setEncoding("utf8");
+    api.stderr.setEncoding("utf8");
+    api.stdout.on("data", (chunk: string) => { logs += chunk; });
+    api.stderr.on("data", (chunk: string) => { logs += chunk; });
+
+    try {
+      const deadline = Date.now() + 15_000;
+      while (Date.now() < deadline) {
+        try {
+          const ready = await fetch("http://127.0.0.1:3102/api/ready");
+          if (ready.ok) break;
+        } catch {
+          // 服务尚未监听时继续等待。
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      const response = await fetch("http://127.0.0.1:3102/api/auth/login", {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: TEST_ORIGIN },
+        body: JSON.stringify({ username: "log_safety_user", password: passwordMarker }),
+      });
+      assert.equal(response.status, 401);
+      const body = await response.text();
+      assert.doesNotMatch(body, new RegExp(passwordMarker));
+      assert.doesNotMatch(body, /sampleflow_session|sampleflow_csrf|"stack"/i);
+    } finally {
+      if (api.exitCode === null) {
+        api.kill();
+        await once(api, "exit");
+      }
+    }
+    assert.doesNotMatch(logs, new RegExp(passwordMarker));
+    assert.doesNotMatch(logs, /sampleflow_session|sampleflow_csrf/);
   });
 });

@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { PoolClient } from "pg";
 import { z } from "zod";
 import { config } from "../config.js";
 import type { Database } from "../db.js";
@@ -39,38 +40,72 @@ async function auditLogin(db: Database, request: FastifyRequest, action: string,
   );
 }
 
-async function loginRetryAfterSeconds(db: Database, accountKey: string, ipAddress: string): Promise<number | null> {
-  const result = await db.query<{
-    account_attempts: number;
-    account_last_attempt: Date | null;
-    ip_attempts: number;
-  }>(
-    `with last_success as (
-       select max(created_at) as created_at
-       from audit_logs
-       where action='auth.login_succeeded' and entity_id=$1
-     )
-     select
-       count(*) filter (
-         where entity_id=$1
-           and created_at > coalesce((select created_at from last_success), '-infinity'::timestamptz)
-       )::int as account_attempts,
-       max(created_at) filter (where entity_id=$1) as account_last_attempt,
-       count(*) filter (where ip_address=$2)::int as ip_attempts
-     from audit_logs
-     where created_at > now()-interval '15 minutes'
-       and action in ('auth.login_failed','auth.login_rate_limited')`,
+async function loginRetryAfterSeconds(db: Database, accountKey: string, ipAddress: string, now: Date): Promise<number | null> {
+  const result = await db.query<{ blocked_until: Date | null }>(
+    `select max(blocked_until) as blocked_until
+     from auth_login_throttles
+     where (scope='account' and throttle_key=$1)
+        or (scope='ip' and throttle_key=$2)`,
     [accountKey, ipAddress],
   );
-  const state = result.rows[0]!;
-  if (state.account_attempts >= 10 || state.ip_attempts >= 50) return 30 * 60;
-  if (state.account_attempts < 5 || !state.account_last_attempt) return null;
-  const delay = Math.min(30, 2 ** (state.account_attempts - 5));
-  const remaining = Math.ceil((state.account_last_attempt.getTime() + delay * 1000 - Date.now()) / 1000);
+  const blockedUntil = result.rows[0]?.blocked_until;
+  if (!blockedUntil) return null;
+  const remaining = Math.ceil((blockedUntil.getTime() - now.getTime()) / 1000);
   return remaining > 0 ? remaining : null;
 }
 
-export async function registerAuth(app: FastifyInstance, db: Database) {
+async function recordThrottleFailure(
+  client: PoolClient,
+  scope: "account" | "ip",
+  throttleKey: string,
+  now: Date,
+): Promise<Date | null> {
+  const existing = await client.query<{
+    blocked_until: Date | null;
+    failure_count: number;
+    window_started_at: Date;
+  }>(
+    "select window_started_at,failure_count,blocked_until from auth_login_throttles where scope=$1 and throttle_key=$2 for update",
+    [scope, throttleKey],
+  );
+  const prior = existing.rows[0];
+  const windowExpired = !prior || prior.window_started_at.getTime() <= now.getTime() - 15 * 60 * 1000;
+  const failureCount = windowExpired ? 1 : prior.failure_count + 1;
+  const windowStartedAt = windowExpired ? now : prior.window_started_at;
+  let retryAfterSeconds = 0;
+  if (scope === "account" && failureCount >= 10) retryAfterSeconds = 30 * 60;
+  else if (scope === "account" && failureCount >= 5) retryAfterSeconds = Math.min(30, 2 ** (failureCount - 5));
+  else if (scope === "ip" && failureCount >= 50) retryAfterSeconds = 30 * 60;
+  const blockedUntil = retryAfterSeconds ? new Date(now.getTime() + retryAfterSeconds * 1000) : null;
+  await client.query(
+    `insert into auth_login_throttles(scope,throttle_key,window_started_at,failure_count,blocked_until,updated_at)
+     values($1,$2,$3,$4,$5,$3)
+     on conflict(scope,throttle_key) do update
+     set window_started_at=excluded.window_started_at,
+         failure_count=excluded.failure_count,
+         blocked_until=excluded.blocked_until,
+         updated_at=excluded.updated_at`,
+    [scope, throttleKey, now, failureCount, blockedUntil],
+  );
+  return blockedUntil;
+}
+
+async function recordLoginFailure(db: Database, accountKey: string, ipAddress: string, now: Date): Promise<void> {
+  const client = await db.connect();
+  try {
+    await client.query("begin");
+    await recordThrottleFailure(client, "account", accountKey, now);
+    await recordThrottleFailure(client, "ip", ipAddress, now);
+    await client.query("commit");
+  } catch (error) {
+    await client.query("rollback");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function registerAuth(app: FastifyInstance, db: Database, clock: () => Date = () => new Date()) {
   app.decorateRequest("currentUser", null);
 
   app.addHook("preHandler", async (request, reply) => {
@@ -144,6 +179,10 @@ export async function registerAuth(app: FastifyInstance, db: Database) {
   });
 
   app.post("/api/auth/login", async (request, reply) => {
+    const origin = request.headers.origin;
+    if (!origin || !config.allowedOrigins.includes(origin)) {
+      return reply.code(403).send({ code: "ORIGIN_INVALID", message: "请求来源不受信任" });
+    }
     const parsed = loginSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ message: "请输入有效的账号和密码" });
     const accountKey = parsed.data.username.toLowerCase();
@@ -164,9 +203,10 @@ export async function registerAuth(app: FastifyInstance, db: Database) {
       [parsed.data.username],
     );
     const user = result.rows[0];
-    const retryAfter = await loginRetryAfterSeconds(db, accountKey, request.ip);
+    const now = clock();
+    const retryAfter = await loginRetryAfterSeconds(db, accountKey, request.ip, now);
     if (retryAfter !== null) {
-      await auditLogin(db, request, "auth.login_rate_limited", accountKey, user?.id);
+      await auditLogin(db, request, retryAfter > 30 ? "auth.login_suspended" : "auth.login_rate_limited", accountKey, user?.id);
       reply.header("retry-after", String(retryAfter));
       return reply.code(429).send({ code: "LOGIN_RATE_LIMITED", message: "登录尝试过多，请稍后再试" });
     }
@@ -174,12 +214,13 @@ export async function registerAuth(app: FastifyInstance, db: Database) {
       ? await verifyPassword(parsed.data.password, user.password_hash, user.password_salt)
       : false;
     if (!user || !valid) {
+      await recordLoginFailure(db, accountKey, request.ip, now);
       await auditLogin(db, request, "auth.login_failed", accountKey, user?.id);
       return reply.code(401).send({ message: "账号或密码错误" });
     }
     if (user.must_change_password
       && user.temporary_password_expires_at
-      && user.temporary_password_expires_at.getTime() <= Date.now()) {
+      && user.temporary_password_expires_at.getTime() <= now.getTime()) {
       await auditLogin(db, request, "auth.temporary_password_expired", accountKey, user.id);
       return reply.code(401).send({
         code: "TEMPORARY_PASSWORD_EXPIRED",
@@ -189,12 +230,27 @@ export async function registerAuth(app: FastifyInstance, db: Database) {
 
     const { token, tokenHash } = createSessionToken();
     const csrf = createCsrfToken();
-    await db.query(
-      `insert into sessions (user_id, token_hash, csrf_token_hash, expires_at, user_agent, ip_address)
-       values ($1, $2, $3, $4, $5, $6)`,
-      [user.id, tokenHash, csrf.tokenHash, new Date(Date.now() + SESSION_TTL_MS), request.headers["user-agent"] ?? null, request.ip],
-    );
-    await auditLogin(db, request, "auth.login_succeeded", accountKey, user.id);
+    const client = await db.connect();
+    try {
+      await client.query("begin");
+      await client.query(
+        `insert into sessions (user_id, token_hash, csrf_token_hash, expires_at, user_agent, ip_address)
+         values ($1, $2, $3, $4, $5, $6)`,
+        [user.id, tokenHash, csrf.tokenHash, new Date(now.getTime() + SESSION_TTL_MS), request.headers["user-agent"] ?? null, request.ip],
+      );
+      await client.query("delete from auth_login_throttles where scope='account' and throttle_key=$1", [accountKey]);
+      await client.query(
+        `insert into audit_logs (actor_user_id, action, entity_type, entity_id, ip_address)
+         values ($1,'auth.login_succeeded','session',$2,$3)`,
+        [user.id, accountKey, request.ip],
+      );
+      await client.query("commit");
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
     reply.setCookie(SESSION_COOKIE, token, {
       path: "/",
       httpOnly: true,
@@ -214,7 +270,24 @@ export async function registerAuth(app: FastifyInstance, db: Database) {
 
   app.post("/api/auth/logout", async (request, reply) => {
     const token = request.cookies[SESSION_COOKIE];
-    if (token) {
+    if (token && request.currentUser) {
+      const client = await db.connect();
+      try {
+        await client.query("begin");
+        await client.query("update sessions set revoked_at = now() where token_hash = $1 and revoked_at is null", [hashSessionToken(token)]);
+        await client.query(
+          `insert into audit_logs(actor_user_id,action,entity_type,entity_id,ip_address)
+           values($1,'auth.logout','session',$1,$2)`,
+          [request.currentUser.id, request.ip],
+        );
+        await client.query("commit");
+      } catch (error) {
+        await client.query("rollback");
+        throw error;
+      } finally {
+        client.release();
+      }
+    } else if (token) {
       await db.query("update sessions set revoked_at = now() where token_hash = $1 and revoked_at is null", [hashSessionToken(token)]);
     }
     reply.clearCookie(SESSION_COOKIE, { path: "/" });

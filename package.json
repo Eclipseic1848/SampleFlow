@@ -21,6 +21,7 @@
     "verify": "npm run typecheck && npm run test && npm run build && npm audit --omit=dev && docker compose --env-file .env.example config --quiet",
     "db:migrate": "npm run db:migrate --workspace @sampleflow/api",
     "db:seed": "npm run db:seed --workspace @sampleflow/api",
+    "admin:bootstrap": "npm run admin:bootstrap --workspace @sampleflow/api",
     "db:import-legacy": "npm run db:import-legacy --workspace @sampleflow/api",
     "auth:cleanup-sessions": "npm run auth:cleanup-sessions --workspace @sampleflow/api"
   },
