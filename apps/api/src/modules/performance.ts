@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { db } from "../db.js";
+import type { Database } from "../db.js";
 import {
   decidePerformanceEvent,
   PerformanceRuleError,
@@ -65,7 +65,7 @@ function requireEditor(request: { currentUser: import("./auth.js").CurrentUser |
   return null;
 }
 
-export async function registerPerformance(app: FastifyInstance) {
+export async function registerPerformance(app: FastifyInstance, db: Database) {
   app.get("/api/performance/dashboard", async (request, reply) => {
     if (!request.currentUser) return reply.code(401).send({ message: "尚未登录" });
     const latest = await db.query<{ month: string | null }>("select max(accounting_month)::text as month from performance_events");

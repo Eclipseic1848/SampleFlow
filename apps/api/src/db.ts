@@ -1,4 +1,4 @@
-import pg from "pg";
+import pg, { type Pool as PgPool } from "pg";
 import { config } from "./config.js";
 
 const { Pool } = pg;
@@ -16,6 +16,8 @@ export const db = new Pool({
   connectionTimeoutMillis: 5_000,
 });
 
-export async function checkDatabase(): Promise<void> {
-  await db.query("select 1");
+export type Database = PgPool;
+
+export async function checkDatabase(database: Database = db): Promise<void> {
+  await database.query("select 1");
 }

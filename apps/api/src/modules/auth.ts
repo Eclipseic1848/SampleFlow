@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { config } from "../config.js";
-import { db } from "../db.js";
+import type { Database } from "../db.js";
 import { hashPassword, verifyPassword } from "../security/password.js";
 import { createSessionToken, hashSessionToken, SESSION_COOKIE, SESSION_TTL_MS } from "../security/session.js";
 
@@ -31,7 +31,7 @@ const loginSchema = z.object({
 });
 const changePasswordSchema = z.object({ currentPassword: z.string().min(1).max(200), newPassword: z.string().min(12).max(200) });
 
-async function auditLogin(request: FastifyRequest, action: string, userId?: string) {
+async function auditLogin(db: Database, request: FastifyRequest, action: string, userId?: string) {
   await db.query(
     `insert into audit_logs (actor_user_id, action, entity_type, entity_id, ip_address)
      values ($1, $2, 'session', $3, $4)`,
@@ -39,7 +39,7 @@ async function auditLogin(request: FastifyRequest, action: string, userId?: stri
   );
 }
 
-export async function registerAuth(app: FastifyInstance) {
+export async function registerAuth(app: FastifyInstance, db: Database) {
   app.decorateRequest("currentUser", null);
 
   app.addHook("preHandler", async (request) => {
@@ -93,7 +93,7 @@ export async function registerAuth(app: FastifyInstance) {
       ? await verifyPassword(parsed.data.password, user.password_hash, user.password_salt)
       : false;
     if (!user || !valid) {
-      await auditLogin(request, "auth.login_failed", user?.id);
+      await auditLogin(db, request, "auth.login_failed", user?.id);
       return reply.code(401).send({ message: "账号或密码错误" });
     }
 
@@ -103,7 +103,7 @@ export async function registerAuth(app: FastifyInstance) {
        values ($1, $2, $3, $4, $5)`,
       [user.id, tokenHash, new Date(Date.now() + SESSION_TTL_MS), request.headers["user-agent"] ?? null, request.ip],
     );
-    await auditLogin(request, "auth.login_succeeded", user.id);
+    await auditLogin(db, request, "auth.login_succeeded", user.id);
     reply.setCookie(SESSION_COOKIE, token, {
       path: "/",
       httpOnly: true,
