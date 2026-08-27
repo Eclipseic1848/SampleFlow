@@ -247,3 +247,178 @@ test("目标未生效时页面不提供正式报表，生效后才可查看", as
     }
   });
 });
+
+test("订单搜索与不可变事件链在浏览器和数据库中保持一致", async ({ page },testInfo) => {
+  test.slow();
+  await withMigratedTestDatabase(async (database) => {
+    await seedTestUser(database.url, {
+      username: "e2e_ledger_assistant",
+      displayName: "E2E 账本销售助理",
+      password: "Ledger@123",
+      roleCode: "sales_assistant",
+      roleName: "销售助理",
+    });
+    await seedTestUser(database.url, {
+      username: "e2e_accounting_leader",
+      displayName: "E2E 销售助理组长",
+      password: "Ledger@123",
+      roleCode: "sales_assistant_leader",
+      roleName: "销售助理组长",
+    });
+    await seedTestUser(database.url, {
+      username: "e2e_accounting_hr",
+      displayName: "E2E 人事",
+      password: "Ledger@123",
+      roleCode: "hr",
+      roleName: "人事部",
+    });
+    const memberUserId=await seedTestUser(database.url, {
+      username: "e2e_ledger_member",
+      displayName: "E2E 账本业务员",
+      password: "Ledger@123",
+      roleCode: "salesperson",
+      roleName: "业务员",
+    });
+    const leaderUserId=await seedTestUser(database.url, {
+      username: "e2e_ledger_leader",
+      displayName: "E2E 账本组长",
+      password: "Ledger@123",
+      roleCode: "sales_leader",
+      roleName: "业务员组长",
+    });
+    const supervisorUserId=await seedTestUser(database.url, {
+      username: "e2e_ledger_supervisor",
+      displayName: "E2E 账本主管",
+      password: "Ledger@123",
+      roleCode: "sales_supervisor",
+      roleName: "业务主管",
+    });
+    const setup=new Client({connectionString:database.url});await setup.connect();
+    try{
+      const people=await setup.query<{user_id:string;id:string}>("select user_id::text,p.id::text from people p where user_id=any($1::bigint[])",[[memberUserId,leaderUserId,supervisorUserId]]);
+      const personId=(userId:string)=>people.rows.find((row)=>row.user_id===userId)!.id;
+      const department=await setup.query<{id:string}>("insert into org_units(name,unit_type) values('E2E 账本部门','department') returning id::text");
+      const group=await setup.query<{id:string}>("insert into org_units(name,unit_type,parent_id) values('E2E 账本小组','group',$1) returning id::text",[department.rows[0]!.id]);
+      await setup.query(`insert into org_responsibilities(person_id,org_unit_id,responsibility_type,effective_from) values($1,$3,'leader','2026-01-01'),($2,$4,'supervisor','2026-01-01')`,[personId(leaderUserId),personId(supervisorUserId),group.rows[0]!.id,department.rows[0]!.id]);
+      await setup.query("insert into org_memberships(person_id,department_id,group_id,effective_from) values($1,$2,$3,'2026-01-01')",[personId(memberUserId),department.rows[0]!.id,group.rows[0]!.id]);
+      await setup.query("update org_units set is_active=true where id=any($1::bigint[])",[[department.rows[0]!.id,group.rows[0]!.id]]);
+    }finally{await setup.end();}
+
+    const api = spawn(process.execPath, ["--import", "tsx", "src/server.ts"], {
+      cwd: apiRoot,
+      env: { ...process.env, API_PORT: apiPort, APP_ORIGINS:webBaseUrl, DATABASE_URL: database.url, NODE_ENV: "test" },
+      stdio: "ignore",
+    });
+
+    try {
+      await waitForApi(`${apiBaseUrl}/api/ready`, () => api.exitCode !== null);
+      await page.goto("/");
+      await page.getByLabel("账号").fill("e2e_ledger_assistant");
+      await page.getByLabel("密码").fill("Ledger@123");
+      await page.getByRole("button", { name: "进入 SampleFlow" }).click();
+      await page.getByRole("button", { name: "订单业绩", exact:true }).click();
+
+      await page.getByRole("button", { name: "录入新订单" }).click();
+      await page.getByLabel("订单编号").fill("CHAIN-E2E-110");
+      await page.getByLabel("客户名称").fill("事件链客户");
+      await page.getByLabel("客户单位").fill("事件链测试单位");
+      await page.getByLabel("业务员").selectOption({label:"E2E 账本业务员"});
+      await page.getByLabel("服务类型").fill("浏览器验收");
+      await page.getByLabel("营业额").fill("110");
+      await page.getByRole("button", { name: "确认入账" }).click();
+      const orderRow=page.getByRole("row").filter({hasText:"CHAIN-E2E-110"});
+      await expect(orderRow).toBeVisible();
+
+      await page.getByLabel("定位订单").fill("CHAIN-E2E-110");
+      await expect(page).toHaveURL(/orderSearch=CHAIN-E2E-110/);
+      await expect(orderRow).toBeVisible();
+      await orderRow.getByRole("button",{name:"查看 / 调整"}).click();
+      await expect(page.getByRole("heading",{name:"不可变事件链"})).toBeVisible();
+      await expect(page.getByLabel("事件发生日期")).toHaveCount(0);
+      await expect(page.locator(".event-summary b")).toHaveText(["+¥110.00"]);
+      await page.getByLabel("调整后营业额").fill("100");
+      await page.getByLabel("原因（必填）").fill("浏览器改单为 100");
+      await page.getByRole("button",{name:"确认追加事件"}).click();
+
+      await orderRow.getByRole("button",{name:"查看 / 调整"}).click();
+      await page.getByRole("button",{name:"整单暂停"}).click();
+      await page.getByLabel("原因（必填）").fill("浏览器整单暂停");
+      await page.getByRole("button",{name:"确认追加事件"}).click();
+
+      await orderRow.getByRole("button",{name:"查看 / 调整"}).click();
+      await expect(page.getByRole("button",{name:"整单暂停"})).toHaveCount(0);
+      await page.getByLabel("原因（必填）").fill("浏览器订单重启");
+      await page.getByRole("button",{name:"确认追加事件"}).click();
+
+      await orderRow.getByRole("button",{name:"查看 / 调整"}).click();
+      await expect(page.locator(".event-summary b")).toHaveText(["+¥110.00","-¥10.00","-¥100.00","+¥100.00"]);
+      await expect(page.getByText(/组长 E2E 账本组长 · 主管 E2E 账本主管/).first()).toBeVisible();
+      await page.screenshot({path:testInfo.outputPath("event-chain.png"),fullPage:true});
+      await page.setViewportSize({width:390,height:844});
+      const dialog=page.getByRole("dialog");
+      const dialogBox=await dialog.boundingBox();
+      expect(dialogBox).not.toBeNull();
+      expect(dialogBox!.x).toBeGreaterThanOrEqual(0);
+      expect(dialogBox!.x+dialogBox!.width).toBeLessThanOrEqual(390);
+      await page.screenshot({path:testInfo.outputPath("event-chain-narrow.png"),fullPage:true});
+      await page.keyboard.press("Escape");
+      await expect(dialog).toBeHidden();
+      await expect(orderRow.getByRole("button",{name:"查看 / 调整"})).toBeFocused();
+
+      await page.setViewportSize({width:1280,height:900});
+      await page.getByRole("button",{name:"退出登录"}).click();
+      await page.getByLabel("账号").fill("e2e_accounting_leader");
+      await page.getByLabel("密码").fill("Ledger@123");
+      await page.getByRole("button",{name:"进入 SampleFlow"}).click();
+      await page.getByRole("button",{name:"订单业绩",exact:true}).click();
+      await expect(page.getByRole("heading",{name:"记账治理工作台"})).toBeVisible();
+      await page.getByLabel("记账月份").fill("2026-07");
+      await page.getByLabel("核对说明").fill("七月数据浏览器核对完成");
+      await page.getByRole("button",{name:"提交核对确认"}).click();
+      await expect(page.getByText("操作已记录并刷新。")).toBeVisible();
+
+      await page.getByRole("button",{name:"退出登录"}).click();
+      await page.getByLabel("账号").fill("e2e_accounting_hr");
+      await page.getByLabel("密码").fill("Ledger@123");
+      await page.getByRole("button",{name:"进入 SampleFlow"}).click();
+      await page.getByRole("button",{name:"订单业绩",exact:true}).click();
+      await page.getByLabel("记账月份").fill("2026-07");
+      await page.getByLabel("关账说明").fill("七月浏览器关账");
+      await page.getByRole("button",{name:"关闭记账期间"}).click();
+      await expect(page.getByText(/已关闭 · 版本 1/)).toBeVisible();
+
+      await page.getByRole("button",{name:"退出登录"}).click();
+      await page.getByLabel("账号").fill("e2e_accounting_leader");
+      await page.getByLabel("密码").fill("Ledger@123");
+      await page.getByRole("button",{name:"进入 SampleFlow"}).click();
+      await page.getByRole("button",{name:"订单业绩",exact:true}).click();
+      const correctionForm=page.getByRole("heading",{name:"申请关闭月更正"}).locator("..");
+      await correctionForm.locator("select").first().selectOption({label:"CHAIN-E2E-110 · 事件链客户"});
+      await correctionForm.getByLabel("原业务日期").fill("2026-07-15");
+      await correctionForm.getByLabel("申请原因").fill("浏览器更正申请");
+      await correctionForm.getByRole("button",{name:"提交更正申请"}).click();
+      await expect(page.getByText(/CHAIN-E2E-110 · 营业额修改/)).toBeVisible();
+
+      await page.getByRole("button",{name:"退出登录"}).click();
+      await page.getByLabel("账号").fill("e2e_accounting_hr");
+      await page.getByLabel("密码").fill("Ledger@123");
+      await page.getByRole("button",{name:"进入 SampleFlow"}).click();
+      await page.getByRole("button",{name:"订单业绩",exact:true}).click();
+      await page.getByLabel("审批意见").fill("同意浏览器更正");
+      await page.getByRole("button",{name:"批准",exact:true}).click();
+      await expect(page.getByText(/approved/)).toBeVisible();
+
+      const evidence=new Client({connectionString:database.url});await evidence.connect();
+      try{
+        const result=await evidence.query<{delta_amount:string;order_sequence:number}>(`select e.delta_amount::text,e.order_sequence from performance_events e join performance_orders o on o.id=e.order_id where o.qingflow_order_no='CHAIN-E2E-110' order by e.order_sequence`);
+        expect(result.rows.map((row)=>Number(row.delta_amount))).toEqual([110,-10,-100,100]);
+        expect(result.rows.map((row)=>row.order_sequence)).toEqual([1,2,3,4]);
+      }finally{await evidence.end();}
+    } finally {
+      if (api.exitCode === null) {
+        api.kill();
+        await once(api, "exit");
+      }
+    }
+  });
+});

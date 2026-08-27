@@ -1,0 +1,21 @@
+{
+  "profile": "product-admin",
+  "sourceRoots": ["apps/web/src"],
+  "locale": "zh-CN",
+  "canonicalMap": "UX-CONTRACT.md",
+  "requiredCapabilities": ["Select/Listbox", "Date", "Form", "Scrollbar", "CRUD"],
+  "ownership": {
+    "Select/Listbox": "native",
+    "Date": "native"
+  },
+  "requiredCommands": ["typecheck", "e2e", "build"],
+  "commands": {
+    "typecheck": "npm.cmd run typecheck --workspace @sampleflow/web",
+    "e2e": "npm.cmd run test:e2e --workspace @sampleflow/web",
+    "build": "npm.cmd run build --workspace @sampleflow/web"
+  },
+  "evidence": {
+    "crudFullFlow": "apps/web/e2e/login.spec.ts",
+    "failurePaths": "apps/api/src/ledger-governance.integration.test.ts"
+  }
+}

@@ -70,9 +70,74 @@ test("干净隔离数据库可应用全部现有迁移", async () => {
         "011_organization_import_tracking.sql",
         "012_organization_coverage_constraints.sql",
         "013_require_owner_for_active_org_units.sql",
+        "014_govern_performance_event_order.sql",
+        "015_accounting_period_governance.sql",
       ]);
     } finally {
       await client.end();
+    }
+  });
+});
+
+test("已有不可变业绩事件的数据库可升级并保持事件不可变", async () => {
+  await withTestDatabase(async (database) => {
+    const client = new Client({ connectionString: database.url });
+    await client.connect();
+    let eventId = "";
+    try {
+      await client.query("create table schema_migrations(name text primary key,applied_at timestamptz not null default now())");
+      const existingMigrations = [
+        "001_bootstrap.sql", "002_identity_and_organization.sql", "003_performance_ledger.sql",
+        "004_target_workflow.sql", "005_legacy_import_tracking.sql", "006_bootstrap_organization_from_ledger.sql",
+        "007_temporary_password_expiry.sql", "008_session_csrf.sql", "009_authentication_state.sql",
+        "010_stable_people_and_organization.sql", "011_organization_import_tracking.sql",
+        "012_organization_coverage_constraints.sql", "013_require_owner_for_active_org_units.sql",
+      ];
+      for (const name of existingMigrations) {
+        await client.query(await readFile(`${migrationsRoot}${name}`, "utf8"));
+        await client.query("insert into schema_migrations(name) values($1)", [name]);
+      }
+      const user = await client.query<{ id: string }>(
+        "insert into users(username,display_name,password_hash,password_salt,must_change_password) values('upgrade_ledger','升级账本','hash','salt',false) returning id::text",
+      );
+      const person = await client.query<{ id: string }>("select id::text from people where user_id=$1", [user.rows[0]!.id]);
+      const order = await client.query<{ id: string }>(
+        `insert into performance_orders
+          (qingflow_order_no,customer_name,customer_unit,salesperson_person_id,salesperson_name,source_received_on,
+           original_amount,current_revenue,counted_amount,lifecycle_state,created_by,posted_at)
+         values('UPGRADE-LEDGER','升级客户','升级单位',$1,'升级账本','2026-08-01',100,100,100,'active',$2,now()) returning id::text`,
+        [person.rows[0]!.id, user.rows[0]!.id],
+      );
+      const event = await client.query<{ id: string }>(
+        `insert into performance_events
+          (order_id,event_type,delta_amount,resulting_current_revenue,resulting_counted_amount,accounting_month,
+           occurred_on,reason,salesperson_name,department_name,group_name,created_by,salesperson_person_id)
+         values($1,'initial',100,100,100,'2026-08-01','2026-08-01','既有事件','升级账本','升级部门','升级小组',$2,$3)
+         returning id::text`,
+        [order.rows[0]!.id, user.rows[0]!.id, person.rows[0]!.id],
+      );
+      eventId = event.rows[0]!.id;
+    } finally {
+      await client.end();
+    }
+
+    await execFileAsync(process.execPath, ["--import", "tsx", "src/cli/migrate.ts"], {
+      cwd: apiRoot,
+      env: { ...process.env, DATABASE_URL: database.url, NODE_ENV: "test" },
+      encoding: "utf8",
+    });
+
+    const verify = new Client({ connectionString: database.url });
+    await verify.connect();
+    try {
+      const event = await verify.query<{ occurred_at: Date; order_sequence: number }>(
+        "select occurred_at,order_sequence from performance_events where id=$1", [eventId],
+      );
+      assert.ok(event.rows[0]!.occurred_at);
+      assert.equal(event.rows[0]!.order_sequence, 1);
+      await assert.rejects(verify.query("update performance_events set reason='篡改' where id=$1", [eventId]), /已入账业绩事件不可更新或删除/);
+    } finally {
+      await verify.end();
     }
   });
 });
