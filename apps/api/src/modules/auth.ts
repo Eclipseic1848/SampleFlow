@@ -5,9 +5,11 @@ import { config } from "../config.js";
 import type { Database } from "../db.js";
 import { hashPassword, isPasswordAllowed, PASSWORD_POLICY_MESSAGE, verifyPassword } from "../security/password.js";
 import { createCsrfToken, createSessionToken, CSRF_COOKIE, hashSessionToken, SESSION_COOKIE, SESSION_TTL_MS } from "../security/session.js";
+import { capabilitiesForRoles } from "./authorization.js";
 
 export type CurrentUser = {
   id: string;
+  personId: string;
   username: string;
   displayName: string;
   mustChangePassword: boolean;
@@ -113,6 +115,7 @@ export async function registerAuth(app: FastifyInstance, db: Database, clock: ()
     if (!token) return;
     const result = await db.query<{
       id: string;
+      person_id: string;
       username: string;
       display_name: string;
       must_change_password: boolean;
@@ -121,21 +124,23 @@ export async function registerAuth(app: FastifyInstance, db: Database, clock: ()
       last_seen_at: Date;
       csrf_token_hash: string | null;
     }>(
-      `select u.id::text, u.username, u.display_name, u.must_change_password,
+      `select u.id::text, p.id::text as person_id, u.username, u.display_name, u.must_change_password,
               s.id::text as session_id, s.last_seen_at, s.csrf_token_hash,
               coalesce(array_agg(ur.role_code) filter (where ur.role_code is not null), '{}') as roles
        from sessions s
        join users u on u.id = s.user_id and u.is_active
+       join people p on p.user_id=u.id
        left join user_roles ur on ur.user_id = u.id
        where s.token_hash = $1 and s.revoked_at is null and s.expires_at > now()
          and s.last_seen_at > now() - interval '30 minutes'
-       group by u.id, u.username, u.display_name, u.must_change_password, s.id, s.last_seen_at, s.csrf_token_hash`,
+       group by u.id, p.id, u.username, u.display_name, u.must_change_password, s.id, s.last_seen_at, s.csrf_token_hash`,
       [hashSessionToken(token)],
     );
     const row = result.rows[0];
     if (!row) return;
     request.currentUser = {
       id: row.id,
+      personId: row.person_id,
       username: row.username,
       displayName: row.display_name,
       mustChangePassword: row.must_change_password,
@@ -297,7 +302,7 @@ export async function registerAuth(app: FastifyInstance, db: Database, clock: ()
 
   app.get("/api/auth/me", async (request, reply) => {
     if (!request.currentUser) return reply.code(401).send({ message: "尚未登录" });
-    return { user: request.currentUser };
+    return { user: { ...request.currentUser, capabilities: capabilitiesForRoles(request.currentUser.roles) } };
   });
 
   app.get("/api/auth/csrf", async (request, reply) => {

@@ -186,6 +186,37 @@ test("管理员创建账号时由服务端返回一次性临时密码", async ()
   });
 });
 
+test("管理员可将新账号绑定已有人员身份且不制造重复人员", async () => {
+  await withMigratedTestDatabase(async (database) => {
+    await seedTestUser(database.url,{ username:"binding_admin",displayName:"绑定管理员",password:"Admin@123",roleCode:"system_admin",roleName:"系统管理员" });
+    await seedTestUser(database.url,{ username:"binding_role_fixture",displayName:"绑定角色夹具",password:"Role@123",roleCode:"salesperson",roleName:"业务员" });
+    const client=new Client({connectionString:database.url});
+    await client.connect();
+    const person=await client.query<{id:string}>(
+      "insert into people(display_name,identity_source,source_key) values('历史人员甲','test','test:historical-person') returning id::text",
+    );
+    const before=await client.query<{count:string}>("select count(*)::text as count from people");
+    await client.end();
+    await withTestApi(database.url,async(app)=>{
+      const login=await app.inject({method:"POST",url:"/api/auth/login",headers:{origin:TEST_ORIGIN},payload:{username:"binding_admin",password:"Admin@123"}});
+      const created=await app.inject({
+        method:"POST",url:"/api/admin/users",headers:authenticatedHeaders(login),
+        payload:{username:"bound_historical_user",displayName:"历史人员登录账号",roles:["salesperson"],personId:person.rows[0]!.id},
+      });
+      assert.equal(created.statusCode,201,created.body);
+      const verification=new Client({connectionString:database.url});
+      await verification.connect();
+      const linked=await verification.query<{person_id:string;count:string}>(
+        `select p.id::text as person_id,(select count(*) from people)::text as count
+         from users u join people p on p.user_id=u.id where u.username='bound_historical_user'`,
+      );
+      await verification.end();
+      assert.equal(linked.rows[0]!.person_id,person.rows[0]!.id);
+      assert.equal(linked.rows[0]!.count,before.rows[0]!.count);
+    });
+  });
+});
+
 test("临时密码过期后即使密码正确也不能登录", async () => {
   await withMigratedTestDatabase(async (database) => {
     await seedTestUser(database.url, {
