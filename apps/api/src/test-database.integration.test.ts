@@ -56,6 +56,8 @@ test("干净隔离数据库可应用全部现有迁移", async () => {
         "004_target_workflow.sql",
         "005_legacy_import_tracking.sql",
         "006_bootstrap_organization_from_ledger.sql",
+        "007_temporary_password_expiry.sql",
+        "008_session_csrf.sql",
       ]);
     } finally {
       await client.end();

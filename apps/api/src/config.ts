@@ -1,3 +1,11 @@
+const nodeEnv = process.env.NODE_ENV ?? "development";
+const developmentOrigins = [
+  "http://localhost:5174",
+  "http://127.0.0.1:5174",
+  "http://localhost:4174",
+  "http://127.0.0.1:4174",
+];
+
 export const config = {
   port: Number(process.env.API_PORT ?? 3000),
   databaseUrl: process.env.DATABASE_URL,
@@ -6,5 +14,8 @@ export const config = {
   databaseName: process.env.DB_NAME ?? "sampleflow",
   databaseUser: process.env.DB_USER ?? "sampleflow",
   databasePassword: process.env.DB_PASSWORD ?? "sampleflow_dev",
-  nodeEnv: process.env.NODE_ENV ?? "development",
+  nodeEnv,
+  allowedOrigins: process.env.APP_ORIGINS
+    ? process.env.APP_ORIGINS.split(",").map((value) => value.trim()).filter(Boolean)
+    : nodeEnv === "production" ? [] : developmentOrigins,
 } as const;

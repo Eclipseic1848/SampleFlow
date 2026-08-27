@@ -22,6 +22,7 @@ services:
     environment:
       NODE_ENV: production
       API_PORT: 3000
+      APP_ORIGINS: ${APP_ORIGINS:?请设置允许访问系统的完整 Origin}
       DB_HOST: db
       DB_PORT: 5432
       DB_NAME: ${POSTGRES_DB:-sampleflow}
