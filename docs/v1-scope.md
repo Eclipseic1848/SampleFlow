@@ -1,4 +1,6 @@
-# SampleFlow 1.0 范围与验收基线
+# SampleFlow 1.0 计划范围与验收基线
+
+> **状态说明（2026-08-27）：** 本文记录的是规划阶段确认的范围和预期验收标准，不是已经通过的验收报告。当前实现仍是技术原型，存在多项 P0 业务闭环和权限缺口。真实执行状态以根目录 [`handoff.md`](../handoff.md) 和 [GitHub Roadmap #18](https://github.com/Eclipseic1848/SampleFlow/issues/18) 为准。
 
 ## 问题定义
 
