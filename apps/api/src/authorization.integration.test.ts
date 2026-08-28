@@ -108,15 +108,15 @@ async function seedAuthorizationScenario(databaseUrl: string) {
       );
       goalIds.push(goal.rows[0]!.id);
       await client.query(
-        `insert into goal_versions(goal_id,version_no,amount,status,created_by,change_reason)
-         values($1,1,$2,'active',$3,'权限测试')`,
-        [goal.rows[0]!.id, (index + 1) * 1000, users.admin],
+        `insert into goal_versions(goal_id,version_no,amount,status,created_by,created_by_person_id,change_reason)
+         values($1,1,$2,'active',$3,$4,'权限测试')`,
+        [goal.rows[0]!.id, (index + 1) * 1000, users.admin, people[users.admin]],
       );
       if (index === 2) {
         await client.query(
-          `insert into goal_versions(goal_id,version_no,amount,status,created_by,change_reason)
-           values($1,2,3500,'pending_hr',$2,'范围外待审批测试')`,
-          [goal.rows[0]!.id, users.admin],
+          `insert into goal_versions(goal_id,version_no,amount,status,created_by,created_by_person_id,change_reason)
+           values($1,2,3500,'pending_hr',$2,$3,'范围外待审批测试')`,
+          [goal.rows[0]!.id, users.admin, people[users.admin]],
         );
       }
     }
@@ -556,9 +556,9 @@ test("正式报表与导出仅使用已生效目标，且不阻断原始业绩�
       [scenario.users.leader, scenario.people[scenario.users.leader]],
     );
     await client.query(
-      `insert into goal_versions(goal_id,version_no,amount,status,created_by,change_reason)
-       values($1,1,2000,'pending_hr',$2,'尚未生效的组目标')`,
-      [pendingGroupGoal.rows[0]!.id, scenario.users.manager],
+      `insert into goal_versions(goal_id,version_no,amount,status,created_by,created_by_person_id,change_reason)
+       values($1,1,2000,'pending_hr',$2,$3,'尚未生效的组目标')`,
+      [pendingGroupGoal.rows[0]!.id, scenario.users.manager, scenario.people[scenario.users.manager]],
     );
     await client.end();
     const pendingGroupGoalId = pendingGroupGoal.rows[0]!.id;
@@ -632,9 +632,9 @@ test("兼管多个小组的责任人未绑定目标组织时不得合并生成�
       [scenario.users.leader,scenario.people[scenario.users.leader]],
     );
     await client.query(
-      `insert into goal_versions(goal_id,version_no,amount,status,created_by,change_reason)
-       values($1,1,2000,'active',$2,'多范围阻断测试')`,
-      [goal.rows[0]!.id,scenario.users.manager],
+      `insert into goal_versions(goal_id,version_no,amount,status,created_by,created_by_person_id,change_reason)
+       values($1,1,2000,'active',$2,$3,'多范围阻断测试')`,
+      [goal.rows[0]!.id,scenario.users.manager,scenario.people[scenario.users.manager]],
     );
     await client.query(
       `update org_responsibilities set person_id=$1
@@ -661,9 +661,9 @@ test("组长目标范围不包含上级主管", async () => {
       [scenario.users.supervisor, scenario.people[scenario.users.supervisor]],
     );
     await client.query(
-      `insert into goal_versions(goal_id,version_no,amount,status,created_by,change_reason)
-       values($1,1,5000,'active',$2,'主管目标范围测试')`,
-      [supervisorGoal.rows[0]!.id, scenario.users.manager],
+      `insert into goal_versions(goal_id,version_no,amount,status,created_by,created_by_person_id,change_reason)
+       values($1,1,5000,'active',$2,$3,'主管目标范围测试')`,
+      [supervisorGoal.rows[0]!.id, scenario.users.manager, scenario.people[scenario.users.manager]],
     );
     await client.end();
 
