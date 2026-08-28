@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -74,9 +74,56 @@ test("干净隔离数据库可应用全部现有迁移", async () => {
         "015_accounting_period_governance.sql",
         "016_goal_governance.sql",
         "017_controlled_performance_import.sql",
+        "018_add_import_reconciliation.sql",
       ]);
     } finally {
       await client.end();
+    }
+  });
+});
+
+test("已有导入批次升级到逐月对账结构时保留旧证据标记", async () => {
+  await withTestDatabase(async (database) => {
+    const client = new Client({ connectionString: database.url });
+    await client.connect();
+    try {
+      await client.query("create table schema_migrations(name text primary key,applied_at timestamptz not null default now())");
+      const existingMigrations = (await readdir(migrationsRoot)).filter((name) => name.endsWith(".sql") && name < "018_").sort();
+      for (const name of existingMigrations) {
+        await client.query(await readFile(`${migrationsRoot}${name}`, "utf8"));
+        await client.query("insert into schema_migrations(name) values($1)", [name]);
+      }
+      const user = await client.query<{ id: string }>(
+        "insert into users(username,display_name,password_hash,password_salt,must_change_password) values('upgrade_import','升级导入','hash','salt',false) returning id::text",
+      );
+      const config = await client.query<{ id: string }>("select id::text from import_configs where config_key='standard-performance'");
+      await client.query(
+        `insert into import_batches(config_id,source_file_name,source_sha256,source_bytes,status,uploaded_by,row_count,order_count,event_count,total_amount)
+         values($1,'old.xlsx','old-hash',$2,'blocked',$3,2,2,2,150)`,
+        [config.rows[0]!.id, Buffer.from("old"), user.rows[0]!.id],
+      );
+    } finally {
+      await client.end();
+    }
+
+    await execFileAsync(process.execPath, ["--import", "tsx", "src/cli/migrate.ts"], {
+      cwd: apiRoot,
+      env: { ...process.env, DATABASE_URL: database.url, NODE_ENV: "test" },
+      encoding: "utf8",
+    });
+
+    const verify = new Client({ connectionString: database.url });
+    await verify.connect();
+    try {
+      const result = await verify.query<{ expected: unknown; summary: { legacyBackfill: boolean; actual: { monthly: unknown[] } } }>(
+        `select config.expected_reconciliation expected,batch.reconciliation_summary summary
+         from import_batches batch join import_configs config on config.id=batch.config_id`,
+      );
+      assert.equal(result.rows[0]!.expected, null);
+      assert.equal(result.rows[0]!.summary.legacyBackfill, true);
+      assert.deepEqual(result.rows[0]!.summary.actual.monthly, []);
+    } finally {
+      await verify.end();
     }
   });
 });

@@ -19,6 +19,19 @@ const columnMappingSchema = z.object({
   businessSequence: z.string().min(1).max(100).optional(),
   correctionRequestId: z.string().min(1).max(100).optional(),
 } as Record<Exclude<ImportColumn, "sourceRecordId" | "eventType" | "businessSequence" | "correctionRequestId">, z.ZodString> & { sourceRecordId: z.ZodOptional<z.ZodString>; eventType: z.ZodOptional<z.ZodString>; businessSequence: z.ZodOptional<z.ZodString>; correctionRequestId: z.ZodOptional<z.ZodString> });
+const reconciliationAmountSchema = z.number().finite().min(-99_999_999_999.99).max(99_999_999_999.99)
+  .refine((value) => Math.abs(value * 100 - Math.round(value * 100)) < 1e-7, "对账金额最多保留两位小数");
+const expectedReconciliationSchema = z.strictObject({
+  rows: z.number().int().nonnegative(),
+  orders: z.number().int().nonnegative(),
+  events: z.number().int().nonnegative(),
+  totalAmount: reconciliationAmountSchema,
+  monthly: z.array(z.strictObject({
+    month: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/),
+    events: z.number().int().positive(),
+    totalAmount: reconciliationAmountSchema,
+  })).min(1).max(120),
+});
 const configSchema = z.strictObject({
   configKey: z.string().trim().min(1).max(100).regex(/^[a-z0-9-]+$/),
   name: z.string().trim().min(1).max(200),
@@ -32,6 +45,7 @@ const configSchema = z.strictObject({
     z.string().refine((value) => standardBusinessRegionName(value) !== undefined, "必须映射到标准业务区域"),
   ),
   personMapping: z.record(z.string().min(1).max(200), z.string().min(1).max(200)).default({}),
+  expectedReconciliation: expectedReconciliationSchema.optional(),
   fixedEventType: z.literal("legacy_adjustment").optional(),
   allowLegacySourceKey: z.boolean().default(false),
 });
@@ -69,6 +83,17 @@ function configInputError(input: ConfigInput): string | null {
   if (input.fixedEventType && input.columnMapping.eventType) return "固定历史事件类型与事件类型列映射不能同时配置";
   if (input.fixedEventType && (input.allowedEventTypes.length !== 1 || input.allowedEventTypes[0] !== input.fixedEventType)) return "固定历史配置只能允许 legacy_adjustment";
   if (!input.fixedEventType && input.allowedEventTypes.includes("legacy_adjustment")) return "普通配置不能允许 legacy_adjustment";
+  if (input.expectedReconciliation && !input.fixedEventType) return "预期迁移对账基准只能用于专用历史配置";
+  if (input.fixedEventType && !input.expectedReconciliation) return "专用历史配置必须固化整体和逐月迁移对账基准";
+  if (input.expectedReconciliation) {
+    const months = input.expectedReconciliation.monthly;
+    if (new Set(months.map((item) => item.month)).size !== months.length) return "逐月迁移对账基准不能包含重复月份";
+    if (input.expectedReconciliation.rows !== input.expectedReconciliation.events) return "历史迁移的来源行数必须等于事件数";
+    if (input.expectedReconciliation.orders > input.expectedReconciliation.events) return "历史迁移的订单数不能超过事件数";
+    if (months.reduce((sum, item) => sum + item.events, 0) !== input.expectedReconciliation.events) return "逐月事件数合计必须等于整体事件数";
+    const monthlyCents = months.reduce((sum, item) => sum + Math.round(item.totalAmount * 100), 0);
+    if (monthlyCents !== Math.round(input.expectedReconciliation.totalAmount * 100)) return "逐月金额合计必须等于整体金额";
+  }
   if (mappedHeaders.some((header) => !namedExpectedHeaders.includes(header))) return "字段映射必须引用完整表头契约中的精确列名";
   return null;
 }
@@ -83,7 +108,7 @@ export async function registerImports(app: FastifyInstance, database: Database) 
     const result = await database.query(
       `select id::text,config_key as "configKey",version,name,status,sheet_name as "sheetName",
               column_mapping as "columnMapping",required_columns as "requiredColumns",allowed_event_types as "allowedEventTypes",business_region_mapping as "businessRegionMapping",
-              allow_legacy_source_key as "allowLegacySourceKey",created_at as "createdAt",approved_at as "approvedAt"
+              expected_reconciliation as "expectedReconciliation",allow_legacy_source_key as "allowLegacySourceKey",created_at as "createdAt",approved_at as "approvedAt"
        from import_configs where status='approved' or $1::boolean order by config_key,version desc`,
       [includeDrafts],
     );
@@ -104,10 +129,11 @@ export async function registerImports(app: FastifyInstance, database: Database) 
       await client.query("select pg_advisory_xact_lock(hashtext('sampleflow:import-config'))");
       const version = await client.query<{ next_version: number }>("select coalesce(max(version),0)+1 as next_version from import_configs where config_key=$1", [input.configKey]);
       const inserted = await client.query<{ id: string }>(
-        `insert into import_configs(config_key,version,name,status,sheet_name,expected_headers,column_mapping,required_columns,allowed_event_types,business_region_mapping,person_mapping,fixed_event_type,allow_legacy_source_key,created_by)
-         values($1,$2,$3,'draft',$4,$5::jsonb,$6::jsonb,$7::jsonb,$8::jsonb,$9::jsonb,$10::jsonb,$11,$12,$13) returning id::text`,
+        `insert into import_configs(config_key,version,name,status,sheet_name,expected_headers,column_mapping,required_columns,allowed_event_types,business_region_mapping,person_mapping,expected_reconciliation,fixed_event_type,allow_legacy_source_key,created_by)
+         values($1,$2,$3,'draft',$4,$5::jsonb,$6::jsonb,$7::jsonb,$8::jsonb,$9::jsonb,$10::jsonb,$11::jsonb,$12,$13,$14) returning id::text`,
         [input.configKey, version.rows[0]!.next_version, input.name, input.sheetName, JSON.stringify(input.expectedHeaders), JSON.stringify(input.columnMapping),
-         JSON.stringify(input.requiredColumns), JSON.stringify(input.allowedEventTypes), JSON.stringify(input.businessRegionMapping), JSON.stringify(input.personMapping), input.fixedEventType??null, input.allowLegacySourceKey, request.currentUser.id],
+         JSON.stringify(input.requiredColumns), JSON.stringify(input.allowedEventTypes), JSON.stringify(input.businessRegionMapping), JSON.stringify(input.personMapping),
+         input.expectedReconciliation ? JSON.stringify(input.expectedReconciliation) : null, input.fixedEventType??null, input.allowLegacySourceKey, request.currentUser.id],
       );
       await client.query(
         `insert into audit_logs(actor_user_id,action,entity_type,entity_id,after_data,ip_address)
@@ -135,13 +161,13 @@ export async function registerImports(app: FastifyInstance, database: Database) 
     const input = parsed.data;
     const result = await database.query(
       `update import_configs set name=$3,sheet_name=$4,expected_headers=$5::jsonb,column_mapping=$6::jsonb,
-         required_columns=$7::jsonb,allowed_event_types=$8::jsonb,business_region_mapping=$9::jsonb,person_mapping=$10::jsonb,fixed_event_type=$11,allow_legacy_source_key=$12
-       where id=$1 and config_key=$2 and status='draft' and created_by=$13
+         required_columns=$7::jsonb,allowed_event_types=$8::jsonb,business_region_mapping=$9::jsonb,person_mapping=$10::jsonb,expected_reconciliation=$11::jsonb,fixed_event_type=$12,allow_legacy_source_key=$13
+       where id=$1 and config_key=$2 and status='draft' and created_by=$14
          and not exists(select 1 from import_batches where config_id=import_configs.id)
        returning id`,
       [params.data.id, input.configKey, input.name, input.sheetName, JSON.stringify(input.expectedHeaders), JSON.stringify(input.columnMapping),
-       JSON.stringify(input.requiredColumns), JSON.stringify(input.allowedEventTypes), JSON.stringify(input.businessRegionMapping), JSON.stringify(input.personMapping), input.fixedEventType??null,
-       input.allowLegacySourceKey, request.currentUser.id],
+       JSON.stringify(input.requiredColumns), JSON.stringify(input.allowedEventTypes), JSON.stringify(input.businessRegionMapping), JSON.stringify(input.personMapping),
+       input.expectedReconciliation ? JSON.stringify(input.expectedReconciliation) : null, input.fixedEventType??null, input.allowLegacySourceKey, request.currentUser.id],
     );
     if (!result.rowCount) return reply.code(409).send({ message: "配置不存在、不是本人草稿或已经产生导入批次" });
     return { id: String(params.data.id), status: "draft" };
@@ -158,12 +184,13 @@ export async function registerImports(app: FastifyInstance, database: Database) 
       const result = await client.query(
         `update import_configs set status='approved',approved_by=$2,approved_at=now()
          where id=$1 and status='draft' and created_by is distinct from $2 and business_region_mapping<>'{}'::jsonb
+           and (fixed_event_type is null or expected_reconciliation is not null)
          returning id`,
         [params.data.id, request.currentUser.id],
       );
       if (!result.rowCount) {
         await client.query("rollback");
-        return reply.code(409).send({ message: "配置不存在、不是草稿、缺少业务区域映射，或创建人不能自行批准" });
+        return reply.code(409).send({ message: "配置不存在、不是草稿、缺少业务区域映射或历史对账基准，或创建人不能自行批准" });
       }
       await client.query(
         `insert into audit_logs(actor_user_id,action,entity_type,entity_id,ip_address)

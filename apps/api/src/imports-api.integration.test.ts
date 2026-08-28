@@ -76,6 +76,42 @@ test("导入配置草稿与批准遵守销售助理组长/人事职责分离", a
         payload: { ...config, allowLegacySourceKey: true },
       });
       assert.equal(legacySourceWithoutFixedEvent.statusCode, 400);
+      const { sourceRecordId: _sourceRecordId, eventType: _eventType, ...historicalColumnMapping } = config.columnMapping;
+      const historicalConfig = {
+        ...config,
+        configKey: "historical-layout",
+        name: "历史线下格式",
+        columnMapping: historicalColumnMapping,
+        requiredColumns: config.requiredColumns.filter((column) => column !== "sourceRecordId" && column !== "eventType"),
+        allowedEventTypes: ["legacy_adjustment"],
+        fixedEventType: "legacy_adjustment",
+        allowLegacySourceKey: true,
+        expectedReconciliation: {
+          rows: 2,
+          orders: 2,
+          events: 2,
+          totalAmount: 150,
+          monthly: [
+            { month: "2026-03", events: 1, totalAmount: 100 },
+            { month: "2026-04", events: 1, totalAmount: 50 },
+          ],
+        },
+      };
+      const { expectedReconciliation: _expectedReconciliation, ...historicalWithoutBaseline } = historicalConfig;
+      const missingHistoricalBaseline = await app.inject({ method: "POST", url: "/api/imports/configs", headers: leader, payload: historicalWithoutBaseline });
+      assert.equal(missingHistoricalBaseline.statusCode, 400);
+      assert.match(missingHistoricalBaseline.json<{ message: string }>().message, /历史配置必须固化/);
+      const inconsistentHistoricalBaseline = await app.inject({
+        method: "POST", url: "/api/imports/configs", headers: leader,
+        payload: { ...historicalConfig, configKey: "historical-invalid", expectedReconciliation: { ...historicalConfig.expectedReconciliation, totalAmount: 151 } },
+      });
+      assert.equal(inconsistentHistoricalBaseline.statusCode, 400);
+      assert.match(inconsistentHistoricalBaseline.json<{ message: string }>().message, /逐月金额合计/);
+      const historicalCreated = await app.inject({ method: "POST", url: "/api/imports/configs", headers: leader, payload: historicalConfig });
+      assert.equal(historicalCreated.statusCode, 201, historicalCreated.body);
+      const historicalId = historicalCreated.json<{ id: string }>().id;
+      const historicalApproved = await app.inject({ method: "POST", url: `/api/imports/configs/${historicalId}/approve`, headers: hr, payload: {} });
+      assert.equal(historicalApproved.statusCode, 200, historicalApproved.body);
       const created = await app.inject({ method: "POST", url: "/api/imports/configs", headers: leader, payload: config });
       assert.equal(created.statusCode, 201, created.body);
       const id = created.json<{ id: string }>().id;
@@ -89,7 +125,9 @@ test("导入配置草稿与批准遵守销售助理组长/人事职责分离", a
       assert.equal(deniedList.statusCode, 403);
       const visible = await app.inject({ method: "GET", url: "/api/imports/configs", headers: assistant });
       assert.equal(visible.statusCode, 200, visible.body);
-      assert.ok(visible.json<{ configs: { id: string; status: string; name:string; requiredColumns:string[] }[] }>().configs.some((item) => item.id === id && item.status === "approved" && item.name === "线下格式修订" && item.requiredColumns.includes("orderNo")));
+      const visibleConfigs = visible.json<{ configs: { id: string; status: string; name:string; requiredColumns:string[]; expectedReconciliation?: unknown }[] }>().configs;
+      assert.ok(visibleConfigs.some((item) => item.id === id && item.status === "approved" && item.name === "线下格式修订" && item.requiredColumns.includes("orderNo")));
+      assert.deepEqual(visibleConfigs.find((item) => item.id === historicalId)?.expectedReconciliation, historicalConfig.expectedReconciliation);
     });
   });
 });

@@ -50,6 +50,14 @@ type ExistingImportRecord = Readonly<{
   sourcePayloadFingerprint: string | null;
 }>;
 
+export type ImportReconciliationSummary = Readonly<{
+  rows: number;
+  orders: number;
+  events: number;
+  totalAmount: number;
+  monthly: readonly Readonly<{ month: string; events: number; totalAmount: number }>[];
+}>;
+
 type ImportConfigRow = {
   id: string;
   config_key: string;
@@ -57,6 +65,7 @@ type ImportConfigRow = {
   required_columns: string[];
   allowed_event_types: ImportEventType[];
   business_region_mapping: Record<string, string>;
+  expected_reconciliation: ImportReconciliationSummary | null;
   allow_legacy_source_key: boolean;
   fixed_event_type: "legacy_adjustment" | null;
 };
@@ -242,13 +251,52 @@ function addInfo(issues: ImportIssue[], row: ImportSourceRow, code: string, mess
 
 async function loadApprovedConfig(database: Database, configId: string): Promise<ImportConfigRow> {
   const result = await database.query<ImportConfigRow>(
-    `select id::text,config_key,status,required_columns,allowed_event_types,business_region_mapping,allow_legacy_source_key,fixed_event_type
+    `select id::text,config_key,status,required_columns,allowed_event_types,business_region_mapping,expected_reconciliation,allow_legacy_source_key,fixed_event_type
      from import_configs where id=$1`,
     [configId],
   );
   const config = result.rows[0];
   if (!config || config.status !== "approved") throw new ImportJobError("只能使用已批准的导入配置");
   return config;
+}
+
+function reconciliationSummary(rows: readonly NormalizedRow[]): ImportReconciliationSummary {
+  const monthly = new Map<string, { events: number; totalCents: number }>();
+  let totalCents = 0;
+  for (const row of rows) {
+    const month = row.occurredOn.slice(0, 7);
+    const current = monthly.get(month) ?? { events: 0, totalCents: 0 };
+    current.events += 1;
+    current.totalCents += Math.round(row.amount * 100);
+    monthly.set(month, current);
+    totalCents += Math.round(row.amount * 100);
+  }
+  return {
+    rows: rows.length,
+    orders: new Set(rows.map((row) => row.orderNo)).size,
+    events: rows.length,
+    totalAmount: totalCents / 100,
+    monthly: [...monthly.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([month, value]) => ({
+      month,
+      events: value.events,
+      totalAmount: value.totalCents / 100,
+    })),
+  };
+}
+
+function sameReconciliation(left: ImportReconciliationSummary, right: ImportReconciliationSummary): boolean {
+  const expectedByMonth = new Map(right.monthly.map((month) => [month.month, month]));
+  return left.rows === right.rows
+    && left.orders === right.orders
+    && left.events === right.events
+    && Math.round(left.totalAmount * 100) === Math.round(right.totalAmount * 100)
+    && left.monthly.length === right.monthly.length
+    && left.monthly.every((month) => {
+      const expected = expectedByMonth.get(month.month);
+      return expected?.month === month.month
+        && expected.events === month.events
+        && Math.round(expected.totalAmount * 100) === Math.round(month.totalAmount * 100);
+    });
 }
 
 async function normalizeRow(
@@ -381,6 +429,18 @@ export async function preflightImportRows(database: Database, input: Readonly<{
     if (differences.length) addIssue(issues, row, "ORDER_FACT_CONFLICT", `同一订单在批次内的基础事实字段差异：${differences.join("、")}`);
     else orderFacts.set(value.orderNo, value);
     normalized.push(value);
+  }
+
+  const actualReconciliation = reconciliationSummary(normalized);
+  const expectedReconciliation = config.expected_reconciliation;
+  const reconciliationMatched = expectedReconciliation ? sameReconciliation(actualReconciliation, expectedReconciliation) : null;
+  if (reconciliationMatched === false) {
+    issues.push({
+      rowNumber: 0,
+      code: "RECONCILIATION_MISMATCH",
+      severity: "blocking",
+      message: "导入文件的整体或逐月明细数量、订单数量、事件数量、金额与获批配置不一致",
+    });
   }
 
   if (normalized.length) {
@@ -532,10 +592,11 @@ export async function preflightImportRows(database: Database, input: Readonly<{
     await client.query("select pg_advisory_xact_lock(hashtext('sampleflow:performance-import-preflight'))");
     const batch = await client.query<{ id: string }>(
       `insert into import_batches(config_id,source_file_name,source_sha256,source_bytes,status,uploaded_by,
-         row_count,order_count,event_count,reconciliation_count,total_amount,warning_count,blocking_count,anomalies)
-       values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb) returning id::text`,
+         row_count,order_count,event_count,reconciliation_count,total_amount,warning_count,blocking_count,anomalies,reconciliation_summary)
+       values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15::jsonb) returning id::text`,
       [input.configId, input.sourceFileName, sourceHash, Buffer.from(input.sourceBytes), blocking ? "blocked" : "preflight_ready",
-       input.actorUserId, input.rows.length, orders, rowsToImport.length, reconciliationSourceKeys.size, totalAmount, warnings, blocking, JSON.stringify(issues)],
+       input.actorUserId, input.rows.length, orders, rowsToImport.length, reconciliationSourceKeys.size, totalAmount, warnings, blocking, JSON.stringify(issues),
+       JSON.stringify({ actual: actualReconciliation, expected: expectedReconciliation, matched: reconciliationMatched })],
     );
     batchId = batch.rows[0]!.id;
     for (const row of normalized) {
@@ -565,6 +626,7 @@ export async function preflightImportRows(database: Database, input: Readonly<{
     sourceSha256: sourceHash,
     issues,
     summary: { rows: input.rows.length, orders, events: rowsToImport.length, reconciliations: reconciliationSourceKeys.size, totalAmount, blocking, warnings },
+    reconciliation: { actual: actualReconciliation, expected: expectedReconciliation, matched: reconciliationMatched },
   };
 }
 

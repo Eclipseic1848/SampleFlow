@@ -131,7 +131,10 @@ test("销售助理组长可用标准模板预检并确认整批入账", async ({
       await page.getByRole("button",{name:"订单业绩",exact:true}).click();await page.getByRole("button",{name:"Excel 导入"}).click();
       await expect(page.getByRole("link",{name:"下载标准业绩模板"})).toHaveAttribute("href","/SampleFlow标准业绩导入模板.xlsx");
       await page.locator('input[type="file"]').setInputFiles(importTemplate);await page.getByRole("button",{name:"运行只读预检"}).click();
-      await expect(page.getByRole("heading",{name:"预检通过，等待确认"})).toBeVisible();await page.getByRole("button",{name:"确认整批入账"}).click();
+      await expect(page.getByRole("heading",{name:"预检通过，等待确认"})).toBeVisible();
+      await expect(page.getByRole("heading",{name:"逐月对账"})).toBeVisible();
+      await expect(page.getByRole("row",{name:/2026-03.*1.*100\.00/})).toBeVisible();
+      await page.getByRole("button",{name:"确认整批入账"}).click();
       await expect(page.getByRole("heading",{name:"Excel 批量导入"})).toBeHidden();await expect(page.getByText("001-A",{exact:true})).toBeVisible();
     }finally{if(api.exitCode===null){api.kill();await once(api,"exit");}}
   });

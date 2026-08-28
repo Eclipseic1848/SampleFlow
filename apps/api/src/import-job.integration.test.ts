@@ -89,6 +89,99 @@ test("标准业绩模板只能导入首次入账事件", async () => {
   });
 });
 
+test("历史导入逐月或整体对账不一致时阻断确认", async () => {
+  await withMigratedTestDatabase(async (database) => {
+    const context = await fixture(database.url);
+    try {
+      const configId = await legacyConfig(context.pool);
+      await context.pool.query(
+        `update import_configs set expected_reconciliation=$2::jsonb where id=$1`,
+        [configId, JSON.stringify({
+          rows: 2,
+          orders: 2,
+          events: 2,
+          totalAmount: 160,
+          monthly: [
+            { month: "2026-03", events: 1, totalAmount: 100 },
+            { month: "2026-04", events: 1, totalAmount: 60 },
+          ],
+        })],
+      );
+      const preflight = await preflightImportRows(context.pool, {
+        actorUserId: context.actorUserId,
+        configId,
+        sourceFileName: "legacy-truncated.xlsx",
+        sourceBytes: Buffer.from("legacy-truncated"),
+        rows: [
+          row({ sheet: "分子", sourceRecordId: undefined, eventType: "legacy_adjustment" }),
+          row({ sheet: "分子", rowNumber: 3, sourceRecordId: undefined, orderNo: "002-A", occurredOn: "2026-04-05", eventType: "legacy_adjustment", amount: 50 }),
+        ],
+      });
+      assert.equal(preflight.status, "blocked");
+      assert.ok(preflight.issues.some((issue) => issue.code === "RECONCILIATION_MISMATCH" && issue.rowNumber === 0));
+      assert.deepEqual(preflight.reconciliation.actual, {
+        rows: 2,
+        orders: 2,
+        events: 2,
+        totalAmount: 150,
+        monthly: [
+          { month: "2026-03", events: 1, totalAmount: 100 },
+          { month: "2026-04", events: 1, totalAmount: 50 },
+        ],
+      });
+      assert.equal(preflight.reconciliation.matched, false);
+      await assert.rejects(confirmImportBatch(context.pool, preflight.batchId, context.actorUserId, []), /存在阻断错误/);
+    } finally {
+      await context.pool.end();
+    }
+  });
+});
+
+test("历史导入整体和逐月对账一致且重复执行不增加数据", async () => {
+  await withMigratedTestDatabase(async (database) => {
+    const context = await fixture(database.url);
+    try {
+      const configId = await legacyConfig(context.pool);
+      const expected = {
+        rows: 2,
+        orders: 2,
+        events: 2,
+        totalAmount: 150,
+        monthly: [
+          { month: "2026-04", events: 1, totalAmount: 50 },
+          { month: "2026-03", events: 1, totalAmount: 100 },
+        ],
+      };
+      await context.pool.query("update import_configs set expected_reconciliation=$2::jsonb where id=$1", [configId, JSON.stringify(expected)]);
+      const input = {
+        actorUserId: context.actorUserId,
+        configId,
+        sourceFileName: "legacy-complete.xlsx",
+        sourceBytes: Buffer.from("legacy-complete"),
+        rows: [
+          row({ sheet: "分子", sourceRecordId: undefined, eventType: "legacy_adjustment" }),
+          row({ sheet: "分子", rowNumber: 3, sourceRecordId: undefined, orderNo: "002-A", occurredOn: "2026-04-05", eventType: "legacy_adjustment", amount: 50 }),
+        ],
+      };
+      const first = await preflightImportRows(context.pool, input);
+      assert.equal(first.status, "preflight_ready");
+      assert.equal(first.reconciliation.matched, true);
+      await confirmImportBatch(context.pool, first.batchId, context.actorUserId, []);
+      const replay = await preflightImportRows(context.pool, input);
+      assert.equal(replay.status, "preflight_ready");
+      assert.equal(replay.reconciliation.matched, true);
+      assert.equal(replay.summary.events, 0);
+      await confirmImportBatch(context.pool, replay.batchId, context.actorUserId, []);
+      const totals = await context.pool.query<{ events: number; orders: number; total: string }>(
+        "select (select count(*) from performance_events)::int events,(select count(*) from performance_orders)::int orders,coalesce(sum(delta_amount),0)::text total from performance_events",
+      );
+      assert.deepEqual(totals.rows[0], { events: 2, orders: 2, total: "150.00" });
+    } finally {
+      await context.pool.end();
+    }
+  });
+});
+
 test("批次内订单基础事实冲突列出具体字段", async () => {
   await withMigratedTestDatabase(async (database) => {
     const context = await fixture(database.url);
@@ -429,6 +522,7 @@ test("已产生批次的导入配置身份与审批证据不可修改", async ()
       for (const statement of [
         "update import_configs set config_key='changed-key' where id=$1",
         "update import_configs set version=99 where id=$1",
+        "update import_configs set expected_reconciliation='{}'::jsonb where id=$1",
         "update import_configs set created_by=null where id=$1",
         "update import_configs set approved_at=approved_at+interval '1 second' where id=$1",
       ]) {
