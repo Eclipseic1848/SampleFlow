@@ -22,6 +22,25 @@ async function loginCookie(app: Parameters<Parameters<typeof withTestApi>[1]>[0]
   return cookie;
 }
 
+test("人工录入阻断仅大小写空格或全半角不同的订单编号", async () => {
+  await withMigratedTestDatabase(async (database) => {
+    const scenario = await seedAuthorizationScenario(database.url);
+    await withTestApi(database.url, async (app) => {
+      const headers = await loginWriteHeaders(app, "scope_assistant");
+      const payload = {
+        customerName: "疑似重复客户", customerUnit: "测试单位", businessRegionCode: "CN-JS",
+        salespersonPersonId: scenario.people[scenario.users.alice], sourceReceivedOn: "2026-08-10",
+        amount: 100, reason: "人工录入",
+      };
+      const first = await app.inject({ method: "POST", url: "/api/performance/orders", headers, payload: { ...payload, orderNo: "Case １２３" } });
+      assert.equal(first.statusCode, 201, first.body);
+      const variant = await app.inject({ method: "POST", url: "/api/performance/orders", headers, payload: { ...payload, orderNo: "case123" } });
+      assert.equal(variant.statusCode, 409, variant.body);
+      assert.match(variant.json().message, /疑似重复|已存在/);
+    });
+  });
+});
+
 async function loginWriteHeaders(app: Parameters<Parameters<typeof withTestApi>[1]>[0], username: string) {
   const response = await app.inject({
     method: "POST",
@@ -152,6 +171,7 @@ test("业绩写入只接受稳定人员标识并由服务端固化组织快照",
           orderNo: "STABLE-IDENTITY-1",
           customerName: "稳定身份客户",
           customerUnit: "测试单位",
+          businessRegionCode: "CN-JS",
           salespersonPersonId: scenario.people[scenario.users.alice],
           sourceReceivedOn: "2026-08-10",
           amount: 500,
@@ -186,6 +206,7 @@ test("业绩写入只接受稳定人员标识并由服务端固化组织快照",
           orderNo: "STABLE-IDENTITY-2",
           customerName: "伪造归属客户",
           customerUnit: "测试单位",
+          businessRegionCode: "CN-JS",
           salespersonPersonId: scenario.people[scenario.users.alice],
           sourceReceivedOn: "2026-08-10",
           amount: 500,
@@ -319,7 +340,7 @@ test("人员跨组后对旧订单暂停，正负事件分别归属发生时组�
       const created = await app.inject({
         method:"POST", url:"/api/performance/orders", headers,
         payload:{
-          orderNo:"TRANSFER-1", customerName:"跨组客户", customerUnit:"测试单位",
+          orderNo:"TRANSFER-1", customerName:"跨组客户", customerUnit:"测试单位", businessRegionCode:"CN-JS",
           salespersonPersonId:scenario.people[scenario.users.alice], sourceReceivedOn:"2026-08-31",
           amount:100, reason:"转组前入账",
         },

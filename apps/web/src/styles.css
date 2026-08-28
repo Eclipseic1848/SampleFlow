@@ -137,6 +137,29 @@ input:focus {
   box-shadow: 0 0 0 3px rgba(47, 111, 237, 0.12);
 }
 
+.password-input { position: relative; }
+.password-input input { padding-right: 52px; }
+form .password-input-toggle {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 42px;
+  height: 42px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  color: var(--muted);
+  background: transparent;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: color 160ms ease, background 160ms ease;
+}
+form .password-input-toggle:hover { color: var(--navy); background: #edf4ff; }
+form .password-input-toggle:active { color: var(--navy); background: #e2ebf8; transform: none; }
+.password-hint { margin: 8px 0 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+
 form button {
   width: 100%;
   height: 50px;
@@ -282,6 +305,30 @@ th { color: #68778a; background: #fafbfc; font-weight: 600; }
 .modal-actions { margin-top: 24px; display: flex; justify-content: flex-end; gap: 10px; }
 .modal-actions button { width: auto; height: 40px; margin: 0; border: 1px solid var(--line); border-radius: 6px; color: #39495d; background: #fff; }
 .modal-actions button[type="submit"] { border-color: var(--blue); color: #fff; background: var(--blue); }
+.import-form { display: grid; gap: 18px; }
+.import-guidance { padding: 12px 14px; border-left: 3px solid var(--blue); background: #edf4ff; display: grid; gap: 5px; }
+.import-guidance a { width: fit-content; color: var(--blue); font-size: 13px; font-weight: 700; }
+.import-guidance span { color: #526175; font-size: 12px; }
+.import-file { min-height: 126px; padding: 20px; border: 2px dashed #bfcbd9; border-radius: 8px; color: #526175; background: #fafbfc; display: grid; place-items: center; align-content: center; gap: 7px; cursor: pointer; text-align: center; }
+.import-file:hover, .import-file:focus-within { border-color: var(--blue); background: #f4f8ff; }
+.import-file span { color: var(--navy); font-size: 14px; font-weight: 700; }
+.import-file small { color: var(--muted); font-size: 11px; }
+.import-file input { width: min(100%, 360px); height: auto; margin-top: 6px; padding: 0; border: 0; background: transparent; font-size: 12px; }
+.import-report { padding: 16px; border: 1px solid var(--line); background: #fafbfc; }
+.import-report h3 { margin: 0 0 12px; font-size: 15px; }
+.import-preflight_ready { border-left: 3px solid var(--teal); }
+.import-blocked { border-left: 3px solid #b83a3a; }
+.import-report dl { margin: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 10px 18px; }
+.import-report dl div { min-width: 0; }
+.import-report dt { color: var(--muted); font-size: 11px; }
+.import-report dd { margin: 4px 0 0; color: var(--navy); overflow-wrap: anywhere; font-size: 12px; font-weight: 700; }
+.import-report ul { margin: 14px 0 0; padding: 0; list-style: none; display: grid; gap: 8px; }
+.import-report li { padding-top: 9px; border-top: 1px solid var(--line); display: grid; gap: 4px; font-size: 12px; }
+.import-report li span { color: #526175; }
+.import-report li label { width: fit-content; display: flex; align-items: center; gap: 7px; color: #42546b; cursor: pointer; }
+.import-report li input { width: 16px; height: 16px; }
+.modal-actions .import-confirm { border-color: var(--blue); color: #fff; background: var(--blue); }
+.import-handoff { align-self: center; color: #ad6d00; font-size: 12px; font-weight: 700; }
 .formal-report-content { padding: 22px 24px 24px; }
 .formal-report-content > div:not(.modal-actions) { padding: 12px 0; border-bottom: 1px solid var(--line); display: flex; align-items: baseline; justify-content: space-between; gap: 20px; }
 .formal-report-content span { color: var(--muted); font-size: 12px; }

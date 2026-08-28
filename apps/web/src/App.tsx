@@ -1,6 +1,6 @@
 import { FormEvent, type ReactNode, useCallback, useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Activity, BarChart3, ChevronRight, ClipboardCheck, Database, FileClock, LogOut, Network, PauseCircle, PlayCircle, Plus, RefreshCw, Search, ShieldCheck, Target, UsersRound, X } from "lucide-react";
+import { Activity, BarChart3, ChevronRight, ClipboardCheck, Database, Eye, EyeOff, FileClock, FileUp, LogOut, Network, PauseCircle, PlayCircle, Plus, RefreshCw, Search, ShieldCheck, Target, UsersRound, X } from "lucide-react";
 
 type Capabilities = { viewPerformance:boolean; viewGoals:boolean; viewOrganization:boolean; viewApprovals:boolean; editPerformance:boolean; exportPerformance:boolean; exportGoals:boolean; manageAccounts:boolean; manageOrganization:boolean };
 type User = { id: string; personId:string; username: string; displayName: string; mustChangePassword: boolean; roles: string[]; capabilities:Capabilities };
@@ -55,6 +55,13 @@ function passwordStrength(password: string): "弱" | "中" | "强" {
   return "弱";
 }
 
+function PasswordInput({id,name,label,value,onChange,autoComplete,describedBy,invalid=false}:{id:string;name:string;label:string;value:string;onChange:(value:string)=>void;autoComplete:"current-password"|"new-password";describedBy?:string;invalid?:boolean}){
+  const[visible,setVisible]=useState(false);
+  const inputRef=useRef<HTMLInputElement>(null);
+  function toggleVisibility(){if(inputRef.current&&inputRef.current.value!==value)onChange(inputRef.current.value);setVisible((current)=>!current);}
+  return <><label htmlFor={id}>{label}</label><div className="password-input"><input ref={inputRef} id={id} name={name} type={visible?"text":"password"} defaultValue={value} onChange={(event)=>onChange(event.target.value)} autoComplete={autoComplete} aria-describedby={describedBy} aria-invalid={invalid||undefined}/><button type="button" className="password-input-toggle" aria-label={`${visible?"隐藏":"显示"}${label}`} aria-pressed={visible} onClick={toggleVisibility}>{visible?<EyeOff size={18} aria-hidden="true"/>:<Eye size={18} aria-hidden="true"/>}</button></div></>;
+}
+
 async function getCurrentUser(): Promise<User | null> {
   const response = await apiFetch("/api/auth/me");
   if (response.status === 401) return null;
@@ -75,8 +82,9 @@ function ChangePassword({onChanged}:{onChanged:()=>Promise<void>}){
   const[currentPassword,setCurrentPassword]=useState("");
   const[newPassword,setNewPassword]=useState("");
   const[message,setMessage]=useState("");
-  async function submit(event:FormEvent){event.preventDefault();const response=await apiFetch("/api/auth/change-password",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({currentPassword,newPassword})});const data=await response.json() as {message?:string};if(!response.ok){setMessage(data.message??"密码修改失败");return;}await onChanged();}
-  return <main className="password-shell"><section className="login-card"><div className="login-heading"><p>首次登录安全设置</p><h2>请修改初始密码</h2><span>6—128 位，并包含英文字母、数字和符号</span></div><form noValidate onSubmit={submit}><label htmlFor="current-password">当前密码</label><input id="current-password" type="password" value={currentPassword} onChange={(e)=>setCurrentPassword(e.target.value)} autoComplete="current-password"/><label htmlFor="new-password">新密码</label><input id="new-password" type="password" value={newPassword} onChange={(e)=>setNewPassword(e.target.value)} autoComplete="new-password"/><p className="password-strength" aria-live="polite">密码强度：{passwordStrength(newPassword)}</p><button type="submit">保存新密码</button>{message?<p className="form-error">{message}</p>:null}</form></section></main>;
+  async function submit(event:FormEvent<HTMLFormElement>){event.preventDefault();const formData=new FormData(event.currentTarget);const submittedCurrentPassword=String(formData.get("currentPassword")??"");const submittedNewPassword=String(formData.get("newPassword")??"");const response=await apiFetch("/api/auth/change-password",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({currentPassword:submittedCurrentPassword,newPassword:submittedNewPassword})});const data=await response.json() as {message?:string};if(!response.ok){setMessage(data.message??"密码修改失败");return;}await onChanged();}
+  const currentPasswordError=message==="当前密码错误";
+  return <main className="password-shell"><section className="login-card"><div className="login-heading"><p>首次登录安全设置</p><h2>请修改初始密码</h2><span>6—128 位，并包含英文字母、数字和符号</span></div><form noValidate onSubmit={submit}><PasswordInput id="current-password" name="currentPassword" label="当前密码" value={currentPassword} onChange={(value)=>{setCurrentPassword(value);if(message)setMessage("");}} autoComplete="current-password" describedBy={`current-password-hint${currentPasswordError?" current-password-error":""}`} invalid={currentPasswordError}/><p id="current-password-hint" className="password-hint">当前密码请填写刚才登录时使用的临时密码。</p><PasswordInput id="new-password" name="newPassword" label="新密码" value={newPassword} onChange={(value)=>{setNewPassword(value);if(message)setMessage("");}} autoComplete="new-password"/><p className="password-strength" aria-live="polite">密码强度：{passwordStrength(newPassword)}</p><button type="submit">保存新密码</button>{message?<p id={currentPasswordError?"current-password-error":undefined} className="form-error" role="alert">{message}</p>:null}</form></section></main>;
 }
 
 function Login({ onLogin }: { onLogin: (user: User) => void }) {
@@ -84,11 +92,33 @@ function Login({ onLogin }: { onLogin: (user: User) => void }) {
   const [password, setPassword] = useState("SampleFlow@2026");
   const [message, setMessage] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  async function submit(event: FormEvent) {
+  const [readiness, setReadiness] = useState<"checking" | "ready" | "unavailable">("checking");
+  useEffect(() => {
+    let active = true;
+    let controller: AbortController | null = null;
+    const checkReadiness = async () => {
+      controller?.abort();
+      controller = new AbortController();
+      try {
+        const response = await fetch("/api/ready", { cache: "no-store", signal: controller.signal });
+        if (active) setReadiness(response.ok ? "ready" : "unavailable");
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        if (active) setReadiness("unavailable");
+      }
+    };
+    void checkReadiness();
+    const timer = window.setInterval(checkReadiness, 5_000);
+    return () => { active = false; controller?.abort(); window.clearInterval(timer); };
+  }, []);
+  async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setSubmitting(true); setMessage("");
     try {
-      const response = await apiFetch("/api/auth/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username, password }) });
-      const data = await response.json() as { message?: string };
+      const formData = new FormData(event.currentTarget);
+      const submittedUsername = String(formData.get("username") ?? "");
+      const submittedPassword = String(formData.get("password") ?? "");
+      const response = await apiFetch("/api/auth/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username:submittedUsername, password:submittedPassword }) });
+      const data = await readResponseJson<{ message?: string }>(response, "登录服务暂时不可用，请确认 API 已启动后重试");
       if (!response.ok) throw new Error(data.message ?? "登录失败");
       const user = await getCurrentUser();
       if (!user) throw new Error("登录会话创建失败");
@@ -98,7 +128,7 @@ function Login({ onLogin }: { onLogin: (user: User) => void }) {
   }
   return <main className="login-shell">
     <section className="brand-panel"><div className="brand-mark">SF</div><div className="brand-copy"><p className="product-name">SampleFlow</p><h1>每一笔业绩，都有清晰的来路与责任。</h1><p className="brand-summary">面向销售到样业务的目标、订单、组织归属与审批系统。历史不重写，调整有事件，结果可追溯。</p></div><div className="principles"><div><Activity size={20} /><span>实时业绩事件</span></div><div><ShieldCheck size={20} /><span>角色权限分离</span></div><div><Database size={20} /><span>集中数据与审计</span></div></div></section>
-    <section className="login-panel"><div className="login-card"><div className="login-heading"><p>销售到样业绩管理</p><h2>登录系统</h2><span>开发环境已预填销售助理演示账号</span></div><form noValidate onSubmit={submit}><label htmlFor="username">账号</label><input id="username" value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" /><label htmlFor="password">密码</label><input id="password" value={password} onChange={(e) => setPassword(e.target.value)} type="password" autoComplete="current-password" /><button type="submit" disabled={submitting}>{submitting ? "正在登录…" : "进入 SampleFlow"}<ChevronRight size={18} /></button>{message ? <p className="form-error" role="alert">{message}</p> : null}</form><div className="readiness readiness-ready"><span />前端、API 与数据库已连接</div></div></section>
+    <section className="login-panel"><div className="login-card"><div className="login-heading"><p>销售到样业绩管理</p><h2>登录系统</h2><span>开发环境已预填销售助理演示账号</span></div><form noValidate onSubmit={submit}><label htmlFor="username">账号</label><input id="username" name="username" value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" /><PasswordInput id="password" name="password" label="密码" value={password} onChange={setPassword} autoComplete="current-password"/><button type="submit" disabled={submitting}>{submitting ? "正在登录…" : "进入 SampleFlow"}<ChevronRight size={18} /></button>{message ? <p className="form-error" role="alert">{message}</p> : null}</form><div className={`readiness readiness-${readiness}`} role="status" aria-live="polite"><span />{{checking:"正在检查 API 与数据库",ready:"前端、API 与数据库已连接",unavailable:"API 或数据库暂不可用"}[readiness]}</div></div></section>
   </main>;
 }
 
@@ -197,6 +227,7 @@ function OrdersPage({ user }: { user: User }) {
   const [orders, setOrders] = useState<Order[]>([]);
   const [selected, setSelected] = useState<Order | null>(null);
   const [showCreate, setShowCreate] = useState(false);
+  const [showImport, setShowImport] = useState(false);
   const [message, setMessage] = useState("");
   const initialSearch = new URLSearchParams(window.location.search).get("orderSearch") ?? "";
   const [search, setSearch] = useState(initialSearch);
@@ -235,7 +266,7 @@ function OrdersPage({ user }: { user: User }) {
   }, [committedSearch,refreshVersion]);
   async function refresh() { setRefreshVersion((value)=>value+1); }
   function clearSearch(){setSearch("");commitSearch("");window.requestAnimationFrame(()=>searchRef.current?.focus());}
-  return <main className="dashboard orders-page"><header><div><h1>订单业绩</h1><p>按订单编号维护不可变业绩事件；已入账记录不能覆盖或删除</p></div>{canEdit ? <button className="primary-action" onClick={() => setShowCreate(true)}><Plus size={16}/>录入新订单</button> : null}</header>
+  return <main className="dashboard orders-page"><header><div><h1>订单业绩</h1><p>按订单编号维护不可变业绩事件；已入账记录不能覆盖或删除</p></div>{canEdit ? <div className="header-actions"><button className="secondary-action" onClick={() => setShowImport(true)}><FileUp size={16}/>Excel 导入</button><button className="primary-action" onClick={() => setShowCreate(true)}><Plus size={16}/>录入新订单</button></div> : null}</header>
     {message ? <p className="page-message" role="status">{message}</p> : null}
     {!canEdit ? <div className="permission-note"><ShieldCheck size={18}/>当前角色仅可查看。只有销售助理及销售助理组长可以录入或调整业绩。</div> : null}
     <LedgerGovernancePanel user={user} orders={orders} onChanged={refresh}/>
@@ -244,11 +275,39 @@ function OrdersPage({ user }: { user: User }) {
       <div className="orders-table-wrap"><table><thead><tr><th scope="col">订单编号</th><th scope="col">客户</th><th scope="col">业务员</th><th scope="col">当前营业额</th><th scope="col">计入业绩</th><th scope="col">状态</th><th scope="col">操作</th></tr></thead><tbody>{!loading&&orders.length === 0 ? <tr><td colSpan={7} className="empty-cell">{committedSearch?`没有找到与“${committedSearch}”匹配的订单。`:"暂无订单，请录入第一笔业绩。"}</td></tr> : orders.map((order) => <tr key={order.id}><td>{order.orderNo}</td><td>{order.customerName}</td><td>{order.salespersonName}</td><td>{formatMoney(order.currentRevenue)}</td><td>{formatMoney(order.countedAmount)}</td><td><Status state={order.lifecycleState}/></td><td><button className="table-action" onClick={() => setSelected(order)}>查看 / 调整</button></td></tr>)}</tbody></table></div>
     </section>
     {showCreate ? <CreateOrder onClose={() => setShowCreate(false)} onSaved={async () => { setShowCreate(false); await refresh(); }} /> : null}
+    {showImport ? <ExcelImportDialog user={user} onClose={() => setShowImport(false)} onImported={async () => { setShowImport(false); await refresh(); }} /> : null}
     {selected ? <AdjustOrder order={selected} canEdit={canEdit} onClose={() => setSelected(null)} onSaved={async () => { setSelected(null); await refresh(); }} /> : null}
   </main>;
 }
 
-const initialOrder = { orderNo: "", customerName: "", customerUnit: "", salespersonPersonId: "", serviceType: "", sourceReceivedOn: businessDateToday(), amount: "", reason: "首次录入" };
+type ImportConfig = { id:string; name:string; version:number; status:"draft"|"approved"|"retired"; sheetName:string };
+type ImportIssue = { rowNumber:number; code:string; severity:"blocking"|"warning"|"info"; message:string };
+type ImportReport = { batchId:string; status:"blocked"|"preflight_ready"; sourceSha256:string; issues:ImportIssue[]; summary:{rows:number;orders:number;events:number;totalAmount:number;blocking:number;warnings:number} };
+
+function fileAsBase64(file:File):Promise<string>{return new Promise((resolve,reject)=>{const reader=new FileReader();reader.onerror=()=>reject(new Error("文件读取失败，请重新选择。"));reader.onload=()=>{const result=String(reader.result??"");const comma=result.indexOf(",");if(comma<0){reject(new Error("文件内容无效。"));return;}resolve(result.slice(comma+1));};reader.readAsDataURL(file);});}
+
+function ExcelImportDialog({user,onClose,onImported}:{user:User;onClose:()=>void;onImported:()=>Promise<void>}){
+  const[configs,setConfigs]=useState<ImportConfig[]>([]);const[configId,setConfigId]=useState("");const[file,setFile]=useState<File|null>(null);const[report,setReport]=useState<ImportReport|null>(null);const[confirmedWarnings,setConfirmedWarnings]=useState<Set<string>>(new Set());const[error,setError]=useState("");const[loading,setLoading]=useState(true);const[busy,setBusy]=useState(false);const isLeader=user.roles.includes("sales_assistant_leader");
+  useEffect(()=>{const controller=new AbortController();fetch("/api/imports/configs",{signal:controller.signal}).then(async(response)=>{const data=await response.json() as {configs?:ImportConfig[];message?:string};if(!response.ok)throw new Error(data.message??"导入配置加载失败");const approved=(data.configs??[]).filter((item)=>item.status==="approved");setConfigs(approved);setConfigId(approved[0]?.id??"");}).catch((failure)=>{if(failure instanceof DOMException&&failure.name==="AbortError")return;setError(failure instanceof Error?failure.message:"导入配置加载失败");}).finally(()=>{if(!controller.signal.aborted)setLoading(false);});return()=>controller.abort();},[]);
+  function chooseFile(selected:File|null){setReport(null);setConfirmedWarnings(new Set());setError("");if(!selected){setFile(null);return;}if(!selected.name.toLowerCase().endsWith(".xlsx")){setFile(null);setError("只接受 .xlsx 工作簿。");return;}if(selected.size===0||selected.size>20*1024*1024){setFile(null);setError("文件必须大于 0 且不超过 20 MB。");return;}setFile(selected);}
+  async function preflight(event:FormEvent){event.preventDefault();if(busy)return;if(!configId||!file){setError("请选择已批准的导入配置和一个 .xlsx 文件。");return;}setBusy(true);setError("");setReport(null);try{const contentBase64=await fileAsBase64(file);const response=await apiFetch("/api/imports/preflight",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({configId:Number(configId),fileName:file.name,contentBase64})});const data=await response.json() as ImportReport&{message?:string};if(!response.ok)throw new Error(data.message??"预检失败");setReport(data);}catch(failure){setError(failure instanceof Error?failure.message:"预检失败，请重试。");}finally{setBusy(false);}}
+  async function confirm(){if(!report||busy)return;setBusy(true);setError("");try{const response=await apiFetch(`/api/imports/batches/${report.batchId}/confirm`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({confirmedWarnings:[...confirmedWarnings]})});const data=await response.json() as {message?:string};if(!response.ok)throw new Error(data.message??"确认入账失败");await onImported();}catch(failure){setError(failure instanceof Error?failure.message:"确认入账失败，请重试。");}finally{setBusy(false);}}
+  const warningKeys=report?.issues.filter((issue)=>issue.severity==="warning").map((issue)=>`${issue.rowNumber}:${issue.code}`)??[];const allWarningsConfirmed=warningKeys.every((key)=>confirmedWarnings.has(key));
+  return <Modal title="Excel 批量导入" note="先完整预检，只有销售助理组长可以把无阻断批次原子入账" onClose={onClose}><form noValidate className="business-form import-form" onSubmit={preflight}><div className="import-guidance"><a href="/SampleFlow标准业绩导入模板.xlsx" download>下载标准业绩模板</a><span>仅接收固定值 .xlsx；公式、宏、外部链接和未知表头会被阻断。</span></div><label className="field"><span>已批准导入配置</span><select value={configId} disabled={loading||busy} onChange={(event)=>{setConfigId(event.target.value);setReport(null);}}><option value="">{loading?"正在加载…":"请选择"}</option>{configs.map((item)=><option key={item.id} value={item.id}>{item.name} · v{item.version}</option>)}</select></label><label className="import-file"><FileUp size={22}/><span>{file?file.name:"选择一个 .xlsx 文件"}</span><small>{file?`${(file.size/1024).toFixed(1)} KB`:"单文件上限 20 MB；不会显示或记录本地路径"}</small><input type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" disabled={busy} onChange={(event)=>chooseFile(event.currentTarget.files?.[0]??null)}/></label>{!loading&&configs.length===0?<p className="permission-note">暂无已批准配置。销售助理组长需先创建草稿，并由人事批准业务区域及人员精确映射。</p>:null}{error?<p className="form-error" role="alert">{error}</p>:null}{report?<section className={`import-report import-${report.status}`} aria-labelledby="import-report-title"><h3 id="import-report-title">{report.status==="blocked"?"预检未通过":"预检通过，等待确认"}</h3><dl><div><dt>来源 SHA-256</dt><dd>{report.sourceSha256}</dd></div><div><dt>来源行 / 订单 / 待入账事件</dt><dd>{report.summary.rows} / {report.summary.orders} / {report.summary.events}</dd></div><div><dt>金额合计</dt><dd>{formatMoney(report.summary.totalAmount)}</dd></div><div><dt>阻断 / 警告</dt><dd>{report.summary.blocking} / {report.summary.warnings}</dd></div></dl>{report.issues.length?<ul>{report.issues.map((issue,index)=>{const warningKey=`${issue.rowNumber}:${issue.code}`;const issueLabel=issue.severity==="blocking"?"阻断":issue.severity==="warning"?"警告":"提示";return <li key={`${warningKey}-${index}`}><strong>第 {issue.rowNumber} 行 · {issueLabel}</strong><span>{issue.message}</span>{issue.severity==="warning"?<label><input type="checkbox" checked={confirmedWarnings.has(warningKey)} onChange={(event)=>setConfirmedWarnings((current)=>{const next=new Set(current);if(event.target.checked)next.add(warningKey);else next.delete(warningKey);return next;})}/>我已核对并确认此条警告</label>:null}</li>;})}</ul>:<p>未发现阻断、警告或提示。</p>}</section>:null}<div className="modal-actions"><button type="button" onClick={onClose}>取消</button>{!report?<button type="submit" disabled={busy||loading||!file||!configId} aria-busy={busy}>{busy?"正在预检…":"运行只读预检"}</button>:report.status==="preflight_ready"&&isLeader?<button type="button" className="import-confirm" disabled={busy||!allWarningsConfirmed} aria-busy={busy} onClick={confirm}>{busy?"正在原子入账…":"确认整批入账"}</button>:report.status==="preflight_ready"?<span className="import-handoff">请交由销售助理组长确认入账</span>:<button type="button" onClick={()=>setReport(null)}>重新选择</button>}</div></form></Modal>;
+}
+
+const standardBusinessRegions = [
+  ["CN-BJ","北京市"],["CN-TJ","天津市"],["CN-HE","河北省"],["CN-SX","山西省"],["CN-NM","内蒙古自治区"],
+  ["CN-LN","辽宁省"],["CN-JL","吉林省"],["CN-HL","黑龙江省"],["CN-SH","上海市"],["CN-JS","江苏省"],
+  ["CN-ZJ","浙江省"],["CN-AH","安徽省"],["CN-FJ","福建省"],["CN-JX","江西省"],["CN-SD","山东省"],
+  ["CN-HA","河南省"],["CN-HB","湖北省"],["CN-HN","湖南省"],["CN-GD","广东省"],["CN-GX","广西壮族自治区"],
+  ["CN-HI","海南省"],["CN-CQ","重庆市"],["CN-SC","四川省"],["CN-GZ","贵州省"],["CN-YN","云南省"],
+  ["CN-XZ","西藏自治区"],["CN-SN","陕西省"],["CN-GS","甘肃省"],["CN-QH","青海省"],["CN-NX","宁夏回族自治区"],
+  ["CN-XJ","新疆维吾尔自治区"],
+  ["EXT-TRADE","外贸"],
+] as const;
+
+const initialOrder = { orderNo: "", customerName: "", customerUnit: "", businessRegionCode: "", salespersonPersonId: "", serviceType: "", sourceReceivedOn: businessDateToday(), amount: "", reason: "首次录入" };
 
 function previousBusinessMonth():string{const [year,month]=businessDateToday().slice(0,7).split("-").map(Number);return new Date(Date.UTC(year!,month!-2,1)).toISOString().slice(0,7);}
 
@@ -325,7 +384,7 @@ function CreateOrder({ onClose, onSaved }: { onClose: () => void; onSaved: () =>
     } catch (reason) { setError(reason instanceof Error ? reason.message : "订单入账失败"); }
     finally { setSaving(false); }
   }
-  return <Modal title="录入订单业绩" note="组织归属按业务员和收到日期自动解析并固化，后续只能追加更正事件" onClose={onClose}><form noValidate className="business-form" onSubmit={submit}><div className="form-grid"><Field label="订单编号" value={form.orderNo} onChange={(v) => set("orderNo",v)}/><Field label="收到日期" value={form.sourceReceivedOn} type="date" onChange={(v) => set("sourceReceivedOn",v)}/><Field label="客户名称" value={form.customerName} onChange={(v) => set("customerName",v)}/><Field label="客户单位" value={form.customerUnit} onChange={(v) => set("customerUnit",v)}/><label className="field"><span>业务员</span><select required value={form.salespersonPersonId} onChange={(event) => set("salespersonPersonId",event.target.value)}><option value="">请选择</option>{people.map((person) => <option key={person.id} value={person.id}>{person.displayName}</option>)}</select></label><Field label="服务类型" value={form.serviceType} onChange={(v) => set("serviceType",v)}/><Field label="营业额" value={form.amount} type="number" onChange={(v) => set("amount",v)}/><Field label="入账原因" value={form.reason} onChange={(v) => set("reason",v)}/></div>{error ? <p className="form-error">{error}</p> : null}<div className="modal-actions"><button type="button" onClick={onClose}>取消</button><button type="submit" disabled={saving}>{saving ? "正在入账…" : "确认入账"}</button></div></form></Modal>;
+  return <Modal title="录入订单业绩" note="组织归属按业务员和收到日期自动解析并固化，后续只能追加更正事件" onClose={onClose}><form noValidate className="business-form" onSubmit={submit}><div className="form-grid"><Field label="订单编号" value={form.orderNo} onChange={(v) => set("orderNo",v)}/><Field label="收到日期" value={form.sourceReceivedOn} type="date" onChange={(v) => set("sourceReceivedOn",v)}/><Field label="客户名称" value={form.customerName} onChange={(v) => set("customerName",v)}/><Field label="客户单位" value={form.customerUnit} onChange={(v) => set("customerUnit",v)}/><label className="field"><span>业务区域</span><select required value={form.businessRegionCode} onChange={(event) => set("businessRegionCode",event.target.value)}><option value="">请选择</option>{standardBusinessRegions.map(([code,name]) => <option key={code} value={code}>{name}</option>)}</select></label><label className="field"><span>业务员</span><select required value={form.salespersonPersonId} onChange={(event) => set("salespersonPersonId",event.target.value)}><option value="">请选择</option>{people.map((person) => <option key={person.id} value={person.id}>{person.displayName}</option>)}</select></label><Field label="服务类型" value={form.serviceType} onChange={(v) => set("serviceType",v)}/><Field label="营业额" value={form.amount} type="number" onChange={(v) => set("amount",v)}/><Field label="入账原因" value={form.reason} onChange={(v) => set("reason",v)}/></div>{error ? <p className="form-error">{error}</p> : null}<div className="modal-actions"><button type="button" onClick={onClose}>取消</button><button type="submit" disabled={saving}>{saving ? "正在入账…" : "确认入账"}</button></div></form></Modal>;
 }
 
 function AdjustOrder({ order, canEdit, onClose, onSaved }: { order: Order; canEdit: boolean; onClose: () => void; onSaved: () => Promise<void> }) {

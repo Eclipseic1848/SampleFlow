@@ -8,6 +8,7 @@ import {
   type PerformanceCommand,
   type PerformanceState,
 } from "../domain/performance.js";
+import { standardBusinessRegionName } from "../domain/business-regions.js";
 import { hasAnyRole, PERFORMANCE_EDITOR_ROLES } from "./auth.js";
 import { canReadPerformance, pendingGoalSql, pendingGoalValues, performanceScopeSql, performanceScopeValues, resolvePerformanceAccess } from "./authorization.js";
 import { loadFormalReport } from "./formal-reports.js";
@@ -25,9 +26,13 @@ const moneySchema = z.number().finite().min(0).max(99_999_999_999.99);
 const dateSchema = z.iso.date();
 
 const createOrderSchema = z.strictObject({
-  orderNo: z.string().trim().min(1).max(100),
+  orderNo: z.string().min(1).max(100).refine(
+    (value) => value === value.trim() && !/[\u0000-\u001f\u007f]/.test(value),
+    "订单编号必须是无首尾空格和控制字符的精确文本",
+  ),
   customerName: z.string().trim().min(1).max(200),
   customerUnit: z.string().trim().min(1).max(300),
+  businessRegionCode: z.string().refine((value) => standardBusinessRegionName(value) !== undefined, "必须选择标准业务区域"),
   salespersonPersonId: z.coerce.number().int().positive(),
   serviceType: z.string().trim().max(200).optional().default(""),
   sourceReceivedOn: dateSchema,
@@ -234,12 +239,13 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
       const organization = await resolveOrganization(client, String(input.salespersonPersonId), input.sourceReceivedOn);
       const order = await client.query<{ id: string }>(
         `insert into performance_orders
-          (qingflow_order_no, customer_name, customer_unit, salesperson_person_id, salesperson_name, service_type, source_received_on,
-           original_amount, current_revenue, counted_amount, lifecycle_state, created_by, posted_at)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,now()) returning id::text`,
-        [input.orderNo, input.customerName, input.customerUnit, organization.personId, organization.salespersonName,
-         input.serviceType || null, input.sourceReceivedOn, input.amount, decision.next.currentRevenue,
-         decision.next.countedAmount, decision.next.lifecycle, request.currentUser!.id],
+          (qingflow_order_no, customer_name, customer_unit, business_region_source_text, business_region_code,
+           salesperson_person_id, salesperson_name, service_type, source_received_on,
+            original_amount, current_revenue, counted_amount, lifecycle_state, created_by, posted_at)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,now()) returning id::text`,
+        [input.orderNo, input.customerName, input.customerUnit, standardBusinessRegionName(input.businessRegionCode), input.businessRegionCode,
+         organization.personId, organization.salespersonName, input.serviceType || null, input.sourceReceivedOn,
+         input.amount, decision.next.currentRevenue, decision.next.countedAmount, decision.next.lifecycle, request.currentUser!.id],
       );
       const orderId = order.rows[0]!.id;
       await client.query(

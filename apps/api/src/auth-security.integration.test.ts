@@ -131,7 +131,7 @@ test("改密接口统一执行六位字母数字符号规则", async () => {
   });
 });
 
-test("管理员创建账号时由服务端返回一次性临时密码", async () => {
+test("管理员创建账号的一次性临时密码可完成首次改密", async () => {
   await withMigratedTestDatabase(async (database) => {
     await seedTestUser(database.url, {
       username: "security_admin",
@@ -182,6 +182,24 @@ test("管理员创建账号时由服务端返回一次性临时密码", async ()
       const userCookie = String(userLogin.headers["set-cookie"]).split(";", 1)[0];
       const me = await app.inject({ method: "GET", url: "/api/auth/me", headers: { cookie: userCookie } });
       assert.equal(me.json().user.mustChangePassword, true);
+
+      const changed = await app.inject({
+        method: "POST",
+        url: "/api/auth/change-password",
+        headers: authenticatedHeaders(userLogin),
+        payload: { currentPassword: result.temporaryPassword, newPassword: "Changed@123" },
+      });
+      assert.equal(changed.statusCode, 200, changed.body);
+      const changedMe = await app.inject({ method: "GET", url: "/api/auth/me", headers: { cookie: userCookie } });
+      assert.equal(changedMe.json().user.mustChangePassword, false);
+
+      const changedLogin = await app.inject({
+        method: "POST",
+        url: "/api/auth/login",
+        headers: { origin: TEST_ORIGIN },
+        payload: { username: "generated_password_user", password: "Changed@123" },
+      });
+      assert.equal(changedLogin.statusCode, 200, changedLogin.body);
     });
   });
 });

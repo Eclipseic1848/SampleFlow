@@ -13,6 +13,7 @@ const webPort=process.env.SAMPLEFLOW_E2E_WEB_PORT;
 if(!apiPort||!webPort)throw new Error("缺少隔离 E2E 端口");
 const apiBaseUrl=`http://127.0.0.1:${apiPort}`;
 const webBaseUrl=`http://127.0.0.1:${webPort}`;
+const importTemplate=fileURLToPath(new URL("../public/SampleFlow标准业绩导入模板.xlsx",import.meta.url));
 
 async function waitForApi(url: string, exited: () => boolean): Promise<void> {
   const deadline = Date.now() + 15_000;
@@ -28,6 +29,34 @@ async function waitForApi(url: string, exited: () => boolean): Promise<void> {
   }
   throw new Error("等待测试 API 就绪超时");
 }
+
+test("API 返回空 502 时登录页显示服务不可用而不是 JSON 解析错误", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.route("**/api/auth/me", async (route) => {
+    await route.fulfill({ status: 401, contentType: "application/json", body: '{"message":"未登录"}' });
+  });
+  await page.route("**/api/ready", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await route.fulfill({ status: 503, contentType: "text/plain", body: "" });
+  });
+  await page.route("**/api/auth/login", async (route) => {
+    await route.fulfill({ status: 502, contentType: "text/plain", body: "" });
+  });
+
+  await page.goto("/");
+  await expect(page.getByText("正在检查 API 与数据库")).toBeVisible();
+  await expect(page.getByText("API 或数据库暂不可用")).toBeVisible();
+  const loginPassword = page.getByLabel("密码", { exact: true });
+  await expect(loginPassword).toHaveAttribute("type", "password");
+  await page.getByRole("button", { name: "显示密码" }).click();
+  await expect(loginPassword).toHaveAttribute("type", "text");
+  await expect(page.getByRole("button", { name: "隐藏密码" })).toHaveAttribute("aria-pressed", "true");
+  await page.getByRole("button", { name: "隐藏密码" }).click();
+  await expect(loginPassword).toHaveAttribute("type", "password");
+  await loginPassword.press("Enter");
+  await expect(page.getByRole("alert")).toHaveText("登录服务暂时不可用，请确认 API 已启动后重试");
+  await expect(page.getByRole("alert")).not.toContainText("Unexpected end of JSON input");
+});
 
 test("销售助理可通过真实 API 登录", async ({ page }) => {
   await withMigratedTestDatabase(async (database) => {
@@ -57,8 +86,9 @@ test("销售助理可通过真实 API 登录", async ({ page }) => {
       await page.goto("/");
       expect((await guestResponse).status()).toBe(401);
       await expect(page.getByRole("heading", { name: "登录系统" })).toBeVisible();
+      await expect(page.getByText("前端、API 与数据库已连接")).toBeVisible();
       await page.getByLabel("账号").fill("e2e_sales_assistant");
-      await page.getByLabel("密码").fill("E2ePass@123");
+      await page.getByLabel("密码", { exact: true }).fill("E2ePass@123");
 
       const loginResponse = page.waitForResponse((response) =>
         response.url().endsWith("/api/auth/login") && response.request().method() === "POST"
@@ -76,6 +106,34 @@ test("销售助理可通过真实 API 登录", async ({ page }) => {
         await once(api, "exit");
       }
     }
+  });
+});
+
+test("销售助理组长可用标准模板预检并确认整批入账", async ({ page }) => {
+  await withMigratedTestDatabase(async (database) => {
+    await seedTestUser(database.url,{username:"e2e_import_leader",displayName:"E2E 导入组长",password:"E2ePass@123",roleCode:"sales_assistant_leader",roleName:"销售助理组长"});
+    const hr=await seedTestUser(database.url,{username:"e2e_import_hr",displayName:"E2E 导入人事",password:"E2ePass@123",roleCode:"hr",roleName:"人事部"});
+    const client=new Client({connectionString:database.url});await client.connect();
+    try{
+      const people=await client.query<{id:string;display_name:string}>("insert into people(display_name,identity_source,source_key) values('示例业务员','e2e','person:example'),('示例组长','e2e','leader:example'),('示例主管','e2e','supervisor:example') returning id::text,display_name");
+      const personId=(name:string)=>people.rows.find((item)=>item.display_name===name)!.id;
+      const department=await client.query<{id:string}>("insert into org_units(name,unit_type) values('E2E 销售部','department') returning id::text");
+      const group=await client.query<{id:string}>("insert into org_units(name,unit_type,parent_id) values('E2E 销售组','group',$1) returning id::text",[department.rows[0]!.id]);
+      await client.query("insert into org_responsibilities(person_id,org_unit_id,responsibility_type,effective_from) values($1,$2,'leader','2026-01-01'),($3,$4,'supervisor','2026-01-01')",[personId("示例组长"),group.rows[0]!.id,personId("示例主管"),department.rows[0]!.id]);
+      await client.query("insert into org_memberships(person_id,department_id,group_id,effective_from) values($1,$2,$3,'2026-01-01')",[personId("示例业务员"),department.rows[0]!.id,group.rows[0]!.id]);
+      await client.query("update import_configs set status='approved',business_region_mapping='{\"外贸\":\"EXT-TRADE\"}',approved_by=$1,approved_at=now() where config_key='standard-performance'",[hr]);
+    }finally{await client.end();}
+    const api=spawn(process.execPath,["--import","tsx","src/server.ts"],{cwd:apiRoot,env:{...process.env,API_PORT:apiPort,APP_ORIGINS:webBaseUrl,DATABASE_URL:database.url,NODE_ENV:"test"},stdio:"ignore"});
+    try{
+      await waitForApi(`${apiBaseUrl}/api/ready`,()=>api.exitCode!==null);
+      await page.setViewportSize({width:390,height:844});
+      await page.goto("/");await page.getByLabel("账号").fill("e2e_import_leader");await page.getByLabel("密码",{exact:true}).fill("E2ePass@123");await page.getByRole("button",{name:"进入 SampleFlow"}).click();
+      await page.getByRole("button",{name:"订单业绩",exact:true}).click();await page.getByRole("button",{name:"Excel 导入"}).click();
+      await expect(page.getByRole("link",{name:"下载标准业绩模板"})).toHaveAttribute("href","/SampleFlow标准业绩导入模板.xlsx");
+      await page.locator('input[type="file"]').setInputFiles(importTemplate);await page.getByRole("button",{name:"运行只读预检"}).click();
+      await expect(page.getByRole("heading",{name:"预检通过，等待确认"})).toBeVisible();await page.getByRole("button",{name:"确认整批入账"}).click();
+      await expect(page.getByRole("heading",{name:"Excel 批量导入"})).toBeHidden();await expect(page.getByText("001-A",{exact:true})).toBeVisible();
+    }finally{if(api.exitCode===null){api.kill();await once(api,"exit");}}
   });
 });
 
@@ -104,16 +162,36 @@ test("首次登录用户看到密码强度并完成改密", async ({ page }) => 
 
     try {
       await waitForApi(`${apiBaseUrl}/api/ready`, () => api.exitCode !== null);
+      await page.setViewportSize({ width: 390, height: 844 });
       await page.goto("/");
       await page.getByLabel("账号").fill("e2e_password_change");
-      await page.getByLabel("密码").fill("Before@123");
+      await page.getByLabel("密码", { exact: true }).fill("Before@123");
       await page.getByRole("button", { name: "进入 SampleFlow" }).click();
 
       await expect(page.getByRole("heading", { name: "请修改初始密码" })).toBeVisible();
       await expect(page.getByText("6—128 位，并包含英文字母、数字和符号")).toBeVisible();
-      await page.getByLabel("当前密码").fill("Before@123");
-      await page.getByLabel("新密码").fill("Abc@12");
+      await expect(page.getByText("当前密码请填写刚才登录时使用的临时密码")).toBeVisible();
+      const currentPassword = page.getByLabel("当前密码", { exact: true });
+      const newPassword = page.getByLabel("新密码", { exact: true });
+      await expect(currentPassword).toHaveAttribute("type", "password");
+      await page.getByRole("button", { name: "显示当前密码" }).click();
+      await expect(currentPassword).toHaveAttribute("type", "text");
+      await page.getByRole("button", { name: "隐藏当前密码" }).click();
+      await expect(currentPassword).toHaveAttribute("type", "password");
+      await expect(newPassword).toHaveAttribute("type", "password");
+      await page.getByRole("button", { name: "显示新密码" }).click();
+      await expect(newPassword).toHaveAttribute("type", "text");
+      await page.getByRole("button", { name: "隐藏新密码" }).click();
+      await expect(newPassword).toHaveAttribute("type", "password");
+      // 模拟浏览器密码管理器静默回填：只改变输入框，不触发 React change 事件。
+      await currentPassword.evaluate((input, value) => {
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+        setter?.call(input, value);
+      }, "Before@123");
+      await expect(currentPassword).toHaveValue("Before@123");
+      await newPassword.fill("Abc@12");
       await expect(page.getByText("密码强度：弱")).toBeVisible();
+      await expect(currentPassword).toHaveValue("Before@123");
       const dashboardResponse = page.waitForResponse((response) =>
         response.url().includes("/api/performance/dashboard") && response.status() === 200
       );
@@ -156,7 +234,7 @@ test("系统管理员在账号管理页查看只读角色权限说明", async ({
       await page.setViewportSize({ width: 390, height: 844 });
       await page.goto("/");
       await page.getByLabel("账号").fill("e2e_system_admin");
-      await page.getByLabel("密码").fill("Admin@123");
+      await page.getByLabel("密码", { exact: true }).fill("Admin@123");
       const accountsResponse = page.waitForResponse((response) => response.url().endsWith("/api/admin/users"));
       await page.getByRole("button", { name: "进入 SampleFlow" }).click();
 
@@ -224,7 +302,7 @@ test("目标未生效时页面不提供正式报表，生效后才可查看", as
       await waitForApi(`${apiBaseUrl}/api/ready`, () => api.exitCode !== null);
       await page.goto("/");
       await page.getByLabel("账号").fill("e2e_salesperson_report");
-      await page.getByLabel("密码").fill("Report@123");
+      await page.getByLabel("密码", { exact: true }).fill("Report@123");
       await page.getByRole("button", { name: "进入 SampleFlow" }).click();
       await page.getByRole("button", { name: "目标管理" }).click();
 
@@ -267,7 +345,7 @@ test("销售经理可从选择器创建顶层目标并完成总经理到人事�
     }finally{await setup.end();}
 
     const api=spawn(process.execPath,["--import","tsx","src/server.ts"],{cwd:apiRoot,env:{...process.env,API_PORT:apiPort,APP_ORIGINS:webBaseUrl,DATABASE_URL:database.url,NODE_ENV:"test"},stdio:"ignore"});
-    const login=async(username:string)=>{await page.getByLabel("账号").fill(username);await page.getByLabel("密码").fill("Goal@123");await page.getByRole("button",{name:"进入 SampleFlow"}).click();};
+    const login=async(username:string)=>{await page.getByLabel("账号").fill(username);await page.getByLabel("密码",{exact:true}).fill("Goal@123");await page.getByRole("button",{name:"进入 SampleFlow"}).click();};
     const logout=async()=>{await page.getByRole("button",{name:"退出登录"}).click();await expect(page.getByRole("heading",{name:"登录系统"})).toBeVisible();};
     try{
       let delayedGoalOptions=false;
@@ -344,7 +422,7 @@ test("目标修改申请在审批中心完成填金额、重签、终审和联�
       for(const [goalId,amount,creator,owner] of [[top.rows[0]!.id,1000,users.manager,users.manager],[departmentGoal.rows[0]!.id,800,users.manager,users.supervisor],[groupGoal.rows[0]!.id,600,users.supervisor,users.leader],[personalGoal.rows[0]!.id,400,users.leader,users.salesperson]] as const){await setup.query("insert into goal_versions(goal_id,version_no,amount,status,created_by,created_by_person_id,signed_by,signed_by_person_id,signed_at,signature_text,change_reason) values($1,1,$2,'active',$3,$4,$5,$6,now(),'初始确认','E2E 变更初始目标')",[goalId,amount,creator,person(creator),owner,person(owner)]);}
     }finally{await setup.end();}
     const api=spawn(process.execPath,["--import","tsx","src/server.ts"],{cwd:apiRoot,env:{...process.env,API_PORT:apiPort,APP_ORIGINS:webBaseUrl,DATABASE_URL:database.url,NODE_ENV:"test"},stdio:"ignore"});
-    const login=async(username:string)=>{await page.getByLabel("账号").fill(username);await page.getByLabel("密码").fill("Goal@123");await page.getByRole("button",{name:"进入 SampleFlow"}).click();};
+    const login=async(username:string)=>{await page.getByLabel("账号").fill(username);await page.getByLabel("密码",{exact:true}).fill("Goal@123");await page.getByRole("button",{name:"进入 SampleFlow"}).click();};
     const logout=async()=>{await page.getByRole("button",{name:"退出登录"}).click();await expect(page.getByRole("heading",{name:"登录系统"})).toBeVisible();};
     try{
       await waitForApi(`${apiBaseUrl}/api/ready`,()=>api.exitCode!==null);await page.goto("/");
@@ -462,7 +540,7 @@ test("订单搜索与不可变事件链在浏览器和数据库中保持一致",
       await waitForApi(`${apiBaseUrl}/api/ready`, () => api.exitCode !== null);
       await page.goto("/");
       await page.getByLabel("账号").fill("e2e_ledger_assistant");
-      await page.getByLabel("密码").fill("Ledger@123");
+      await page.getByLabel("密码", { exact: true }).fill("Ledger@123");
       await page.getByRole("button", { name: "进入 SampleFlow" }).click();
       await page.getByRole("button", { name: "订单业绩", exact:true }).click();
 
@@ -470,6 +548,7 @@ test("订单搜索与不可变事件链在浏览器和数据库中保持一致",
       await page.getByLabel("订单编号").fill("CHAIN-E2E-110");
       await page.getByLabel("客户名称").fill("事件链客户");
       await page.getByLabel("客户单位").fill("事件链测试单位");
+      await page.getByLabel("业务区域").selectOption("EXT-TRADE");
       await page.getByLabel("业务员").selectOption({label:"E2E 账本业务员"});
       await page.getByLabel("服务类型").fill("浏览器验收");
       await page.getByLabel("营业额").fill("110");
@@ -516,7 +595,7 @@ test("订单搜索与不可变事件链在浏览器和数据库中保持一致",
       await page.setViewportSize({width:1280,height:900});
       await page.getByRole("button",{name:"退出登录"}).click();
       await page.getByLabel("账号").fill("e2e_accounting_leader");
-      await page.getByLabel("密码").fill("Ledger@123");
+      await page.getByLabel("密码", { exact: true }).fill("Ledger@123");
       await page.getByRole("button",{name:"进入 SampleFlow"}).click();
       await page.getByRole("button",{name:"订单业绩",exact:true}).click();
       await expect(page.getByRole("heading",{name:"记账治理工作台"})).toBeVisible();
@@ -527,7 +606,7 @@ test("订单搜索与不可变事件链在浏览器和数据库中保持一致",
 
       await page.getByRole("button",{name:"退出登录"}).click();
       await page.getByLabel("账号").fill("e2e_accounting_hr");
-      await page.getByLabel("密码").fill("Ledger@123");
+      await page.getByLabel("密码", { exact: true }).fill("Ledger@123");
       await page.getByRole("button",{name:"进入 SampleFlow"}).click();
       await page.getByRole("button",{name:"订单业绩",exact:true}).click();
       await page.getByLabel("记账月份").fill("2026-07");
@@ -537,7 +616,7 @@ test("订单搜索与不可变事件链在浏览器和数据库中保持一致",
 
       await page.getByRole("button",{name:"退出登录"}).click();
       await page.getByLabel("账号").fill("e2e_accounting_leader");
-      await page.getByLabel("密码").fill("Ledger@123");
+      await page.getByLabel("密码", { exact: true }).fill("Ledger@123");
       await page.getByRole("button",{name:"进入 SampleFlow"}).click();
       await page.getByRole("button",{name:"订单业绩",exact:true}).click();
       const correctionForm=page.getByRole("heading",{name:"申请关闭月更正"}).locator("..");
@@ -549,7 +628,7 @@ test("订单搜索与不可变事件链在浏览器和数据库中保持一致",
 
       await page.getByRole("button",{name:"退出登录"}).click();
       await page.getByLabel("账号").fill("e2e_accounting_hr");
-      await page.getByLabel("密码").fill("Ledger@123");
+      await page.getByLabel("密码", { exact: true }).fill("Ledger@123");
       await page.getByRole("button",{name:"进入 SampleFlow"}).click();
       await page.getByRole("button",{name:"订单业绩",exact:true}).click();
       await page.getByLabel("审批意见").fill("同意浏览器更正");

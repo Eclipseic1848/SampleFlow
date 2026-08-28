@@ -75,6 +75,50 @@ services:
         condition: service_healthy
     command: ["node", "apps/api/dist/cli/bootstrap-admin.js"]
 
+  import-preflight:
+    profiles: ["operations"]
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: "no"
+    environment:
+      NODE_ENV: production
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-sampleflow}
+      DB_USER: ${POSTGRES_USER:-sampleflow}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      IMPORT_SOURCE_FILE: /imports/source.xlsx
+      IMPORT_CONFIG_ID: ${IMPORT_CONFIG_ID:-}
+      IMPORT_OPERATOR_USER_ID: ${IMPORT_OPERATOR_USER_ID:-}
+    volumes:
+      - ${IMPORT_SOURCE_PATH:-./.sampleflow/import-source.xlsx}:/imports/source.xlsx:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["node", "apps/api/dist/cli/import-legacy.js"]
+
+  import-confirm:
+    profiles: ["operations"]
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: "no"
+    environment:
+      NODE_ENV: production
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-sampleflow}
+      DB_USER: ${POSTGRES_USER:-sampleflow}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      IMPORT_BATCH_ID: ${IMPORT_BATCH_ID:-}
+      IMPORT_OPERATOR_USER_ID: ${IMPORT_OPERATOR_USER_ID:-}
+      IMPORT_CONFIRMED_WARNINGS: ${IMPORT_CONFIRMED_WARNINGS:-}
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["node", "apps/api/dist/cli/confirm-import.js"]
+
   web:
     build:
       context: .

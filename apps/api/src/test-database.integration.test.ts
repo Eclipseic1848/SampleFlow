@@ -73,6 +73,7 @@ test("干净隔离数据库可应用全部现有迁移", async () => {
         "014_govern_performance_event_order.sql",
         "015_accounting_period_governance.sql",
         "016_goal_governance.sql",
+        "017_controlled_performance_import.sql",
       ]);
     } finally {
       await client.end();
@@ -137,6 +138,78 @@ test("已有不可变业绩事件的数据库可升级并保持事件不可变",
       assert.ok(event.rows[0]!.occurred_at);
       assert.equal(event.rows[0]!.order_sequence, 1);
       await assert.rejects(verify.query("update performance_events set reason='篡改' where id=$1", [eventId]), /已入账业绩事件不可更新或删除/);
+    } finally {
+      await verify.end();
+    }
+  });
+});
+
+test("旧历史导入事件升级后保持不变并由独立证据表保存复合来源键", async () => {
+  await withTestDatabase(async (database) => {
+    const sourceHash = "926aad3d8c59cc356094eb1abc0ca1fcb3392eae5867f2b7c0e2bb50bb5c01cf";
+    const client = new Client({ connectionString: database.url });
+    await client.connect();
+    try {
+      await client.query("create table schema_migrations(name text primary key,applied_at timestamptz not null default now())");
+      const migrations = [
+        "001_bootstrap.sql", "002_identity_and_organization.sql", "003_performance_ledger.sql",
+        "004_target_workflow.sql", "005_legacy_import_tracking.sql", "006_bootstrap_organization_from_ledger.sql",
+        "007_temporary_password_expiry.sql", "008_session_csrf.sql", "009_authentication_state.sql",
+        "010_stable_people_and_organization.sql", "011_organization_import_tracking.sql",
+        "012_organization_coverage_constraints.sql", "013_require_owner_for_active_org_units.sql",
+        "014_govern_performance_event_order.sql", "015_accounting_period_governance.sql", "016_goal_governance.sql",
+      ];
+      for (const name of migrations) {
+        await client.query(await readFile(`${migrationsRoot}${name}`, "utf8"));
+        await client.query("insert into schema_migrations(name) values($1)", [name]);
+        if (name === "005_legacy_import_tracking.sql") {
+          const order = await client.query<{ id: string }>(
+            `insert into performance_orders(qingflow_order_no,customer_name,customer_unit,salesperson_name,source_received_on,
+               original_amount,current_revenue,counted_amount,lifecycle_state,posted_at)
+             values('LEGACY-001','旧客户','旧单位','旧业务员','2026-01-02',100,100,100,'active',now()) returning id::text`,
+          );
+          await client.query(
+            `insert into performance_events(order_id,event_type,delta_amount,resulting_current_revenue,resulting_counted_amount,
+               accounting_month,occurred_on,reason,salesperson_name,department_name,group_name,source_row_number)
+             values($1,'legacy_adjustment',100,100,100,'2026-01-01','2026-01-02','旧导入','旧业务员','旧部门','旧小组',2)`,
+            [order.rows[0]!.id],
+          );
+          await client.query(
+            "insert into legacy_import_runs(source_file,source_sha256,source_rows,imported_orders,imported_events) values('原始数据1.xlsx',$1,1,1,1)",
+            [sourceHash],
+          );
+        }
+      }
+    } finally {
+      await client.end();
+    }
+
+    await execFileAsync(process.execPath, ["--import", "tsx", "src/cli/migrate.ts"], {
+      cwd: apiRoot,
+      env: { ...process.env, DATABASE_URL: database.url, NODE_ENV: "test" },
+      encoding: "utf8",
+    });
+
+    const verify = new Client({ connectionString: database.url });
+    await verify.connect();
+    try {
+      const event = await verify.query<{ source_file_sha256: string | null; source_sheet: string | null; source_key: string | null }>(
+        "select source_file_sha256,source_sheet,source_key from performance_events where source_row_number=2",
+      );
+      assert.deepEqual(event.rows[0], {
+        source_file_sha256: null,
+        source_sheet: null,
+        source_key: null,
+      });
+      const evidence = await verify.query<{ source_file_sha256: string; source_sheet: string; source_row_number: string; source_key: string }>(
+        "select source_file_sha256,source_sheet,source_row_number::text,source_key from legacy_event_source_evidence",
+      );
+      assert.deepEqual(evidence.rows[0], {
+        source_file_sha256: sourceHash,
+        source_sheet: "分子",
+        source_row_number: "2",
+        source_key: `legacy:${sourceHash}:分子:2`,
+      });
     } finally {
       await verify.end();
     }
