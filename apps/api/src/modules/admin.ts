@@ -9,7 +9,7 @@ const createUserSchema = z.strictObject({ username:z.string().trim().min(2).max(
 const statusSchema = z.object({ isActive:z.boolean() });
 const resetSchema = z.strictObject({});
 const unitSchema = z.object({ name:z.string().trim().min(1).max(100), unitType:z.enum(["department","group"]), parentId:z.coerce.number().int().positive().nullable().optional() });
-const assignmentSchema = z.strictObject({ personId:z.coerce.number().int().positive(), departmentId:z.coerce.number().int().positive(), groupId:z.coerce.number().int().positive(), leaderPersonId:z.coerce.number().int().positive(), supervisorPersonId:z.coerce.number().int().positive(), effectiveFrom:z.iso.date(), effectiveTo:z.iso.date().nullable().optional() });
+const assignmentSchema = z.strictObject({ personId:z.coerce.number().int().positive(), departmentId:z.coerce.number().int().positive(), groupId:z.coerce.number().int().positive(), leaderPersonId:z.coerce.number().int().positive(), supervisorPersonId:z.coerce.number().int().positive(), effectiveFrom:z.iso.date(), effectiveTo:z.iso.date().nullable().optional(), closePrevious:z.boolean().optional().default(false) });
 
 function requireAdmin(request:{currentUser:import("./auth.js").CurrentUser|null},reply:{code:(status:number)=>{send:(body:unknown)=>unknown}}){if(!request.currentUser)return reply.code(401).send({message:"尚未登录"});if(!hasAnyRole(request.currentUser,["system_admin"]))return reply.code(403).send({message:"仅系统管理员可执行此操作"});return null;}
 
@@ -79,7 +79,7 @@ export async function registerAdmin(app:FastifyInstance,db:Database){
     if(!all&&!canReadPerformance(performanceAccess)&&goalAccess.ownerPersonIds.length===0)return reply.code(403).send({message:"当前角色没有组织查看权限"});
     const [units,assignments]=await Promise.all([
       db.query(`select u.id::text,u.name,u.unit_type as "unitType",u.parent_id::text as "parentId",p.name as "parentName",u.is_active as "isActive" from org_units u left join org_units p on p.id=u.parent_id where ($1::boolean or u.id=any($3::bigint[]) or u.id=any($4::bigint[]) or exists(select 1 from org_memberships m where m.person_id=$2 and (m.department_id=u.id or m.group_id=u.id))) order by u.unit_type,u.name`,[all,request.currentUser.personId,performanceAccess.groupIds,performanceAccess.departmentIds]),
-      db.query(`select m.id::text,u.username,p.display_name as "displayName",d.name as "departmentName",g.name as "groupName",m.effective_from as "effectiveFrom",m.effective_to as "effectiveTo" from org_memberships m join people p on p.id=m.person_id left join users u on u.id=p.user_id join org_units d on d.id=m.department_id join org_units g on g.id=m.group_id where ($1::boolean or m.person_id=$2 or ((m.group_id=any($3::bigint[]) or m.department_id=any($4::bigint[])) and m.effective_from<=${BUSINESS_DATE_SQL} and (m.effective_to is null or m.effective_to>=${BUSINESS_DATE_SQL}))) order by m.effective_from desc,p.display_name`,[all,request.currentUser.personId,performanceAccess.groupIds,performanceAccess.departmentIds]),
+      db.query(`select m.id::text,u.username,p.display_name as "displayName",d.name as "departmentName",g.name as "groupName",m.effective_from::text as "effectiveFrom",m.effective_to::text as "effectiveTo" from org_memberships m join people p on p.id=m.person_id left join users u on u.id=p.user_id join org_units d on d.id=m.department_id join org_units g on g.id=m.group_id where ($1::boolean or m.person_id=$2 or ((m.group_id=any($3::bigint[]) or m.department_id=any($4::bigint[])) and m.effective_from<=${BUSINESS_DATE_SQL} and (m.effective_to is null or m.effective_to>=${BUSINESS_DATE_SQL}))) order by m.effective_from desc,p.display_name`,[all,request.currentUser.personId,performanceAccess.groupIds,performanceAccess.departmentIds]),
     ]);
     return{units:units.rows,assignments:assignments.rows};
   });
@@ -104,6 +104,34 @@ export async function registerAdmin(app:FastifyInstance,db:Database){
     const client=await db.connect();
     try{
       await client.query("begin");
+      if(parsed.data.closePrevious){
+        const previous=await client.query<{id:string;departmentId:string;groupId:string;effectiveFrom:string;effectiveTo:string|null}>(
+          `select id::text,department_id::text as "departmentId",group_id::text as "groupId",effective_from::text as "effectiveFrom",effective_to::text as "effectiveTo"
+             from org_memberships
+            where person_id=$1 and effective_from<$2::date and (effective_to is null or effective_to>=$2::date)
+            order by effective_from desc
+            for update`,
+          [parsed.data.personId,parsed.data.effectiveFrom],
+        );
+        if(previous.rowCount!==1){
+          await client.query("rollback");
+          return reply.code(409).send({message:"异动生效日前必须恰好存在一条可结束的任职"});
+        }
+        const current=previous.rows[0]!;
+        if(current.departmentId===String(parsed.data.departmentId)&&current.groupId===String(parsed.data.groupId)){
+          await client.query("rollback");
+          return reply.code(409).send({message:"异动后的部门和小组不能与当前任职相同"});
+        }
+        const closed=await client.query<{effectiveTo:string}>(
+          `update org_memberships set effective_to=$2::date-1 where id=$1 returning effective_to::text as "effectiveTo"`,
+          [current.id,parsed.data.effectiveFrom],
+        );
+        await client.query(
+          `insert into audit_logs(actor_user_id,action,entity_type,entity_id,before_data,after_data,ip_address)
+           values($1,'organization.assignment_closed_for_transfer','org_membership',$2,$3::jsonb,$4::jsonb,$5)`,
+          [request.currentUser!.id,current.id,JSON.stringify({effectiveTo:current.effectiveTo}),JSON.stringify({effectiveTo:closed.rows[0]!.effectiveTo}),request.ip],
+        );
+      }
       for(const [personId,unitId,type] of [[parsed.data.leaderPersonId,parsed.data.groupId,"leader"],[parsed.data.supervisorPersonId,parsed.data.departmentId,"supervisor"]] as const){
         const existing=await client.query(
           `select 1 from org_responsibilities where person_id=$1 and org_unit_id=$2 and responsibility_type=$3

@@ -46,6 +46,18 @@ function databaseIdentifier(name: string): string {
   return `"${name}"`;
 }
 
+async function waitForDatabaseClientsToDisconnect(admin: InstanceType<typeof Client>, name: string): Promise<void> {
+  const deadline = Date.now() + 500;
+  while (Date.now() < deadline) {
+    const result = await admin.query<{ count: string }>(
+      "select count(*)::text as count from pg_stat_activity where datname = $1 and pid <> pg_backend_pid()",
+      [name],
+    );
+    if (result.rows[0]?.count === "0") return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 export function assertTestDatabaseUrl(value: string): void {
   const url = localPostgresUrl(value);
   databaseIdentifier(decodeURIComponent(url.pathname.slice(1)));
@@ -70,6 +82,7 @@ export async function withTestDatabase<T>(run: (database: TestDatabase) => Promi
     try {
       if (created) {
         try {
+          await waitForDatabaseClientsToDisconnect(admin, name);
           await admin.query(
             "select pg_terminate_backend(pid) from pg_stat_activity where datname = $1 and pid <> pg_backend_pid()",
             [name],
