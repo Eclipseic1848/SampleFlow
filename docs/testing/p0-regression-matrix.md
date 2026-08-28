@@ -1,6 +1,6 @@
 # P0 回归场景矩阵
 
-> 状态：#1A 测试基础设施与 #8 认证安全基线已建立；#8 三行已由 `auth-security.integration.test.ts` 和浏览器首次改密 E2E 纳入必过门禁，#2—#7、#9 仍待处理。
+> 状态：#1 的自动化测试与 CI 门禁已建立，#2—#9 的代码回归场景均已纳入必过套件。`main` 分支保护仍须仓库所有者确认后启用；#3 与 #9 的真实组织映射、真实源数据导入和业务报表验收仍是独立人工门禁，不能由自动化测试替代。
 
 `handoff.md` 记录了 50 项隔离 API 审计中 19 项失败，但原始 50 项脚本不在仓库中。下表只登记 handoff 和当前 GitHub Issue 正文能够直接追溯的失败行为；如果取得原脚本，必须逐项对照，不得把“代表性场景”宣称为完整 19 项。
 
@@ -27,6 +27,20 @@
 | #9 | 构建/CLI | 不含 Excel 的全新克隆无法构建 API 镜像 | 空系统镜像构建启动，镜像层不含业务文件 |
 | #9 | CLI/数据库 | 启动串联迁移、seed 和历史导入 | 显式作业、锁、幂等、回滚与 4,701/2,850/14,675,659.07 对账 |
 | Excel 补充 | API/浏览器 | 尚无上传、预检和确认入口 | 两种列布局、零写入预检、整批原子性、幂等和越权 E2E |
+
+## 自动化证据索引
+
+| 场景 | 必过测试路径 |
+| --- | --- |
+| 权限矩阵、正式报表门禁与稳定人员身份 | `apps/api/src/authorization.integration.test.ts`、`apps/web/e2e/login.spec.ts` |
+| 组织约束、有效期、组织异动与事件快照 | `apps/api/src/organization.integration.test.ts`、`apps/api/src/organization-import.integration.test.ts`、`apps/web/e2e/login.spec.ts` |
+| 订单调整、历史待核、记账月与关闭期更正 | `apps/api/src/ledger-governance.integration.test.ts`、`apps/api/src/domain/performance.test.ts`、`apps/web/e2e/login.spec.ts` |
+| 目标创建、审批、修改、重签与联动 | `apps/api/src/goal-governance.integration.test.ts`、`apps/web/e2e/login.spec.ts` |
+| 首次改密、统一密码策略、限速与会话撤销 | `apps/api/src/auth-security.integration.test.ts`、`apps/web/e2e/login.spec.ts` |
+| 受控 Excel 导入、对账、幂等、回滚与来源审计 | `apps/api/src/import-job.integration.test.ts`、`apps/api/src/imports-api.integration.test.ts`、`apps/api/src/domain/performance-import-xlsx.test.ts`、`apps/web/e2e/login.spec.ts` |
+| 测试数据库隔离、失败清理与迁移升级 | `apps/api/src/test-database.integration.test.ts`、`apps/api/src/api-database.integration.test.ts` |
+| 常驻进程边界、空系统构建与镜像内容 | `apps/api/src/operations-boundary.test.ts`、`docs/deployment.md` |
+| PR 与 `main` 推送质量门禁 | `.github/workflows/ci.yml` 执行根脚本 `npm run verify` |
 
 ## 升入门禁的规则
 

@@ -477,6 +477,101 @@ test("目标修改申请在审批中心完成填金额、重签、终审和联�
   });
 });
 
+test("系统管理员通过页面办理组织异动并保留前后有效期", async ({ page }) => {
+  await withMigratedTestDatabase(async (database) => {
+    await seedTestUser(database.url,{username:"e2e_org_admin",displayName:"E2E 组织管理员",password:"OrgAdmin@123",roleCode:"system_admin",roleName:"系统管理员"});
+    await seedTestUser(database.url,{username:"e2e_org_assistant",displayName:"E2E 异动销售助理",password:"OrgAssistant@123",roleCode:"sales_assistant",roleName:"销售助理"});
+    await seedTestUser(database.url,{username:"e2e_org_member",displayName:"E2E 异动业务员",password:"OrgMember@123",roleCode:"salesperson",roleName:"业务员"});
+    await seedTestUser(database.url,{username:"e2e_org_leader",displayName:"E2E 异动组长",password:"OrgLeader@123",roleCode:"sales_leader",roleName:"业务员组长"});
+    await seedTestUser(database.url,{username:"e2e_org_supervisor",displayName:"E2E 异动主管",password:"OrgSupervisor@123",roleCode:"sales_supervisor",roleName:"业务主管"});
+
+    const api=spawn(process.execPath,["--import","tsx","src/server.ts"],{
+      cwd:apiRoot,
+      env:{...process.env,API_PORT:apiPort,APP_ORIGINS:webBaseUrl,DATABASE_URL:database.url,NODE_ENV:"test"},
+      stdio:"ignore",
+    });
+
+    try{
+      await waitForApi(`${apiBaseUrl}/api/ready`,()=>api.exitCode!==null);
+      await page.goto("/");
+      await page.getByLabel("账号").fill("e2e_org_admin");
+      await page.getByLabel("密码",{exact:true}).fill("OrgAdmin@123");
+      await page.getByRole("button",{name:"进入 SampleFlow"}).click();
+      await page.getByRole("button",{name:"组织架构"}).click();
+
+      for(const departmentName of ["E2E 原部门","E2E 新部门"]){
+        await page.getByRole("button",{name:"新增组织"}).click();
+        await page.getByLabel("名称").fill(departmentName);
+        await page.getByRole("button",{name:"保存组织"}).click();
+      }
+      for(const [groupName,departmentName] of [["E2E 原小组","E2E 原部门"],["E2E 新小组","E2E 新部门"]]){
+        await page.getByRole("button",{name:"新增组织"}).click();
+        await page.getByLabel("名称").fill(groupName);
+        await page.getByLabel("类型").selectOption("group");
+        await page.getByLabel("所属部门").selectOption({label:departmentName});
+        await page.getByRole("button",{name:"保存组织"}).click();
+      }
+
+      await page.getByRole("button",{name:"新增任职"}).click();
+      let assignmentDialog=page.getByRole("dialog");
+      await assignmentDialog.getByRole("combobox").nth(0).selectOption({label:"E2E 异动业务员（e2e_org_member）"});
+      await page.getByLabel("生效日期").fill("2026-07-01");
+      await assignmentDialog.getByRole("combobox").nth(1).selectOption({label:"E2E 原部门"});
+      await assignmentDialog.getByRole("combobox").nth(2).selectOption({label:"E2E 原小组"});
+      await assignmentDialog.getByRole("combobox").nth(3).selectOption({label:"E2E 异动组长（e2e_org_leader）"});
+      await assignmentDialog.getByRole("combobox").nth(4).selectOption({label:"E2E 异动主管（e2e_org_supervisor）"});
+      await page.getByRole("button",{name:"保存任职"}).click();
+
+      await expect(page.getByRole("button",{name:"办理组织异动"})).toBeVisible({timeout:1_000});
+      await page.getByRole("button",{name:"办理组织异动"}).click();
+      assignmentDialog=page.getByRole("dialog");
+      await assignmentDialog.getByRole("combobox").nth(0).selectOption({label:"E2E 异动业务员（e2e_org_member）"});
+      await page.getByLabel("生效日期").fill("2026-08-01");
+      await assignmentDialog.getByRole("combobox").nth(1).selectOption({label:"E2E 新部门"});
+      await assignmentDialog.getByRole("combobox").nth(2).selectOption({label:"E2E 新小组"});
+      await assignmentDialog.getByRole("combobox").nth(3).selectOption({label:"E2E 异动组长（e2e_org_leader）"});
+      await assignmentDialog.getByRole("combobox").nth(4).selectOption({label:"E2E 异动主管（e2e_org_supervisor）"});
+      await page.getByRole("button",{name:"确认异动"}).click();
+
+      const oldAssignment=page.locator(".compact-list > div").filter({hasText:"E2E 异动业务员"}).filter({hasText:"E2E 原部门 / E2E 原小组"});
+      const newAssignment=page.locator(".compact-list > div").filter({hasText:"E2E 异动业务员"}).filter({hasText:"E2E 新部门 / E2E 新小组"});
+      await expect(oldAssignment).toContainText("2026-07-01 至 2026-07-31");
+      await expect(newAssignment).toContainText("2026-08-01 起");
+
+      await page.getByRole("button",{name:"退出登录"}).click();
+      await expect(page.getByRole("heading",{name:"登录系统"})).toBeVisible();
+      await page.getByLabel("账号",{exact:true}).fill("e2e_org_assistant");
+      await page.getByLabel("密码",{exact:true}).fill("OrgAssistant@123");
+      await page.getByRole("button",{name:"进入 SampleFlow"}).click();
+      await page.getByRole("button",{name:"订单业绩",exact:true}).click();
+      await page.getByRole("button",{name:"录入新订单"}).click();
+      await page.getByLabel("订单编号").fill("ORG-TRANSFER-E2E-100");
+      await page.getByLabel("收到日期").fill("2026-07-15");
+      await page.getByLabel("客户名称").fill("组织异动客户");
+      await page.getByLabel("客户单位").fill("组织异动测试单位");
+      await page.getByLabel("业务区域").selectOption("EXT-TRADE");
+      await page.getByLabel("业务员").selectOption({label:"E2E 异动业务员"});
+      await page.getByLabel("服务类型").fill("组织快照验收");
+      await page.getByLabel("营业额").fill("100");
+      await page.getByRole("button",{name:"确认入账"}).click();
+
+      const orderRow=page.getByRole("row").filter({hasText:"ORG-TRANSFER-E2E-100"});
+      await orderRow.getByRole("button",{name:"查看 / 调整"}).click();
+      await page.getByLabel("调整后营业额").fill("90");
+      await page.getByLabel("原因（必填）").fill("异动生效后修改营业额");
+      await page.getByRole("button",{name:"确认追加事件"}).click();
+      await orderRow.getByRole("button",{name:"查看 / 调整"}).click();
+
+      const events=page.locator(".event-ledger li");
+      await expect(events).toHaveCount(2);
+      await expect(events.nth(0)).toContainText("E2E 原部门 / E2E 原小组");
+      await expect(events.nth(1)).toContainText("E2E 新部门 / E2E 新小组");
+    }finally{
+      if(api.exitCode===null){api.kill();await once(api,"exit");}
+    }
+  });
+});
+
 test("订单搜索与不可变事件链在浏览器和数据库中保持一致", async ({ page },testInfo) => {
   test.slow();
   await withMigratedTestDatabase(async (database) => {
