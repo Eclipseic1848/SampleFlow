@@ -201,15 +201,15 @@ test("目标未生效时页面不提供正式报表，生效后才可查看", as
          select id as person_id from people where user_id=$1
        ), active_goal as (
          insert into goals(period_month,goal_level,owner_user_id,owner_person_id)
-         select '2026-08-01','personal',$1,person_id from owner returning id
+         select '2026-08-01','personal',$1,person_id from owner returning id,owner_person_id
        ), pending_goal as (
          insert into goals(period_month,goal_level,owner_user_id,owner_person_id)
-         select '2026-09-01','personal',$1,person_id from owner returning id
+         select '2026-09-01','personal',$1,person_id from owner returning id,owner_person_id
        )
-       insert into goal_versions(goal_id,version_no,amount,status,created_by,change_reason)
-       select id,1,1000,'active',$1,'浏览器门禁测试' from active_goal
+       insert into goal_versions(goal_id,version_no,amount,status,created_by,created_by_person_id,change_reason)
+       select id,1,1000,'active',$1,owner_person_id,'浏览器门禁测试' from active_goal
        union all
-       select id,1,2000,'pending_hr',$1,'浏览器门禁测试' from pending_goal`,
+       select id,1,2000,'pending_hr',$1,owner_person_id,'浏览器门禁测试' from pending_goal`,
       [userId],
     );
     await client.end();
@@ -245,6 +245,154 @@ test("目标未生效时页面不提供正式报表，生效后才可查看", as
         await once(api, "exit");
       }
     }
+  });
+});
+
+test("销售经理可从选择器创建顶层目标并完成总经理到人事审批", async ({ page }) => {
+  test.slow();
+  await withMigratedTestDatabase(async (database) => {
+    const managerId=await seedTestUser(database.url,{username:"e2e_goal_manager",displayName:"E2E 销售经理",password:"Goal@123",roleCode:"sales_manager",roleName:"销售经理"});
+    const supervisorId=await seedTestUser(database.url,{username:"e2e_goal_supervisor",displayName:"E2E 业务主管",password:"Goal@123",roleCode:"sales_supervisor",roleName:"业务主管"});
+    await seedTestUser(database.url,{username:"e2e_goal_gm",displayName:"E2E 总经理",password:"Goal@123",roleCode:"general_manager",roleName:"总经理"});
+    await seedTestUser(database.url,{username:"e2e_goal_hr",displayName:"E2E 人事",password:"Goal@123",roleCode:"hr",roleName:"人事部"});
+    let managerPersonId="";let supervisorPersonId="";
+    const setup=new Client({connectionString:database.url});await setup.connect();
+    try{
+      const people=await setup.query<{user_id:string;id:string}>("select user_id::text,id::text from people where user_id=any($1::bigint[])",[[managerId,supervisorId]]);
+      managerPersonId=people.rows.find((row)=>row.user_id===managerId)!.id;
+      supervisorPersonId=people.rows.find((row)=>row.user_id===supervisorId)!.id;
+      const department=await setup.query<{id:string}>("insert into org_units(name,unit_type) values('E2E 目标部门','department') returning id::text");
+      await setup.query("insert into org_responsibilities(person_id,org_unit_id,responsibility_type,effective_from) values($1,$2,'supervisor','2026-01-01')",[supervisorPersonId,department.rows[0]!.id]);
+      await setup.query("update org_units set is_active=true where id=$1",[department.rows[0]!.id]);
+    }finally{await setup.end();}
+
+    const api=spawn(process.execPath,["--import","tsx","src/server.ts"],{cwd:apiRoot,env:{...process.env,API_PORT:apiPort,APP_ORIGINS:webBaseUrl,DATABASE_URL:database.url,NODE_ENV:"test"},stdio:"ignore"});
+    const login=async(username:string)=>{await page.getByLabel("账号").fill(username);await page.getByLabel("密码").fill("Goal@123");await page.getByRole("button",{name:"进入 SampleFlow"}).click();};
+    const logout=async()=>{await page.getByRole("button",{name:"退出登录"}).click();await expect(page.getByRole("heading",{name:"登录系统"})).toBeVisible();};
+    try{
+      let delayedGoalOptions=false;
+      await page.route("**/api/goals/options?*",async(route)=>{if(!delayedGoalOptions&&route.request().url().includes("periodMonth=2026-11")&&route.request().url().includes("level=sales_manager")){delayedGoalOptions=true;await new Promise((resolve)=>setTimeout(resolve,6000));}await route.continue();});
+      await waitForApi(`${apiBaseUrl}/api/ready`,()=>api.exitCode!==null);
+      await page.goto("/");await login("e2e_goal_manager");await expect(page.getByRole("button",{name:"目标管理"})).toBeVisible();
+      const illegalRoot=await page.evaluate(async({ownerPersonId})=>{const csrf=document.cookie.split("; ").find((item)=>item.startsWith("sampleflow_csrf="))?.split("=")[1]??"";const response=await fetch("/api/goals",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":decodeURIComponent(csrf)},body:JSON.stringify({periodMonth:"2026-11",level:"sales_manager",ownerPersonId:Number(ownerPersonId),orgUnitId:null,parentGoalId:999999,amount:1000,changeReason:"非法顶层父目标"})});return{status:response.status,body:await response.text()};},{ownerPersonId:managerPersonId});
+      expect(illegalRoot.status).toBe(400);expect(illegalRoot.body).not.toMatch(/constraint|foreign key/i);
+      await page.getByRole("button",{name:"目标管理"}).click();
+      await page.getByRole("button",{name:"下达目标"}).click();
+      await expect(page.getByLabel("目标层级")).toHaveValue("sales_manager");
+      const goalOptionsResponse=page.waitForResponse((response)=>response.url().includes("/api/goals/options?")&&response.url().includes("periodMonth=2026-11")&&response.url().includes("level=sales_manager")&&response.status()===200);
+      await page.getByLabel("目标月份").fill("2026-11");
+      await goalOptionsResponse;
+      await expect(page.getByLabel("直属上级目标")).toHaveCount(0);
+      await expect(page.getByLabel("目标责任人")).toHaveValue(/\d+/);
+      await page.getByLabel("目标金额").fill("1000");
+      await page.getByLabel("下达原因").fill("公司十一月目标");
+      await page.getByRole("button",{name:"提交待确认"}).click();
+      const topRow=page.getByRole("row").filter({hasText:"2026-11"}).filter({hasText:"销售经理总目标"});
+      await expect(topRow).toContainText("待责任人签名");
+      await topRow.getByRole("button",{name:"确认签名"}).click();
+      await page.getByLabel("签名确认").fill("E2E 销售经理确认");
+      await page.getByRole("button",{name:"提交签名"}).click();
+      await expect(topRow).toContainText("待总经理审批");
+
+      await logout();await login("e2e_goal_gm");await page.getByRole("button",{name:"审批中心"}).click();
+      const gmRow=page.getByRole("row").filter({hasText:"2026-11"});await gmRow.getByRole("button",{name:"批准"}).click();
+      await page.getByLabel("审批意见").fill("总经理同意");await page.getByRole("button",{name:"确认批准"}).click();
+      await expect(gmRow).toHaveCount(0);
+
+      await logout();await login("e2e_goal_hr");await page.getByRole("button",{name:"审批中心"}).click();
+      const hrRow=page.getByRole("row").filter({hasText:"2026-11"});await hrRow.getByRole("button",{name:"批准"}).click();
+      await page.getByLabel("审批意见").fill("人事终审同意");await page.getByRole("button",{name:"确认批准"}).click();
+      await expect(hrRow).toHaveCount(0);
+
+      await logout();await login("e2e_goal_manager");await page.getByRole("button",{name:"目标管理"}).click();
+      await expect(page.getByRole("row").filter({hasText:"2026-11"}).filter({hasText:"已生效"})).toBeVisible();
+      await page.getByRole("button",{name:"下达目标"}).click();
+      await page.getByLabel("目标月份").fill("2026-11");await page.getByLabel("目标层级").selectOption("department");
+      await expect(page.getByLabel("直属上级目标")).toContainText("E2E 销售经理");
+      await expect(page.getByLabel("目标责任人")).toContainText("E2E 业务主管");
+      await page.getByLabel("目标责任人").selectOption({label:"E2E 业务主管 · E2E 目标部门"});
+      await page.getByLabel("目标金额").fill("800");await page.getByLabel("下达原因").fill("部门十一月目标");
+      await page.getByRole("button",{name:"提交待确认"}).click();
+      await expect(page.getByRole("row").filter({hasText:"E2E 业务主管"})).toContainText("待责任人签名");
+    }finally{if(api.exitCode===null){api.kill();await once(api,"exit");}}
+  });
+});
+
+test("目标修改申请在审批中心完成填金额、重签、终审和联动选择",async({page})=>{
+  test.slow();
+  await withMigratedTestDatabase(async(database)=>{
+    const users={
+      manager:await seedTestUser(database.url,{username:"e2e_change_manager",displayName:"E2E 变更经理",password:"Goal@123",roleCode:"sales_manager",roleName:"销售经理"}),
+      supervisor:await seedTestUser(database.url,{username:"e2e_change_supervisor",displayName:"E2E 变更主管",password:"Goal@123",roleCode:"sales_supervisor",roleName:"业务主管"}),
+      leader:await seedTestUser(database.url,{username:"e2e_change_leader",displayName:"E2E 变更组长",password:"Goal@123",roleCode:"sales_leader",roleName:"业务员组长"}),
+      salesperson:await seedTestUser(database.url,{username:"e2e_change_salesperson",displayName:"E2E 变更业务员",password:"Goal@123",roleCode:"salesperson",roleName:"业务员"}),
+      hr:await seedTestUser(database.url,{username:"e2e_change_hr",displayName:"E2E 变更人事",password:"Goal@123",roleCode:"hr",roleName:"人事部"}),
+    };
+    const setup=new Client({connectionString:database.url});await setup.connect();
+    try{
+      const peopleResult=await setup.query<{user_id:string;id:string}>("select user_id::text,id::text from people where user_id=any($1::bigint[])",[Object.values(users)]);
+      const person=(userId:string)=>peopleResult.rows.find((row)=>row.user_id===userId)!.id;
+      const department=await setup.query<{id:string}>("insert into org_units(name,unit_type) values('E2E 变更部门','department') returning id::text");
+      const group=await setup.query<{id:string}>("insert into org_units(name,unit_type,parent_id) values('E2E 变更小组','group',$1) returning id::text",[department.rows[0]!.id]);
+      await setup.query("insert into org_responsibilities(person_id,org_unit_id,responsibility_type,effective_from) values($1,$3,'supervisor','2026-01-01'),($2,$4,'leader','2026-01-01')",[person(users.supervisor),person(users.leader),department.rows[0]!.id,group.rows[0]!.id]);
+      await setup.query("insert into org_memberships(person_id,department_id,group_id,effective_from) values($1,$2,$3,'2026-01-01')",[person(users.salesperson),department.rows[0]!.id,group.rows[0]!.id]);
+      await setup.query("update org_units set is_active=true where id=any($1::bigint[])",[[department.rows[0]!.id,group.rows[0]!.id]]);
+      const top=await setup.query<{id:string}>("insert into goals(period_month,goal_level,owner_user_id,owner_person_id) values('2026-12-01','sales_manager',$1,$2) returning id::text",[users.manager,person(users.manager)]);
+      const departmentGoal=await setup.query<{id:string}>("insert into goals(period_month,goal_level,owner_user_id,owner_person_id,parent_goal_id,org_unit_id) values('2026-12-01','department',$1,$2,$3,$4) returning id::text",[users.supervisor,person(users.supervisor),top.rows[0]!.id,department.rows[0]!.id]);
+      const groupGoal=await setup.query<{id:string}>("insert into goals(period_month,goal_level,owner_user_id,owner_person_id,parent_goal_id,org_unit_id) values('2026-12-01','group',$1,$2,$3,$4) returning id::text",[users.leader,person(users.leader),departmentGoal.rows[0]!.id,group.rows[0]!.id]);
+      const personalGoal=await setup.query<{id:string}>("insert into goals(period_month,goal_level,owner_user_id,owner_person_id,parent_goal_id) values('2026-12-01','personal',$1,$2,$3) returning id::text",[users.salesperson,person(users.salesperson),groupGoal.rows[0]!.id]);
+      for(const [goalId,amount,creator,owner] of [[top.rows[0]!.id,1000,users.manager,users.manager],[departmentGoal.rows[0]!.id,800,users.manager,users.supervisor],[groupGoal.rows[0]!.id,600,users.supervisor,users.leader],[personalGoal.rows[0]!.id,400,users.leader,users.salesperson]] as const){await setup.query("insert into goal_versions(goal_id,version_no,amount,status,created_by,created_by_person_id,signed_by,signed_by_person_id,signed_at,signature_text,change_reason) values($1,1,$2,'active',$3,$4,$5,$6,now(),'初始确认','E2E 变更初始目标')",[goalId,amount,creator,person(creator),owner,person(owner)]);}
+    }finally{await setup.end();}
+    const api=spawn(process.execPath,["--import","tsx","src/server.ts"],{cwd:apiRoot,env:{...process.env,API_PORT:apiPort,APP_ORIGINS:webBaseUrl,DATABASE_URL:database.url,NODE_ENV:"test"},stdio:"ignore"});
+    const login=async(username:string)=>{await page.getByLabel("账号").fill(username);await page.getByLabel("密码").fill("Goal@123");await page.getByRole("button",{name:"进入 SampleFlow"}).click();};
+    const logout=async()=>{await page.getByRole("button",{name:"退出登录"}).click();await expect(page.getByRole("heading",{name:"登录系统"})).toBeVisible();};
+    try{
+      await waitForApi(`${apiBaseUrl}/api/ready`,()=>api.exitCode!==null);await page.goto("/");
+      await login("e2e_change_salesperson");await page.getByRole("button",{name:"目标管理"}).click();
+      const personalRow=page.getByRole("row").filter({hasText:"E2E 变更业务员"});await personalRow.getByRole("button",{name:"申请修改"}).click();
+      await page.getByLabel("修改原因").fill("客户结构发生变化");await page.getByLabel("建议金额（可选）").fill("450");await page.getByRole("button",{name:"提交修改申请"}).click();
+      await expect(page.getByText("修改申请已提交。")).toBeVisible();
+
+      await logout();await login("e2e_change_leader");await page.getByRole("button",{name:"审批中心"}).click();
+      const requestRow=page.getByRole("row").filter({hasText:"E2E 变更业务员"}).filter({hasText:"客户结构发生变化"});await requestRow.getByRole("button",{name:"接受并填金额"}).click();
+      await page.getByLabel("新目标金额").fill("450");await page.getByLabel("处理意见").fill("同意按客户结构调整");await page.getByRole("button",{name:"接受并创建新版本"}).click();
+
+      await logout();await login("e2e_change_salesperson");await page.getByRole("button",{name:"目标管理"}).click();
+      const pendingRow=page.getByRole("row").filter({hasText:"E2E 变更业务员"});await expect(pendingRow).toContainText("¥450.00");await pendingRow.getByRole("button",{name:"确认签名"}).click();
+      await page.getByLabel("签名确认").fill("E2E 业务员重新确认");await page.getByRole("button",{name:"提交签名"}).click();
+
+      await logout();await login("e2e_change_hr");await page.getByRole("button",{name:"审批中心"}).click();
+      const approvalRow=page.getByRole("row").filter({hasText:"E2E 变更业务员"}).filter({hasText:"待人事审批"});await approvalRow.getByRole("button",{name:"批准"}).click();
+      await page.getByLabel("审批意见").fill("人事确认变更链完整");await page.getByRole("button",{name:"确认批准"}).click();
+
+      await logout();await login("e2e_change_leader");await page.getByRole("button",{name:"审批中心"}).click();
+      const linkageRow=page.getByRole("row").filter({hasText:"E2E 变更业务员"}).filter({hasText:"¥450.00"});await linkageRow.getByRole("button",{name:"选择是否调整"}).click();
+      await page.getByLabel("处理方式").selectOption("keep_parent");await page.getByLabel("联动原因").fill("小组目标维持六百元");await page.getByRole("button",{name:"确认联动选择"}).click();
+      const linkageCard=page.locator("section.workflow-card").filter({has:page.getByRole("heading",{name:"目标联动选择"})});
+      await expect(linkageCard.getByRole("row").filter({hasText:"E2E 变更业务员"}).filter({hasText:"已完成"})).toBeVisible();
+
+      await logout();await login("e2e_change_salesperson");await page.getByRole("button",{name:"目标管理"}).click();
+      const activePersonal=page.getByRole("row").filter({hasText:"E2E 变更业务员"});await activePersonal.getByRole("button",{name:"申请修改"}).click();
+      await page.getByLabel("修改原因").fill("再次调整并联动上级");await page.getByLabel("建议金额（可选）").fill("475");await page.getByRole("button",{name:"提交修改申请"}).click();
+
+      await logout();await login("e2e_change_leader");await page.getByRole("button",{name:"审批中心"}).click();
+      const secondRequest=page.getByRole("row").filter({hasText:"再次调整并联动上级"});await secondRequest.getByRole("button",{name:"接受并填金额"}).click();
+      await page.getByLabel("新目标金额").fill("475");await page.getByLabel("处理意见").fill("接受第二次调整");await page.getByRole("button",{name:"接受并创建新版本"}).click();
+
+      await logout();await login("e2e_change_salesperson");await page.getByRole("button",{name:"目标管理"}).click();
+      const secondPending=page.getByRole("row").filter({hasText:"E2E 变更业务员"});await secondPending.getByRole("button",{name:"确认签名"}).click();
+      await page.getByLabel("签名确认").fill("E2E 业务员第二次确认");await page.getByRole("button",{name:"提交签名"}).click();
+
+      await logout();await login("e2e_change_hr");await page.getByRole("button",{name:"审批中心"}).click();
+      const secondApproval=page.getByRole("row").filter({hasText:"E2E 变更业务员"}).filter({hasText:"待人事审批"});await secondApproval.getByRole("button",{name:"批准"}).click();
+      await page.getByLabel("审批意见").fill("人事批准第二次调整");await page.getByRole("button",{name:"确认批准"}).click();
+
+      await logout();await login("e2e_change_leader");await page.getByRole("button",{name:"审批中心"}).click();
+      const secondLinkage=page.getByRole("row").filter({hasText:"E2E 变更业务员"}).filter({hasText:"¥475.00"});await secondLinkage.getByRole("button",{name:"选择是否调整"}).click();
+      await page.getByLabel("处理方式").selectOption("adjust_parent");await page.getByLabel("联动原因").fill("需要同步调整小组目标");await page.getByRole("button",{name:"确认联动选择"}).click();
+      const changeCard=page.locator("section.workflow-card").filter({has:page.getByRole("heading",{name:"目标修改申请"})});
+      await expect(changeCard.getByRole("row").filter({hasText:"E2E 变更组长"}).filter({hasText:"需要同步调整小组目标"})).toContainText("待处理");
+    }finally{if(api.exitCode===null){api.kill();await once(api,"exit");}}
   });
 });
 

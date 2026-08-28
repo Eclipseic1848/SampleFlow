@@ -72,6 +72,7 @@ test("干净隔离数据库可应用全部现有迁移", async () => {
         "013_require_owner_for_active_org_units.sql",
         "014_govern_performance_event_order.sql",
         "015_accounting_period_governance.sql",
+        "016_goal_governance.sql",
       ]);
     } finally {
       await client.end();
