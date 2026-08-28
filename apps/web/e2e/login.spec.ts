@@ -270,14 +270,18 @@ test("销售经理可从选择器创建顶层目标并完成总经理到人事�
     const login=async(username:string)=>{await page.getByLabel("账号").fill(username);await page.getByLabel("密码").fill("Goal@123");await page.getByRole("button",{name:"进入 SampleFlow"}).click();};
     const logout=async()=>{await page.getByRole("button",{name:"退出登录"}).click();await expect(page.getByRole("heading",{name:"登录系统"})).toBeVisible();};
     try{
+      let delayedGoalOptions=false;
+      await page.route("**/api/goals/options?*",async(route)=>{if(!delayedGoalOptions&&route.request().url().includes("periodMonth=2026-11")&&route.request().url().includes("level=sales_manager")){delayedGoalOptions=true;await new Promise((resolve)=>setTimeout(resolve,6000));}await route.continue();});
       await waitForApi(`${apiBaseUrl}/api/ready`,()=>api.exitCode!==null);
       await page.goto("/");await login("e2e_goal_manager");await expect(page.getByRole("button",{name:"目标管理"})).toBeVisible();
       const illegalRoot=await page.evaluate(async({ownerPersonId})=>{const csrf=document.cookie.split("; ").find((item)=>item.startsWith("sampleflow_csrf="))?.split("=")[1]??"";const response=await fetch("/api/goals",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":decodeURIComponent(csrf)},body:JSON.stringify({periodMonth:"2026-11",level:"sales_manager",ownerPersonId:Number(ownerPersonId),orgUnitId:null,parentGoalId:999999,amount:1000,changeReason:"非法顶层父目标"})});return{status:response.status,body:await response.text()};},{ownerPersonId:managerPersonId});
       expect(illegalRoot.status).toBe(400);expect(illegalRoot.body).not.toMatch(/constraint|foreign key/i);
       await page.getByRole("button",{name:"目标管理"}).click();
       await page.getByRole("button",{name:"下达目标"}).click();
+      await expect(page.getByLabel("目标层级")).toHaveValue("sales_manager");
+      const goalOptionsResponse=page.waitForResponse((response)=>response.url().includes("/api/goals/options?")&&response.url().includes("periodMonth=2026-11")&&response.url().includes("level=sales_manager")&&response.status()===200);
       await page.getByLabel("目标月份").fill("2026-11");
-      await page.getByLabel("目标层级").selectOption("sales_manager");
+      await goalOptionsResponse;
       await expect(page.getByLabel("直属上级目标")).toHaveCount(0);
       await expect(page.getByLabel("目标责任人")).toHaveValue(/\d+/);
       await page.getByLabel("目标金额").fill("1000");
