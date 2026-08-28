@@ -1,10 +1,17 @@
+import { networkInterfaces } from "node:os";
+
 const nodeEnv = process.env.NODE_ENV ?? "development";
-const developmentOrigins = [
-  "http://localhost:5174",
-  "http://127.0.0.1:5174",
-  "http://localhost:4174",
-  "http://127.0.0.1:4174",
-];
+
+export function developmentOriginsFor(localIpv4Addresses: readonly string[]): string[] {
+  const hosts = [...new Set(["localhost", "127.0.0.1", ...localIpv4Addresses])];
+  return hosts.flatMap((host) => [`http://${host}:5174`, `http://${host}:4174`]);
+}
+
+const localIpv4Addresses = Object.values(networkInterfaces())
+  .flatMap((addresses) => addresses ?? [])
+  .filter((address) => address.family === "IPv4" && !address.internal)
+  .map((address) => address.address);
+const developmentOrigins = developmentOriginsFor(localIpv4Addresses);
 
 export const config = {
   port: Number(process.env.API_PORT ?? 3000),

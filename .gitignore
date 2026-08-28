@@ -13,3 +13,5 @@ apps/web/test-results/
 *.xlsx
 *.docx
 ~$*
+!apps/web/public/
+!apps/web/public/SampleFlow标准业绩导入模板.xlsx

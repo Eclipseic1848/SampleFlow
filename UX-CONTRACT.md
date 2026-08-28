@@ -67,6 +67,7 @@
 | Operation | Trigger | Pending | Success destination | Success feedback | Failure recovery | Focus outcome | Source ref |
 |---|---|---|---|---|---|---|---|
 | Create order | 录入新订单 | 稳定忙碌按钮 | 订单列表 | 刷新后出现新行 | 对话框保留输入与错误 | 返回列表 | ADR-0005 |
+| Controlled Excel import | 销售助理/组长选择已批准配置和 `.xlsx` | 先上传并完整预检；确认时悲观等待 | 订单列表 | 组长确认后刷新账本 | 保留文件和行级报告；阻断批次不可确认；警告逐项确认 | 返回订单列表 | ADR-0022、0027 |
 | Append event | 确认追加事件 | 稳定忙碌按钮与幂等键 | 订单列表 | 重载服务端投影 | 对话框保留输入与错误，可安全重试 | 返回对应订单上下文 | ADR-0001、0005、0017 |
 | Confirm/close period | 组长提交核对 / 人事关闭 | 禁止重复提交 | 治理工作台 | 刷新期间状态与版本 | 保留说明并显示服务端职责冲突 | 原操作区域 | ADR-0017 |
 | Controlled correction | 组长申请 / 人事审批 / 组长执行 | 悲观等待；执行使用幂等键 | 治理工作台或执行对话框 | 刷新申请状态和订单投影 | 失败保留金额与原因；过期或撤销不可执行 | 返回对应申请 | ADR-0017 |

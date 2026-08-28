@@ -41,8 +41,7 @@ function waitForPort(port, host, timeoutMs) {
 run("docker", ["compose", "-f", "docker-compose.dev.yml", "up", "-d", "db"]);
 await waitForPort(55432, "127.0.0.1", 60000);
 run("npm.cmd", ["run", "db:migrate"]);
-run("npm.cmd", ["run", "db:seed"]);
-run("npm.cmd", ["run", "db:import-legacy"]);
+run("npm.cmd", ["run", "dev:seed"]);
 
 if (process.platform === "win32") {
   setTimeout(() => {

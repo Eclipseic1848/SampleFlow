@@ -51,7 +51,13 @@ test("正常调整由服务端确定操作日并按稳定顺序幂等追加不�
     const now=new Date("2026-09-01T01:02:03.000Z");
     await withTestApi(database.url,async(app)=>{
       const headers=await writeHeaders(app,"ledger_assistant");
-      const created=await app.inject({method:"POST",url:"/api/performance/orders",headers,payload:{orderNo:"CHAIN-110",customerName:"链路客户",customerUnit:"测试单位",salespersonPersonId:Number(scenario.memberPersonId),sourceReceivedOn:"2026-08-15",amount:110,reason:"首次录入"}});
+      const invalidBusinessRegion=await app.inject({method:"POST",url:"/api/performance/orders",headers,payload:{orderNo:"CHAIN-BAD-REGION",customerName:"错误区域客户",customerUnit:"测试单位",businessRegionCode:"CN-UNKNOWN",salespersonPersonId:Number(scenario.memberPersonId),sourceReceivedOn:"2026-08-15",amount:1,reason:"非法业务区域"}});
+      assert.equal(invalidBusinessRegion.statusCode,400,invalidBusinessRegion.body);
+      const normalizedOrderNo=await app.inject({method:"POST",url:"/api/performance/orders",headers,payload:{orderNo:" CHAIN-NORMALIZED",customerName:"编号客户",customerUnit:"测试单位",businessRegionCode:"CN-JS",salespersonPersonId:Number(scenario.memberPersonId),sourceReceivedOn:"2026-08-15",amount:1,reason:"编号不得清洗"}});
+      assert.equal(normalizedOrderNo.statusCode,400,normalizedOrderNo.body);
+      const externalTrade=await app.inject({method:"POST",url:"/api/performance/orders",headers,payload:{orderNo:"CHAIN-EXTERNAL-TRADE",customerName:"外贸客户",customerUnit:"测试单位",businessRegionCode:"EXT-TRADE",salespersonPersonId:Number(scenario.memberPersonId),sourceReceivedOn:"2026-08-15",amount:1,reason:"外贸区域"}});
+      assert.equal(externalTrade.statusCode,201,externalTrade.body);
+      const created=await app.inject({method:"POST",url:"/api/performance/orders",headers,payload:{orderNo:"CHAIN-110",customerName:"链路客户",customerUnit:"测试单位",businessRegionCode:"CN-JS",salespersonPersonId:Number(scenario.memberPersonId),sourceReceivedOn:"2026-08-15",amount:110,reason:"首次录入"}});
       assert.equal(created.statusCode,201,created.body);
       const orderId=created.json().id;
       const commands=[
@@ -82,6 +88,10 @@ test("正常调整由服务端确定操作日并按稳定顺序幂等追加不�
 
     const client=new Client({connectionString:database.url});await client.connect();
     try{
+      const businessRegion=await client.query("select business_region_source_text,business_region_code from performance_orders where qingflow_order_no='CHAIN-110'");
+      assert.deepEqual(businessRegion.rows[0],{business_region_source_text:"江苏省",business_region_code:"CN-JS"});
+      const externalTrade=await client.query("select business_region_source_text,business_region_code from performance_orders where qingflow_order_no='CHAIN-EXTERNAL-TRADE'");
+      assert.deepEqual(externalTrade.rows[0],{business_region_source_text:"外贸",business_region_code:"EXT-TRADE"});
       await assert.rejects(client.query("update performance_events set reason='篡改' where source_row_number is null"),/已入账业绩事件不可更新或删除/);
       await assert.rejects(client.query("delete from performance_events where source_row_number is null"),/已入账业绩事件不可更新或删除/);
     }finally{await client.end();}
@@ -104,7 +114,7 @@ test("关闭期间仅允许经人事批准的单次范围更正且普通跨月�
       const leader=await writeHeaders(app,"ledger_assistant_leader");
       const hr=await writeHeaders(app,"ledger_hr");
       const create=async(orderNo:string)=>{
-        const response=await app.inject({method:"POST",url:"/api/performance/orders",headers:assistant,payload:{orderNo,customerName:"月结客户",customerUnit:"测试单位",salespersonPersonId:Number(scenario.memberPersonId),sourceReceivedOn:"2026-08-15",amount:100,reason:"八月入账"}});
+        const response=await app.inject({method:"POST",url:"/api/performance/orders",headers:assistant,payload:{orderNo,customerName:"月结客户",customerUnit:"测试单位",businessRegionCode:"CN-JS",salespersonPersonId:Number(scenario.memberPersonId),sourceReceivedOn:"2026-08-15",amount:100,reason:"八月入账"}});
         assert.equal(response.statusCode,201,response.body);return response.json().id as string;
       };
       const normalOrderId=await create("PERIOD-NORMAL");
@@ -116,7 +126,7 @@ test("关闭期间仅允许经人事批准的单次范围更正且普通跨月�
       assert.equal(sameActorClose.statusCode,409,sameActorClose.body);
       const closed=await app.inject({method:"POST",url:"/api/accounting-periods/2026-08/close",headers:hr,payload:{note:"人事关闭八月"}});
       assert.equal(closed.statusCode,200,closed.body);
-      const backfill=await app.inject({method:"POST",url:"/api/performance/orders",headers:assistant,payload:{orderNo:"PERIOD-BLOCKED",customerName:"禁止回填",customerUnit:"测试单位",salespersonPersonId:Number(scenario.memberPersonId),sourceReceivedOn:"2026-08-20",amount:50,reason:"关闭月补录"}});
+      const backfill=await app.inject({method:"POST",url:"/api/performance/orders",headers:assistant,payload:{orderNo:"PERIOD-BLOCKED",customerName:"禁止回填",customerUnit:"测试单位",businessRegionCode:"CN-JS",salespersonPersonId:Number(scenario.memberPersonId),sourceReceivedOn:"2026-08-20",amount:50,reason:"关闭月补录"}});
       assert.equal(backfill.statusCode,409,backfill.body);
       assert.match(backfill.body,/记账期间已关闭/);
 
@@ -242,7 +252,7 @@ test("更正申请被拒绝、撤销或批准超过二十四小时后均不能�
       const leader=await writeHeaders(app,"ledger_assistant_leader");
       const hr=await writeHeaders(app,"ledger_hr");
       const create=async(orderNo:string)=>{
-        const response=await app.inject({method:"POST",url:"/api/performance/orders",headers:assistant,payload:{orderNo,customerName:"更正治理客户",customerUnit:"测试单位",salespersonPersonId:Number(scenario.memberPersonId),sourceReceivedOn:"2026-08-15",amount:100,reason:"八月入账"}});
+        const response=await app.inject({method:"POST",url:"/api/performance/orders",headers:assistant,payload:{orderNo,customerName:"更正治理客户",customerUnit:"测试单位",businessRegionCode:"CN-JS",salespersonPersonId:Number(scenario.memberPersonId),sourceReceivedOn:"2026-08-15",amount:100,reason:"八月入账"}});
         assert.equal(response.statusCode,201,response.body);return response.json().id as string;
       };
       const rejectedOrder=await create("CORRECTION-REJECTED");

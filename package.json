@@ -20,9 +20,10 @@
     "test:e2e": "npm run test:e2e --workspace @sampleflow/web",
     "verify": "npm run typecheck && npm run test && npm run build && npm audit --omit=dev && docker compose --env-file .env.example config --quiet",
     "db:migrate": "npm run db:migrate --workspace @sampleflow/api",
-    "db:seed": "npm run db:seed --workspace @sampleflow/api",
+    "dev:seed": "npm run dev:seed --workspace @sampleflow/api",
     "admin:bootstrap": "npm run admin:bootstrap --workspace @sampleflow/api",
-    "db:import-legacy": "npm run db:import-legacy --workspace @sampleflow/api",
+    "import:preflight": "npm run import:preflight --workspace @sampleflow/api",
+    "import:confirm": "npm run import:confirm --workspace @sampleflow/api",
     "auth:cleanup-sessions": "npm run auth:cleanup-sessions --workspace @sampleflow/api"
   },
   "devDependencies": {
