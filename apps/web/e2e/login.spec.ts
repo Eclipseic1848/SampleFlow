@@ -165,6 +165,153 @@ test("订单台账以前后游标稳定浏览并在刷新后开启新快照", as
   }
 });
 
+test("订单组合筛选由 URL 恢复并区分空集、失败和无权限", async ({ database, page }) => {
+  const userId = await seedTestUser(database.url, {
+    username: "e2e_filter_assistant",
+    displayName: "E2E 筛选销售助理",
+    password: "Filter@123",
+    roleCode: "sales_assistant",
+    roleName: "销售助理",
+  });
+  const setup = new Client({ connectionString: database.url });
+  await setup.connect();
+  const person = await setup.query<{ id: string }>("select id::text from people where user_id=$1", [userId]);
+  async function insertRows(prefix: string, count: number, values: {
+    customerUnit: string;
+    salesperson: string;
+    month: string;
+    status: string;
+    region: string;
+    department: string;
+    group: string;
+  }) {
+    await setup.query(
+      `with orders as (
+         insert into performance_orders
+           (qingflow_order_no,customer_name,customer_unit,business_region_code,salesperson_person_id,salesperson_name,
+            source_received_on,original_amount,current_revenue,counted_amount,lifecycle_state,created_at,posted_at)
+         select $1||lpad(series::text,4,'0'),'E2E 筛选客户',$3,$7,$4,$5,($6::text||'-15')::date,1,1,1,$8,$11,$11
+         from generate_series(1,$2::integer) series returning id
+       )
+       insert into performance_events
+         (order_id,event_type,delta_amount,resulting_current_revenue,resulting_counted_amount,
+          accounting_month,occurred_on,reason,salesperson_person_id,salesperson_name,department_name,group_name)
+       select id,'initial',1,1,1,($6::text||'-01')::date,($6::text||'-15')::date,'浏览器组合筛选回归',$4,$5,$9,$10 from orders`,
+      [
+        prefix,
+        count,
+        values.customerUnit,
+        person.rows[0]!.id,
+        values.salesperson,
+        values.month,
+        values.region,
+        values.status,
+        values.department,
+        values.group,
+        "2026-08-31T13:00:00.000Z",
+      ],
+    );
+  }
+  const matching = {
+    customerUnit: "筛选单位甲",
+    salesperson: "筛选业务员甲",
+    month: "2026-08",
+    status: "active",
+    region: "CN-JS",
+    department: "筛选甲部",
+    group: "筛选甲组",
+  };
+  await insertRows("E2E-FILTER-", 51, matching);
+  await insertRows("E2E-OTHER-", 1, { ...matching, customerUnit: "筛选单位乙", region: "CN-ZJ" });
+
+  try {
+    await page.goto("/");
+    await page.getByLabel("账号").fill("e2e_filter_assistant");
+    await page.getByLabel("密码", { exact: true }).fill("Filter@123");
+    await page.getByRole("button", { name: "进入 SampleFlow" }).click();
+    await page.getByRole("button", { name: "订单业绩", exact: true }).click();
+    const ledger = page.locator("section.orders-card").filter({ has: page.getByRole("heading", { name: "订单台账" }) });
+
+    await page.getByLabel("订单月份").fill(matching.month);
+    await page.getByLabel("部门筛选").fill(matching.department);
+    await page.getByLabel("定位订单").fill("E2E-FILTER-");
+    await expect(page).toHaveURL(/orderSearch=E2E-FILTER-/);
+    await expect(page.getByLabel("订单月份")).toHaveValue(matching.month);
+    await expect(page.getByLabel("部门筛选")).toHaveValue(matching.department);
+    await page.getByLabel("订单状态").selectOption(matching.status);
+    await page.getByLabel("业务员筛选").fill(matching.salesperson);
+    await page.getByLabel("小组筛选").fill(matching.group);
+    await page.getByLabel("标准业务区域筛选").selectOption(matching.region);
+    await page.getByLabel("客户单位筛选").fill(matching.customerUnit);
+    await page.getByRole("button", { name: "应用筛选" }).click();
+    await expect(ledger.getByText("E2E-FILTER-0051", { exact: true })).toBeVisible();
+    await expect(ledger.getByText("E2E-OTHER-0001", { exact: true })).toHaveCount(0);
+    await expect(page).toHaveURL(/page=orders/);
+    for (const value of ["orderMonth=2026-08", "orderStatus=active", "orderRegion=CN-JS"]) await expect(page).toHaveURL(new RegExp(value));
+
+    await ledger.getByRole("button", { name: "下一页" }).click();
+    await expect(ledger.getByText("E2E-FILTER-0001", { exact: true })).toBeVisible();
+    await expect(ledger.getByText("本页 1 笔订单", { exact: true })).toBeVisible();
+    const secondPageUrl = page.url();
+    expect(secondPageUrl).toContain("orderCursor=");
+    await page.reload();
+    await expect(ledger.getByText("E2E-FILTER-0001", { exact: true })).toBeVisible();
+    await ledger.getByRole("button", { name: "查看 / 调整" }).click();
+    await expect(page.getByRole("dialog", { name: "E2E-FILTER-0001" })).toBeVisible();
+    await page.getByRole("button", { name: "关闭" }).click();
+    expect(page.url()).toBe(secondPageUrl);
+
+    await page.goBack();
+    await expect(ledger.getByText("E2E-FILTER-0051", { exact: true })).toBeVisible();
+    await page.goForward();
+    await expect(ledger.getByText("E2E-FILTER-0001", { exact: true })).toBeVisible();
+
+    let responseMode: "live" | "empty" | "failure" | "forbidden" = "live";
+    await page.route("**/api/performance/orders*", async (route) => {
+      if (responseMode === "live") return route.continue();
+      if (responseMode === "failure") return route.fulfill({ status: 503, contentType: "application/json", body: '{"message":"筛选加载失败"}' });
+      if (responseMode === "forbidden") return route.fulfill({ status: 403, contentType: "application/json", body: '{"message":"当前角色没有业务查看权限"}' });
+      return route.fulfill({ status: 200, contentType: "application/json", body: '{"orders":[],"previousCursor":null,"nextCursor":null,"pageSize":50}' });
+    });
+    responseMode = "failure";
+    await page.getByLabel("客户单位筛选").fill("不存在的单位");
+    await page.getByRole("button", { name: "应用筛选" }).click();
+    await expect(page.getByRole("alert")).toHaveText("筛选加载失败");
+    await expect(ledger.getByText("E2E-FILTER-0001", { exact: true })).toHaveCount(0);
+    await expect(ledger.getByRole("button", { name: "上一页" })).toBeDisabled();
+    await expect(ledger.getByRole("button", { name: "下一页" })).toBeDisabled();
+    responseMode = "live";
+    await page.getByRole("button", { name: "重试查询" }).click();
+    await expect(ledger.getByText("没有符合当前组合条件的订单。", { exact: true })).toBeVisible();
+
+    responseMode = "empty";
+    await page.getByRole("button", { name: "清除筛选" }).click();
+    await expect(ledger.getByText("暂无订单数据。", { exact: true })).toBeVisible();
+    responseMode = "forbidden";
+    await ledger.getByRole("button", { name: "刷新订单" }).click();
+    await expect(page.getByText("当前账号没有订单查看权限。", { exact: true })).toBeVisible();
+  } finally {
+    await setup.end();
+  }
+});
+
+test("无业务权限账号访问订单深链时看到明确权限说明", async ({ database, page }) => {
+  await seedTestUser(database.url, {
+    username: "e2e_order_forbidden",
+    displayName: "E2E 纯系统管理员",
+    password: "Forbidden@123",
+    roleCode: "system_admin",
+    roleName: "系统管理员",
+  });
+  await page.goto("/?page=orders&orderMonth=2026-08");
+  await page.getByLabel("账号").fill("e2e_order_forbidden");
+  await page.getByLabel("密码", { exact: true }).fill("Forbidden@123");
+  await page.getByRole("button", { name: "进入 SampleFlow" }).click();
+  await expect(page.getByRole("heading", { name: "无法访问订单业绩" })).toBeVisible();
+  await expect(page.getByText("当前账号没有订单查看权限。", { exact: true })).toBeVisible();
+  await expect(page).toHaveURL(/page=orders/);
+});
+
 test("首次登录用户看到密码强度并完成改密", async ({ database, page }) => {
     await seedTestUser(database.url, {
       username: "e2e_password_change",
@@ -501,12 +648,13 @@ test("系统管理员通过页面办理组织异动并保留前后有效期", as
       await page.getByRole("button",{name:"进入 SampleFlow"}).click();
       await page.getByRole("button",{name:"订单业绩",exact:true}).click();
       await page.getByRole("button",{name:"录入新订单"}).click();
+      const createOrderDialog=page.getByRole("dialog",{name:"录入订单业绩"});
       await page.getByLabel("订单编号").fill("ORG-TRANSFER-E2E-100");
       await page.getByLabel("收到日期").fill("2026-07-15");
       await page.getByLabel("客户名称").fill("组织异动客户");
-      await page.getByLabel("客户单位").fill("组织异动测试单位");
-      await page.getByLabel("业务区域").selectOption("EXT-TRADE");
-      await page.getByLabel("业务员").selectOption({label:"E2E 异动业务员"});
+      await page.getByLabel("客户单位",{exact:true}).fill("组织异动测试单位");
+      await createOrderDialog.getByLabel("业务区域").selectOption("EXT-TRADE");
+      await createOrderDialog.getByLabel("业务员").selectOption({label:"E2E 异动业务员"});
       await page.getByLabel("服务类型").fill("组织快照验收");
       await page.getByLabel("营业额").fill("100");
       await page.getByRole("button",{name:"确认入账"}).click();
@@ -586,11 +734,12 @@ test("订单搜索与不可变事件链在浏览器和数据库中保持一致",
       await page.getByRole("button", { name: "订单业绩", exact:true }).click();
 
       await page.getByRole("button", { name: "录入新订单" }).click();
+      const createOrderDialog=page.getByRole("dialog",{name:"录入订单业绩"});
       await page.getByLabel("订单编号").fill("CHAIN-E2E-110");
       await page.getByLabel("客户名称").fill("事件链客户");
-      await page.getByLabel("客户单位").fill("事件链测试单位");
-      await page.getByLabel("业务区域").selectOption("EXT-TRADE");
-      await page.getByLabel("业务员").selectOption({label:"E2E 账本业务员"});
+      await page.getByLabel("客户单位",{exact:true}).fill("事件链测试单位");
+      await createOrderDialog.getByLabel("业务区域").selectOption("EXT-TRADE");
+      await createOrderDialog.getByLabel("业务员").selectOption({label:"E2E 账本业务员"});
       await page.getByLabel("服务类型").fill("浏览器验收");
       await page.getByLabel("营业额").fill("110");
       await page.getByRole("button", { name: "确认入账" }).click();

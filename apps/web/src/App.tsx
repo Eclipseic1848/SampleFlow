@@ -7,6 +7,11 @@ type User = { id: string; personId:string; username: string; displayName: string
 type AuthState = { status: "loading" } | { status: "guest" } | { status: "authenticated"; user: User };
 type OrderLifecycle = "draft" | "active" | "paused" | "zero" | "historical_review_required";
 type Order = { id: string; orderNo: string; customerName: string; customerUnit: string; salespersonName: string; serviceType: string | null; sourceReceivedOn: string; originalAmount: string; currentRevenue: string; countedAmount: string; lifecycleState: OrderLifecycle; postedAt: string; departmentName:string; groupName:string; leaderName:string|null; supervisorName:string|null };
+type OrderFilters = { search:string;month:string;status:string;salesperson:string;department:string;group:string;region:string;customerUnit:string };
+const emptyOrderFilters:OrderFilters={search:"",month:"",status:"",salesperson:"",department:"",group:"",region:"",customerUnit:""};
+const orderFilterUrlKeys:Record<keyof OrderFilters,string>={search:"orderSearch",month:"orderMonth",status:"orderStatus",salesperson:"orderSalesperson",department:"orderDepartment",group:"orderGroup",region:"orderRegion",customerUnit:"orderCustomerUnit"};
+function readOrderUrlState(){const params=new URLSearchParams(window.location.search);const filters={...emptyOrderFilters};for(const key of Object.keys(orderFilterUrlKeys) as Array<keyof OrderFilters>)filters[key]=params.get(orderFilterUrlKeys[key])??"";return{filters,cursor:params.get("orderCursor")};}
+function writeOrderUrlState(filters:OrderFilters,cursor:string|null,mode:"push"|"replace"="push"){const params=new URLSearchParams(window.location.search);params.set("page","orders");for(const key of Object.keys(orderFilterUrlKeys) as Array<keyof OrderFilters>){if(filters[key])params.set(orderFilterUrlKeys[key],filters[key]);else params.delete(orderFilterUrlKeys[key]);}if(cursor)params.set("orderCursor",cursor);else params.delete("orderCursor");window.history[mode==="push"?"pushState":"replaceState"]({},"",`${window.location.pathname}?${params.toString()}${window.location.hash}`);}
 type PerformanceEvent = { id:string; sequence:number; eventType:string; deltaAmount:string; resultingCurrentRevenue:string; resultingCountedAmount:string; resultingLifecycleState:OrderLifecycle|null; accountingMonth:string; occurredOn:string; occurredAt:string; reason:string|null; actorName:string|null; salespersonName:string; departmentName:string|null; groupName:string|null; leaderName:string|null; supervisorName:string|null };
 type AccountingPeriod={periodMonth:string;status:"open"|"closed";version:number;needsReclose:boolean;verifiedAt:string|null;verifiedBy:string|null;closedAt:string|null;closedBy:string|null};
 type AccountingCorrection={id:string;periodMonth:string;orderId:string;orderNo:string;eventType:string;occurredOn:string;reason:string;status:"pending"|"approved"|"rejected"|"consumed"|"revoked";requestedBy:string;reviewedBy:string|null;reviewNote:string|null;expiresAt:string|null};
@@ -154,9 +159,16 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
     user.capabilities.viewApprovals ? {id:"approvals" as const,Icon:FileClock,label:"审批中心"} : null,
     user.capabilities.manageAccounts ? {id:"accounts" as const,Icon:UsersRound,label:"账号管理"} : null,
   ].filter((page):page is NonNullable<typeof page>=>page!==null);
-  const [active, setActive] = useState<PageId>(user.capabilities.manageAccounts ? "accounts" : pages[0]?.id??"overview");
+  const defaultPage:PageId=user.capabilities.manageAccounts?"accounts":pages[0]?.id??"overview";
+  const canOpenOrders=pages.some((page)=>page.id==="orders");
+  const requestedPage=new URLSearchParams(window.location.search).get("page");
+  const [active, setActive] = useState<PageId|"forbidden">(requestedPage==="orders"?(canOpenOrders?"orders":"forbidden"):defaultPage);
+  const navigate=useCallback((page:PageId)=>{const params=new URLSearchParams(window.location.search);if(page==="orders")params.set("page","orders");else params.delete("page");window.history.pushState({},"",`${window.location.pathname}${params.size?`?${params.toString()}`:""}${window.location.hash}`);setActive(page);},[]);
+  useEffect(()=>{const restore=()=>{const page=new URLSearchParams(window.location.search).get("page");setActive(page==="orders"?(canOpenOrders?"orders":"forbidden"):defaultPage);};window.addEventListener("popstate",restore);return()=>window.removeEventListener("popstate",restore);},[canOpenOrders,defaultPage]);
   async function logout() { await apiFetch("/api/auth/logout", { method: "POST" }); onLogout(); }
-  const content = active === "orders"
+  const content = active === "forbidden"
+    ? <main className="dashboard"><header><div><h1>无法访问订单业绩</h1><p>该页面需要业务查看权限</p></div></header><div className="permission-note"><ShieldCheck size={18}/>当前账号没有订单查看权限。</div></main>
+    : active === "orders"
     ? <OrdersPage user={user} />
     : active === "goals"
       ? <GoalsPage user={user} pendingOnly={false} />
@@ -166,8 +178,8 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
         ? <OrganizationPage user={user}/>
       : active === "accounts"
         ? <AccountsPage user={user}/>
-      : <Overview canEdit={user.capabilities.editPerformance} canExport={user.capabilities.exportPerformance} onEnterOrders={() => setActive("orders")} />;
-  return <div className="app-shell"><aside className="sidebar"><div className="sidebar-brand"><span>SF</span><strong>SampleFlow</strong></div><nav>{pages.map(({Icon,label,id}) => <button className={id === active ? "active" : ""} key={id} onClick={() => setActive(id)} aria-label={label} aria-current={id===active?"page":undefined}><Icon size={18}/><span>{label}</span></button>)}</nav><div className="sidebar-user"><div className="avatar">{user.displayName.slice(0,1)}</div><div><strong>{user.displayName}</strong><span>{user.roles.map((r) => roleNames[r] ?? r).join("、")}</span></div><button onClick={logout} aria-label="退出登录"><LogOut size={17}/></button></div></aside>{content}</div>;
+      : <Overview canEdit={user.capabilities.editPerformance} canExport={user.capabilities.exportPerformance} onEnterOrders={() => navigate("orders")} />;
+  return <div className="app-shell"><aside className="sidebar"><div className="sidebar-brand"><span>SF</span><strong>SampleFlow</strong></div><nav>{pages.map(({Icon,label,id}) => <button className={id === active ? "active" : ""} key={id} onClick={() => navigate(id)} aria-label={label} aria-current={id===active?"page":undefined}><Icon size={18}/><span>{label}</span></button>)}</nav><div className="sidebar-user"><div className="avatar">{user.displayName.slice(0,1)}</div><div><strong>{user.displayName}</strong><span>{user.roles.map((r) => roleNames[r] ?? r).join("、")}</span></div><button onClick={logout} aria-label="退出登录"><LogOut size={17}/></button></div></aside>{content}</div>;
 }
 
 function AccountsPage({user}:{user:User}){
@@ -293,57 +305,76 @@ function OrdersPage({ user }: { user: User }) {
   const [selected, setSelected] = useState<Order | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [showImport, setShowImport] = useState(false);
-  const [message, setMessage] = useState("");
-  const initialSearch = new URLSearchParams(window.location.search).get("orderSearch") ?? "";
-  const [search, setSearch] = useState(initialSearch);
-  const [committedSearch, setCommittedSearch] = useState(initialSearch);
+  const initialUrlState=useRef(readOrderUrlState()).current;
+  const [draftFilters,setDraftFilters]=useState<OrderFilters>(initialUrlState.filters);
+  const [committedFilters,setCommittedFilters]=useState<OrderFilters>(initialUrlState.filters);
   const [isComposing, setIsComposing] = useState(false);
-  const [loading, setLoading] = useState(true);
+  const [loadState,setLoadState]=useState<"loading"|"ready"|"error"|"forbidden">("loading");
+  const [loadError,setLoadError]=useState("");
   const [refreshVersion, setRefreshVersion] = useState(0);
-  const [pageCursor, setPageCursor] = useState<string | null>(null);
+  const [pageCursor, setPageCursor] = useState<string | null>(initialUrlState.cursor);
   const [previousCursor, setPreviousCursor] = useState<string | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
-  const commitSearch = useCallback((value:string, historyMode:"push"|"replace"="push") => {
-    const normalized=value.trim();
-    const params=new URLSearchParams(window.location.search);
-    if(normalized)params.set("orderSearch",normalized);else params.delete("orderSearch");
-    const next=`${window.location.pathname}${params.size?`?${params.toString()}`:""}${window.location.hash}`;
-    window.history[historyMode==="push"?"pushState":"replaceState"]({},"",next);
+  const commitFilters=useCallback((value:OrderFilters,historyMode:"push"|"replace"="push",updateDraft=true)=>{
+    const normalized:OrderFilters={
+      search:value.search.trim(),month:value.month.trim(),status:value.status.trim(),salesperson:value.salesperson.trim(),
+      department:value.department.trim(),group:value.group.trim(),region:value.region.trim(),customerUnit:value.customerUnit.trim(),
+    };
+    writeOrderUrlState(normalized,null,historyMode);
+    if(updateDraft)setDraftFilters(normalized);
     setPageCursor(null);
-    setCommittedSearch(normalized);
+    setCommittedFilters(normalized);
   },[]);
   useEffect(()=>{
-    const restore=()=>{const value=new URLSearchParams(window.location.search).get("orderSearch")??"";setSearch(value);setPageCursor(null);setCommittedSearch(value);};
+    const restore=()=>{const restored=readOrderUrlState();setDraftFilters(restored.filters);setCommittedFilters(restored.filters);setPageCursor(restored.cursor);};
     window.addEventListener("popstate",restore);return()=>window.removeEventListener("popstate",restore);
   },[]);
   useEffect(()=>{
-    if(isComposing||search.trim()===committedSearch)return;
-    const timer=window.setTimeout(()=>commitSearch(search),300);
+    if(isComposing||draftFilters.search.trim()===committedFilters.search)return;
+    const timer=window.setTimeout(()=>commitFilters({...committedFilters,search:draftFilters.search},"push",false),300);
     return()=>window.clearTimeout(timer);
-  },[search,isComposing,committedSearch,commitSearch]);
+  },[draftFilters.search,isComposing,committedFilters,commitFilters]);
+  const filterRequestKey=JSON.stringify(committedFilters);
+  const lastFilterRequestKey=useRef<string|null>(null);
   useEffect(() => {
-    const controller=new AbortController();setLoading(true);setMessage("");
-    const params=new URLSearchParams();if(committedSearch)params.set("search",committedSearch);if(pageCursor)params.set("cursor",pageCursor);
+    if(lastFilterRequestKey.current!==filterRequestKey){lastFilterRequestKey.current=filterRequestKey;setOrders([]);setPreviousCursor(null);setNextCursor(null);}
+    const controller=new AbortController();setLoadState("loading");setLoadError("");
+    const params=new URLSearchParams();for(const [key,value] of Object.entries(committedFilters))if(value)params.set(key,value);if(pageCursor)params.set("cursor",pageCursor);
     fetch(`/api/performance/orders?${params.toString()}`,{signal:controller.signal}).then(async(response)=>{
-      const data=await response.json() as {orders?:Order[];previousCursor?:string|null;nextCursor?:string|null;message?:string};
+      const data=await readResponseJson<{orders?:Order[];previousCursor?:string|null;nextCursor?:string|null;message?:string}>(response,"订单服务响应无效，请重试");
+      if(response.status===403){setOrders([]);setPreviousCursor(null);setNextCursor(null);setLoadState("forbidden");return;}
       if(!response.ok)throw new Error(data.message??"订单加载失败");
       setOrders(data.orders??[]);
       setPreviousCursor(data.previousCursor??null);setNextCursor(data.nextCursor??null);
-    }).catch((error)=>{if(error instanceof DOMException&&error.name==="AbortError")return;setMessage(error instanceof Error?error.message:"订单加载失败");})
-      .finally(()=>{if(!controller.signal.aborted)setLoading(false);});
+      setLoadState("ready");
+    }).catch((error)=>{if(error instanceof DOMException&&error.name==="AbortError")return;setLoadError(error instanceof Error?error.message:"订单加载失败");setLoadState("error");});
     return()=>controller.abort();
-  }, [committedSearch,pageCursor,refreshVersion]);
-  async function refresh() { setPageCursor(null);setRefreshVersion((value)=>value+1); }
-  function movePage(cursor:string|null){if(!cursor)return;if(cursor===pageCursor)setRefreshVersion((value)=>value+1);else setPageCursor(cursor);}
-  function clearSearch(){setSearch("");commitSearch("");window.requestAnimationFrame(()=>searchRef.current?.focus());}
+  }, [filterRequestKey,pageCursor,refreshVersion]);
+  const loading=loadState==="loading";
+  const hasFilters=Object.values(committedFilters).some(Boolean);
+  async function refresh() { writeOrderUrlState(committedFilters,null,"replace");setPageCursor(null);setRefreshVersion((value)=>value+1); }
+  function movePage(cursor:string|null){if(!cursor)return;if(cursor===pageCursor){setRefreshVersion((value)=>value+1);return;}writeOrderUrlState(committedFilters,cursor);setPageCursor(cursor);}
+  function clearSearch(){setDraftFilters((current)=>({...current,search:""}));commitFilters({...committedFilters,search:""},"push",false);window.requestAnimationFrame(()=>searchRef.current?.focus());}
+  function updateFilter(key:keyof OrderFilters,value:string){setDraftFilters((current)=>({...current,[key]:value}));}
+  const emptyMessage=loadState==="forbidden"?"无可显示订单。":loadState==="error"?"订单加载失败，可重试。":hasFilters?"没有符合当前组合条件的订单。":"暂无订单数据。";
   return <main className="dashboard orders-page"><header><div><h1>订单业绩</h1><p>按订单编号维护不可变业绩事件；已入账记录不能覆盖或删除</p></div>{canEdit ? <div className="header-actions"><button className="secondary-action" onClick={() => setShowImport(true)}><FileUp size={16}/>Excel 导入</button><button className="primary-action" onClick={() => setShowCreate(true)}><Plus size={16}/>录入新订单</button></div> : null}</header>
-    {message ? <p className="page-message" role="status">{message}</p> : null}
+    {loadState==="error"?<div className="query-feedback"><p className="page-message" role="alert">{loadError}</p><button type="button" onClick={()=>setRefreshVersion((value)=>value+1)}>重试查询</button></div>:null}
+    {loadState==="forbidden"?<div className="permission-note"><ShieldCheck size={18}/>当前账号没有订单查看权限。</div>:null}
     {!canEdit ? <div className="permission-note"><ShieldCheck size={18}/>当前角色仅可查看。只有销售助理及销售助理组长可以录入或调整业绩。</div> : null}
     <LedgerGovernancePanel user={user} orders={orders} onChanged={refresh}/>
     <section className="orders-card" aria-labelledby="orders-table-title"><div className="orders-toolbar"><div><h2 id="orders-table-title">订单台账</h2><span role="status">{loading?"正在查询…":`本页 ${orders.length} 笔订单`}</span></div><button className="icon-action" onClick={() => refresh()} aria-label="刷新订单"><RefreshCw size={17}/></button></div>
-      <form className="order-search" role="search" noValidate onSubmit={(event)=>{event.preventDefault();if(!isComposing)commitSearch(search);}}><label htmlFor="order-search-input">定位订单</label><div><Search size={17} aria-hidden="true"/><input ref={searchRef} id="order-search-input" type="search" value={search} placeholder="输入订单编号、客户名称、客户单位或业务员" onChange={(event)=>setSearch(event.target.value)} onCompositionStart={()=>setIsComposing(true)} onCompositionEnd={(event)=>{setIsComposing(false);setSearch(event.currentTarget.value);}}/>{search?<button type="button" onClick={clearSearch} aria-label="清除订单搜索"><X size={16}/></button>:null}</div><button type="submit">搜索</button></form>
-      <div className="orders-table-wrap"><table><thead><tr><th scope="col">订单编号</th><th scope="col">客户</th><th scope="col">业务员</th><th scope="col">当前营业额</th><th scope="col">计入业绩</th><th scope="col">状态</th><th scope="col">操作</th></tr></thead><tbody>{!loading&&orders.length === 0 ? <tr><td colSpan={7} className="empty-cell">{committedSearch?`没有找到与“${committedSearch}”匹配的订单。`:"暂无订单，请录入第一笔业绩。"}</td></tr> : orders.map((order) => <tr key={order.id}><td>{order.orderNo}</td><td>{order.customerName}</td><td>{order.salespersonName}</td><td>{formatMoney(order.currentRevenue)}</td><td>{formatMoney(order.countedAmount)}</td><td><Status state={order.lifecycleState}/></td><td><button className="table-action" onClick={() => setSelected(order)}>查看 / 调整</button></td></tr>)}</tbody></table></div>
+      <form className="order-search" role="search" noValidate onSubmit={(event)=>{event.preventDefault();if(!isComposing)commitFilters({...committedFilters,search:draftFilters.search},"push",false);}}><label htmlFor="order-search-input">定位订单</label><div><Search size={17} aria-hidden="true"/><input ref={searchRef} id="order-search-input" type="search" value={draftFilters.search} maxLength={100} placeholder="输入订单编号、客户名称、客户单位或业务员" onChange={(event)=>updateFilter("search",event.target.value)} onCompositionStart={()=>setIsComposing(true)} onCompositionEnd={(event)=>{setIsComposing(false);updateFilter("search",event.currentTarget.value);}}/>{draftFilters.search?<button type="button" onClick={clearSearch} aria-label="清除订单搜索"><X size={16}/></button>:null}</div><button type="submit">搜索</button></form>
+      <form className="order-filters" noValidate onSubmit={(event)=>{event.preventDefault();commitFilters(draftFilters);}}><div className="order-filter-grid">
+        <label className="field"><span>订单月份</span><input type="month" value={draftFilters.month} onChange={(event)=>updateFilter("month",event.target.value)}/></label>
+        <label className="field"><span>订单状态</span><select value={draftFilters.status} onChange={(event)=>updateFilter("status",event.target.value)}><option value="">全部状态</option><option value="active">正向计入</option><option value="paused">已暂停</option><option value="zero">零金额</option><option value="historical_review_required">待历史核对</option><option value="draft">草稿</option></select></label>
+        <label className="field"><span>业务员筛选</span><input value={draftFilters.salesperson} maxLength={300} onChange={(event)=>updateFilter("salesperson",event.target.value)}/></label>
+        <label className="field"><span>部门筛选</span><input value={draftFilters.department} maxLength={300} onChange={(event)=>updateFilter("department",event.target.value)}/></label>
+        <label className="field"><span>小组筛选</span><input value={draftFilters.group} maxLength={300} onChange={(event)=>updateFilter("group",event.target.value)}/></label>
+        <label className="field"><span>标准业务区域筛选</span><select value={draftFilters.region} onChange={(event)=>updateFilter("region",event.target.value)}><option value="">全部区域</option>{standardBusinessRegions.map(([code,name])=><option key={code} value={code}>{name}</option>)}</select></label>
+        <label className="field"><span>客户单位筛选</span><input value={draftFilters.customerUnit} maxLength={300} onChange={(event)=>updateFilter("customerUnit",event.target.value)}/></label>
+      </div><div className="order-filter-actions"><button type="button" onClick={()=>commitFilters({...emptyOrderFilters})}>清除筛选</button><button type="submit">应用筛选</button></div></form>
+      <div className="orders-table-wrap"><table><thead><tr><th scope="col">订单编号</th><th scope="col">客户</th><th scope="col">业务员</th><th scope="col">当前营业额</th><th scope="col">计入业绩</th><th scope="col">状态</th><th scope="col">操作</th></tr></thead><tbody>{!loading&&orders.length === 0 ? <tr><td colSpan={7} className="empty-cell">{emptyMessage}</td></tr> : orders.map((order) => <tr key={order.id}><td>{order.orderNo}</td><td>{order.customerName}</td><td>{order.salespersonName}</td><td>{formatMoney(order.currentRevenue)}</td><td>{formatMoney(order.countedAmount)}</td><td><Status state={order.lifecycleState}/></td><td><button className="table-action" onClick={() => setSelected(order)}>查看 / 调整</button></td></tr>)}</tbody></table></div>
       <nav className="table-pagination" aria-label="订单分页"><button type="button" disabled={loading||!previousCursor} onClick={()=>movePage(previousCursor)}>上一页</button><button type="button" disabled={loading||!nextCursor} onClick={()=>movePage(nextCursor)}>下一页</button></nav>
     </section>
     {showCreate ? <CreateOrder onClose={() => setShowCreate(false)} onSaved={async () => { setShowCreate(false); await refresh(); }} /> : null}
