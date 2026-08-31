@@ -572,6 +572,7 @@ test("订单搜索与不可变事件链在浏览器和数据库中保持一致",
       await page.getByLabel("密码", { exact: true }).fill("Ledger@123");
       await page.getByRole("button",{name:"进入 SampleFlow"}).click();
       await page.getByRole("button",{name:"订单业绩",exact:true}).click();
+      await page.getByLabel("记账月份").fill("2026-07");
       const correctionForm=page.getByRole("heading",{name:"申请关闭月更正"}).locator("..");
       await correctionForm.locator("select").first().selectOption({label:"CHAIN-E2E-110 · 事件链客户"});
       await correctionForm.getByLabel("原业务日期").fill("2026-07-15");

@@ -19,6 +19,7 @@
     "test:integration": "npm run test:integration --workspace @sampleflow/api",
     "test:e2e": "npm run test:e2e --workspace @sampleflow/web",
     "verify": "npm run typecheck && npm run test && npm run build && npm audit --omit=dev && docker compose --env-file .env.example config --quiet",
+    "db:provision-roles": "npm run db:provision-roles --workspace @sampleflow/api",
     "db:migrate": "npm run db:migrate --workspace @sampleflow/api",
     "dev:seed": "npm run dev:seed --workspace @sampleflow/api",
     "admin:bootstrap": "npm run admin:bootstrap --workspace @sampleflow/api",

@@ -9,6 +9,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test --test-concurrency=1 src/**/*.test.ts",
     "test:integration": "node --import tsx --test --test-concurrency=1 src/**/*.integration.test.ts",
+    "db:provision-roles": "tsx src/cli/provision-database-roles.ts",
     "db:migrate": "tsx src/cli/migrate.ts",
     "dev:seed": "tsx src/cli/seed.ts",
     "admin:bootstrap": "tsx src/cli/bootstrap-admin.ts",
