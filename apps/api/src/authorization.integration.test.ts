@@ -1331,6 +1331,12 @@ test("订单台账用固定快照稳定遍历并保持有界查询次数", async
         headers: { cookie: leaderCookie },
       });
       assert.equal(mismatch.statusCode, 400, mismatch.body);
+      const filterMismatch = await app.inject({
+        method: "GET",
+        url: `/api/performance/orders?search=CURSOR-FIX-&status=active&cursor=${encodeURIComponent(first.body.nextCursor!)}`,
+        headers: { cookie: leaderCookie },
+      });
+      assert.equal(filterMismatch.statusCode, 400, filterMismatch.body);
       const bobCookie = await loginCookie(app, "scope_bob");
       const otherUser = await app.inject({
         method: "GET",
@@ -1358,6 +1364,106 @@ test("订单台账用固定快照稳定遍历并保持有界查询次数", async
       await pool.end();
       await setup.end();
     }
+  });
+});
+
+test("订单组合筛选始终叠加服务端权限范围", async () => {
+  await withMigratedTestDatabase(async (database) => {
+    const scenario = await seedAuthorizationScenario(database.url);
+    const maximumTextFilter = "筛".repeat(300);
+    const maximumSearch = "S".repeat(100);
+    const setup = new Client({ connectionString: database.url });
+    await setup.connect();
+    try {
+      await setup.query(
+        `update performance_orders set
+           customer_unit=case qingflow_order_no when 'SCOPE-1' then '甲客户单位' when 'SCOPE-2' then '乙客户单位' else '丙客户单位' end,
+           business_region_code=case qingflow_order_no when 'SCOPE-1' then 'CN-JS' when 'SCOPE-2' then 'CN-ZJ' else 'EXT-TRADE' end,
+           source_received_on=case qingflow_order_no when 'SCOPE-2' then '2026-09-01'::date else '2026-08-01'::date end,
+           lifecycle_state=case qingflow_order_no when 'SCOPE-2' then 'paused' else 'active' end
+         where id=any($1::bigint[])`,
+        [scenario.orderIds],
+      );
+      await setup.query(
+        `with source as (
+           select salesperson_person_id,department_unit_id,group_unit_id,leader_person_id,supervisor_person_id
+           from performance_events where order_id=$1 limit 1
+         ), orders as (
+           insert into performance_orders
+             (qingflow_order_no,customer_name,customer_unit,business_region_code,salesperson_person_id,salesperson_name,
+              source_received_on,original_amount,current_revenue,counted_amount,lifecycle_state,created_at,posted_at)
+           select $2||series::text,'最长筛选客户',$3,'CN-JS',source.salesperson_person_id,$3,
+                  '2026-08-15',1,1,1,'active','2026-08-31T14:00:00Z','2026-08-31T14:00:00Z'
+           from source cross join generate_series(1,51) series returning id
+         )
+         insert into performance_events
+           (order_id,event_type,delta_amount,resulting_current_revenue,resulting_counted_amount,
+            accounting_month,occurred_on,reason,salesperson_person_id,salesperson_name,
+            department_unit_id,department_name,group_unit_id,group_name,leader_person_id,leader_name,
+            supervisor_person_id,supervisor_name)
+         select orders.id,'initial',1,1,1,'2026-08-01','2026-08-15','最长筛选游标回归',
+                source.salesperson_person_id,$3,source.department_unit_id,$3,source.group_unit_id,$3,
+                source.leader_person_id,'最长筛选组长',source.supervisor_person_id,'最长筛选主管'
+         from orders cross join source`,
+        [scenario.orderIds[0], maximumSearch, maximumTextFilter],
+      );
+    } finally {
+      await setup.end();
+    }
+
+    await withTestApi(database.url, async (app) => {
+      const leaderCookie = await loginCookie(app, "scope_leader");
+      const filters = new URLSearchParams({
+        search: "SCOPE-",
+        month: "2026-08",
+        status: "active",
+        salesperson: "业务员甲",
+        department: "甲部",
+        group: "甲组",
+        region: "CN-JS",
+        customerUnit: "甲客户单位",
+      });
+      const matched = await app.inject({ method: "GET", url: `/api/performance/orders?${filters}`, headers: { cookie: leaderCookie } });
+      assert.equal(matched.statusCode, 200, matched.body);
+      assert.deepEqual((matched.json().orders as Array<{ orderNo: string }>).map((order) => order.orderNo), ["SCOPE-1"]);
+
+      filters.set("group", "乙组");
+      const empty = await app.inject({ method: "GET", url: `/api/performance/orders?${filters}`, headers: { cookie: leaderCookie } });
+      assert.equal(empty.statusCode, 200, empty.body);
+      assert.deepEqual(empty.json().orders, []);
+
+      const forged = await app.inject({ method: "GET", url: "/api/performance/orders?department=乙部", headers: { cookie: leaderCookie } });
+      assert.equal(forged.statusCode, 200, forged.body);
+      assert.deepEqual(forged.json().orders, []);
+      const assistantCookie = await loginCookie(app, "scope_assistant");
+      const authorized = await app.inject({ method: "GET", url: "/api/performance/orders?department=乙部", headers: { cookie: assistantCookie } });
+      assert.equal(authorized.statusCode, 200, authorized.body);
+      assert.deepEqual((authorized.json().orders as Array<{ orderNo: string }>).map((order) => order.orderNo), ["SCOPE-3"]);
+
+      for (const query of ["month=2026-13", "status=forged"]) {
+        const invalid = await app.inject({ method: "GET", url: `/api/performance/orders?${query}`, headers: { cookie: leaderCookie } });
+        assert.equal(invalid.statusCode, 400, invalid.body);
+      }
+
+      const maximumFilters = new URLSearchParams({
+        search: maximumSearch,
+        month: "2026-08",
+        status: "active",
+        salesperson: maximumTextFilter,
+        department: maximumTextFilter,
+        group: maximumTextFilter,
+        region: "CN-JS",
+        customerUnit: maximumTextFilter,
+      });
+      const maximumFirst = await app.inject({ method: "GET", url: `/api/performance/orders?${maximumFilters}`, headers: { cookie: leaderCookie } });
+      assert.equal(maximumFirst.statusCode, 200, maximumFirst.body);
+      assert.equal(maximumFirst.json().orders.length, 50);
+      assert.ok(maximumFirst.json().nextCursor.length < 2048);
+      maximumFilters.set("cursor", maximumFirst.json().nextCursor);
+      const maximumSecond = await app.inject({ method: "GET", url: `/api/performance/orders?${maximumFilters}`, headers: { cookie: leaderCookie } });
+      assert.equal(maximumSecond.statusCode, 200, maximumSecond.body);
+      assert.equal(maximumSecond.json().orders.length, 1);
+    });
   });
 });
 

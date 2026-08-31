@@ -37,24 +37,47 @@ const departmentAchievementQuerySchema = dashboardQuerySchema.extend({
   departmentId: z.coerce.number().int().positive(),
 });
 const ORDER_PAGE_SIZE = 50;
-const orderListQuerySchema = z.object({
-  search: z.string().trim().max(100).optional(),
-  cursor: z.string().min(1).max(2048).optional(),
-});
 const postgresBigintIdSchema = z.string().refine(
   (value) => /^[1-9]\d*$/.test(value) && BigInt(value) <= 9_223_372_036_854_775_807n,
 );
+const orderTextFilterSchema = z.string().trim().min(1).max(300);
+const orderListQuerySchema = z.object({
+  search: z.string().trim().max(100).optional(),
+  month: z.string().regex(/^[1-9]\d{3}-(0[1-9]|1[0-2])$/).optional(),
+  status: z.enum(["draft", "active", "paused", "zero", "historical_review_required"]).optional(),
+  salesperson: orderTextFilterSchema.optional(),
+  department: orderTextFilterSchema.optional(),
+  group: orderTextFilterSchema.optional(),
+  region: z.string().refine((value) => standardBusinessRegionName(value) !== undefined).optional(),
+  customerUnit: orderTextFilterSchema.optional(),
+  cursor: z.string().min(1).max(2048).optional(),
+});
+const orderCursorFiltersSchema = z.strictObject({
+  search: z.string().max(100),
+  month: z.string().max(7),
+  status: z.string().max(40),
+  salesperson: z.string().max(300),
+  department: z.string().max(300),
+  group: z.string().max(300),
+  region: z.string().max(20),
+  customerUnit: z.string().max(300),
+});
 const orderCursorSchema = z.strictObject({
-  version: z.literal(1),
+  version: z.literal(2),
   direction: z.enum(["next", "previous"]),
   anchorCreatedAt: z.iso.datetime(),
   anchorId: postgresBigintIdSchema,
   cutoffCreatedAt: z.iso.datetime(),
   cutoffId: postgresBigintIdSchema,
-  search: z.string().max(100),
+  filterDigest: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
   userId: postgresBigintIdSchema,
 });
+type OrderCursorFilters = z.infer<typeof orderCursorFiltersSchema>;
 type OrderCursor = z.infer<typeof orderCursorSchema>;
+
+function orderFilterDigest(filters: OrderCursorFilters): string {
+  return createHash("sha256").update(JSON.stringify(filters), "utf8").digest("base64url");
+}
 
 function encodeOrderCursor(cursor: OrderCursor): string {
   return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
@@ -974,12 +997,21 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
     if (!canReadPerformance(access)) return reply.code(403).send({ message: "当前角色没有业务查看权限" });
     const query = orderListQuerySchema.safeParse(request.query);
     if (!query.success) return reply.code(400).send({ message: "查询条件无效" });
-    const search = query.data.search ?? "";
+    const filters: OrderCursorFilters = {
+      search: query.data.search ?? "",
+      month: query.data.month ?? "",
+      status: query.data.status ?? "",
+      salesperson: query.data.salesperson ?? "",
+      department: query.data.department ?? "",
+      group: query.data.group ?? "",
+      region: query.data.region ?? "",
+      customerUnit: query.data.customerUnit ?? "",
+    };
     const cursor = query.data.cursor ? decodeOrderCursor(query.data.cursor) : null;
-    if (query.data.cursor && (!cursor || cursor.search !== search || cursor.userId !== request.currentUser.id)) {
+    if (query.data.cursor && (!cursor || cursor.filterDigest !== orderFilterDigest(filters) || cursor.userId !== request.currentUser.id)) {
       return reply.code(400).send({ code: "ORDER_CURSOR_INVALID", message: "分页游标无效或已不适用于当前查询" });
     }
-    const term = search ? `%${search}%` : null;
+    const term = filters.search ? `%${filters.search}%` : null;
     const direction = cursor?.direction ?? "next";
     type OrderListRow = Record<string, unknown> & { id: string; __cursorCreatedAt: Date };
     const result = await db.query<OrderListRow>(
@@ -998,14 +1030,28 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
        ) latest on latest.order_id=performance_orders.id
        where ($1::text is null or performance_orders.qingflow_order_no ilike $1 or performance_orders.salesperson_name ilike $1 or performance_orders.customer_name ilike $1 or performance_orders.customer_unit ilike $1)
          and ${performanceScopeSql("latest", 3)}
-         ${cursor ? `and (performance_orders.created_at,performance_orders.id)<=($7::timestamptz,$8::bigint)
-         and (performance_orders.created_at,performance_orders.id)${direction === "next" ? "<" : ">"}($9::timestamptz,$10::bigint)` : ""}
+         and ($7::date is null or (performance_orders.source_received_on >= $7::date and performance_orders.source_received_on < $7::date + interval '1 month'))
+         and ($8::text is null or performance_orders.lifecycle_state=$8)
+         and ($9::text is null or performance_orders.salesperson_name=$9)
+         and ($10::text is null or latest.department_name=$10)
+         and ($11::text is null or latest.group_name=$11)
+         and ($12::text is null or performance_orders.business_region_code=$12)
+         and ($13::text is null or performance_orders.customer_unit=$13)
+         ${cursor ? `and (performance_orders.created_at,performance_orders.id)<=($14::timestamptz,$15::bigint)
+         and (performance_orders.created_at,performance_orders.id)${direction === "next" ? "<" : ">"}($16::timestamptz,$17::bigint)` : ""}
        order by performance_orders.created_at ${direction === "previous" ? "asc" : "desc"},performance_orders.id ${direction === "previous" ? "asc" : "desc"}
        limit $2`,
       [
         term,
         ORDER_PAGE_SIZE + 1,
         ...performanceScopeValues(access),
+        filters.month ? `${filters.month}-01` : null,
+        filters.status || null,
+        filters.salesperson || null,
+        filters.department || null,
+        filters.group || null,
+        filters.region || null,
+        filters.customerUnit || null,
         ...(cursor ? [cursor.cutoffCreatedAt, cursor.cutoffId, cursor.anchorCreatedAt, cursor.anchorId] : []),
       ],
     );
@@ -1017,13 +1063,13 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
       cutoffId: pageRows[0].id,
     } : null);
     const makeCursor = (cursorDirection: OrderCursor["direction"], anchor: OrderListRow): string => encodeOrderCursor({
-      version: 1,
+      version: 2,
       direction: cursorDirection,
       anchorCreatedAt: anchor.__cursorCreatedAt.toISOString(),
       anchorId: anchor.id,
       cutoffCreatedAt: cutoff!.cutoffCreatedAt,
       cutoffId: cutoff!.cutoffId,
-      search,
+      filterDigest: orderFilterDigest(filters),
       userId: request.currentUser!.id,
     });
     const first = pageRows[0];
