@@ -230,10 +230,14 @@ form button:disabled { cursor: wait; opacity: .72; }
 .header-actions { display: flex; gap: 9px; }
 .secondary-action { height: 40px; padding: 0 17px; border: 1px solid #bfcbd9; border-radius: 7px; color: #42546b; background: #fff; font-weight: 700; cursor: pointer; }
 .metric-band { margin-top: 28px; display: grid; grid-template-columns: repeat(4, 1fr); border: 1px solid var(--line); background: #fff; }
+.personal-metrics { grid-template-columns: repeat(3, 1fr); }
+.personal-metrics .metric:nth-child(3n) { border-right: 0; }
+.personal-metrics .metric:nth-child(-n+3) { border-bottom: 1px solid var(--line); }
 .metric { min-width: 0; padding: 21px 23px; border-right: 1px solid var(--line); display: grid; gap: 8px; }
 .metric:last-child { border-right: 0; }
 .metric > span { color: var(--muted); font-size: 13px; }
-.metric strong { font-size: 25px; }
+.metric strong, .metric-value-action { font-size: 25px; }
+.metric-value-action { width: fit-content; padding: 0; border: 0; color: var(--blue); background: transparent; font-weight: 700; cursor: pointer; text-align: left; text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 4px; }
 .metric small { color: #718096; font-size: 12px; }
 .negative { color: #c84242 !important; }
 .warning { color: #ad6d00 !important; }
@@ -257,6 +261,8 @@ form button:disabled { cursor: wait; opacity: .72; }
 .events-panel { margin-top: 20px; overflow: auto; }
 .events-panel .panel-title { padding: 20px 22px 15px; }
 .events-panel .panel-title button { border: 0; color: var(--blue); background: transparent; cursor: pointer; }
+.personal-drilldown { padding: 0 0 22px; }
+.personal-drilldown table { min-width: 800px; }
 table { width: 100%; border-collapse: collapse; white-space: nowrap; }
 th, td { padding: 13px 22px; border-top: 1px solid #e9edf2; text-align: left; font-size: 12px; }
 th { color: #68778a; background: #fafbfc; font-weight: 600; }
