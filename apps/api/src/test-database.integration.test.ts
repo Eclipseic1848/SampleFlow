@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { readdir, readFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -76,9 +78,60 @@ test("干净隔离数据库可应用全部现有迁移", async () => {
         "017_controlled_performance_import.sql",
         "018_add_import_reconciliation.sql",
         "019_performance_order_cursor.sql",
+        "020_event_analysis_dimensions.sql",
       ]);
     } finally {
       await client.end();
+    }
+  });
+});
+
+test("事件分析维度迁移故障不留下 schema 记录、对象或数据半成品", async () => {
+  await withTestDatabase(async (database) => {
+    const client = new Client({ connectionString: database.url });
+    await client.connect();
+    const injectedMigrations = await mkdtemp(path.join(tmpdir(), "sampleflow-migrations-"));
+    try {
+      await client.query("create table schema_migrations(name text primary key,applied_at timestamptz not null default now())");
+      const previousMigrations = (await readdir(migrationsRoot)).filter((name) => name.endsWith(".sql") && name < "020_").sort();
+      for (const name of previousMigrations) {
+        await client.query(await readFile(`${migrationsRoot}${name}`, "utf8"));
+        await client.query("insert into schema_migrations(name) values($1)", [name]);
+      }
+      await client.query(
+        `insert into performance_orders
+          (qingflow_order_no,customer_name,customer_unit,business_region_source_text,business_region_code,
+           salesperson_name,source_received_on,original_amount,current_revenue,counted_amount,lifecycle_state,posted_at)
+         values('MIGRATION-FAILURE','迁移故障客户','原始单位','江苏原文','CN-JS','迁移业务员','2026-08-01',1,1,1,'active',now())`,
+      );
+      await writeFile(
+        path.join(injectedMigrations, "020_failure_injection.sql"),
+        `alter table performance_events add column failure_probe text;
+         create table migration_failure_partial(id integer primary key);
+         update performance_orders set customer_unit='半成品' where qingflow_order_no='MIGRATION-FAILURE';
+         do $$ begin raise exception '迁移故障注入'; end $$;`,
+        "utf8",
+      );
+
+      let failed = false;
+      try {
+        await execFileAsync(process.execPath, ["--import", "tsx", "src/cli/migrate.ts"], {
+          cwd: apiRoot,
+          env: { ...process.env, DATABASE_URL: database.url, NODE_ENV: "test", TEST_MIGRATIONS_DIR: injectedMigrations },
+          encoding: "utf8",
+        });
+      } catch (error) {
+        failed = true;
+        assert.match(String((error as { stderr?: string }).stderr), /迁移故障注入/);
+      }
+      assert.equal(failed, true);
+      assert.equal((await client.query("select 1 from schema_migrations where name='020_failure_injection.sql'")).rowCount, 0);
+      assert.equal((await client.query("select 1 from information_schema.columns where table_name='performance_events' and column_name='failure_probe'")).rowCount, 0);
+      assert.equal((await client.query<{ name: string | null }>("select to_regclass('migration_failure_partial')::text name")).rows[0]!.name, null);
+      assert.equal((await client.query<{ customer_unit: string }>("select customer_unit from performance_orders where qingflow_order_no='MIGRATION-FAILURE'")).rows[0]!.customer_unit, "原始单位");
+    } finally {
+      await client.end();
+      await rm(injectedMigrations, { recursive: true, force: true });
     }
   });
 });
@@ -185,7 +238,21 @@ test("已有不可变业绩事件的数据库可升级并保持事件不可变",
       );
       assert.ok(event.rows[0]!.occurred_at);
       assert.equal(event.rows[0]!.order_sequence, 1);
+      const dimensions = await verify.query("select 1 from performance_event_analysis_dimensions where event_id=$1", [eventId]);
+      assert.equal(dimensions.rowCount, 0, "旧事件不能从订单当前投影自动倒推分析维度");
       await assert.rejects(verify.query("update performance_events set reason='篡改' where id=$1", [eventId]), /已入账业绩事件不可更新或删除/);
+      await verify.query("begin");
+      await verify.query(
+        `insert into performance_events
+          (order_id,event_type,delta_amount,resulting_current_revenue,resulting_counted_amount,accounting_month,
+           occurred_on,reason,salesperson_name,department_name,group_name,created_by,salesperson_person_id)
+         select order_id,'revenue_change',1,101,101,'2026-08-01','2026-08-02','缺少分析维度',
+                salesperson_name,department_name,group_name,null,salesperson_person_id
+         from performance_events where id=$1`,
+        [eventId],
+      );
+      await assert.rejects(verify.query("commit"), /新业绩事件必须在同一事务写入分析维度快照/);
+      await verify.query("rollback");
     } finally {
       await verify.end();
     }

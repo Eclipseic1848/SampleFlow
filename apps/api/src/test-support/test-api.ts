@@ -15,7 +15,9 @@ export async function withTestApi<T>(
   }
 
   assertTestDatabaseUrl(databaseUrl);
-  const database = new Pool({ connectionString: databaseUrl });
+  const runtimeUrl = new URL(databaseUrl);
+  runtimeUrl.searchParams.set("application_name", "sampleflow-api-runtime");
+  const database = new Pool({ connectionString: runtimeUrl.toString() });
   const app = await buildApp({ database, logger: false, ...options });
   try {
     return await run(app);

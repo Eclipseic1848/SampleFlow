@@ -674,7 +674,8 @@ test("系统管理员通过页面办理组织异动并保留前后有效期", as
       await page.getByLabel("收到日期").fill("2026-07-15");
       await page.getByLabel("客户名称").fill("组织异动客户");
       await page.getByLabel("客户单位",{exact:true}).fill("组织异动测试单位");
-      await createOrderDialog.getByLabel("业务区域").selectOption("EXT-TRADE");
+      await page.getByLabel("来源区域原文").fill("外贸组织线索");
+      await createOrderDialog.getByLabel("标准业务区域").selectOption("EXT-TRADE");
       await createOrderDialog.getByLabel("业务员").selectOption({label:"E2E 异动业务员"});
       await page.getByLabel("服务类型").fill("组织快照验收");
       await page.getByLabel("营业额").fill("100");
@@ -759,7 +760,8 @@ test("订单搜索与不可变事件链在浏览器和数据库中保持一致",
       await page.getByLabel("订单编号").fill("CHAIN-E2E-110");
       await page.getByLabel("客户名称").fill("事件链客户");
       await page.getByLabel("客户单位",{exact:true}).fill("事件链测试单位");
-      await createOrderDialog.getByLabel("业务区域").selectOption("EXT-TRADE");
+      await page.getByLabel("来源区域原文").fill("外贸事件线索");
+      await createOrderDialog.getByLabel("标准业务区域").selectOption("EXT-TRADE");
       await createOrderDialog.getByLabel("业务员").selectOption({label:"E2E 账本业务员"});
       await page.getByLabel("服务类型").fill("浏览器验收");
       await page.getByLabel("营业额").fill("110");
@@ -774,6 +776,7 @@ test("订单搜索与不可变事件链在浏览器和数据库中保持一致",
       await expect(page.getByRole("heading",{name:"不可变事件链"})).toBeVisible();
       await expect(page.getByLabel("事件发生日期")).toHaveCount(0);
       await expect(page.locator(".event-summary b")).toHaveText(["+¥110.00"]);
+      await expect(page.getByText("外贸 (EXT-TRADE) · 来源 外贸事件线索 · 客户单位 事件链测试单位")).toBeVisible();
       await page.getByLabel("调整后营业额").fill("100");
       await page.getByLabel("原因（必填）").fill("浏览器改单为 100");
       await page.getByRole("button",{name:"确认追加事件"}).click();
@@ -834,9 +837,14 @@ test("订单搜索与不可变事件链在浏览器和数据库中保持一致",
       const correctionForm=page.getByRole("heading",{name:"申请关闭月更正"}).locator("..");
       await correctionForm.locator("select").first().selectOption({label:"CHAIN-E2E-110 · 事件链客户"});
       await correctionForm.getByLabel("原业务日期").fill("2026-07-15");
+      await correctionForm.getByLabel("发生时标准业务区域").selectOption("CN-JS");
+      await correctionForm.getByLabel("发生时来源区域原文").fill("江苏历史凭证");
+      await correctionForm.getByLabel("发生时客户单位").fill("事件链历史单位");
+      await correctionForm.getByLabel("分析维度证据").fill("原始订单与回款凭证");
       await correctionForm.getByLabel("申请原因").fill("浏览器更正申请");
       await correctionForm.getByRole("button",{name:"提交更正申请"}).click();
       await expect(page.getByText(/CHAIN-E2E-110 · 营业额修改/)).toBeVisible();
+      await expect(page.getByText(/江苏历史凭证 · 事件链历史单位 · 证据：原始订单与回款凭证/)).toBeVisible();
 
       await page.getByRole("button",{name:"退出登录"}).click();
       await page.getByLabel("账号").fill("e2e_accounting_hr");

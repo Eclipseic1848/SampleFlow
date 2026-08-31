@@ -4,7 +4,9 @@ import { fileURLToPath } from "node:url";
 import { db } from "../db.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const migrationsDir = path.resolve(here, "../../migrations");
+const migrationsDir = process.env.NODE_ENV === "test" && process.env.TEST_MIGRATIONS_DIR
+  ? path.resolve(process.env.TEST_MIGRATIONS_DIR)
+  : path.resolve(here, "../../migrations");
 
 const client = await db.connect();
 try {

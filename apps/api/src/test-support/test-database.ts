@@ -10,6 +10,7 @@ const LOCAL_ADMIN_URL = "postgres://sampleflow:sampleflow_dev@127.0.0.1:55432/po
 export type TestDatabase = Readonly<{
   adminUrl: string;
   name: string;
+  runtimeUrl: string;
   url: string;
 }>;
 
@@ -69,6 +70,8 @@ export async function withTestDatabase<T>(run: (database: TestDatabase) => Promi
   const identifier = databaseIdentifier(name);
   const databaseUrl = new URL(adminUrl);
   databaseUrl.pathname = `/${name}`;
+  const runtimeUrl = new URL(databaseUrl);
+  runtimeUrl.searchParams.set("application_name", "sampleflow-api-runtime");
 
   const admin = new Client({ connectionString: adminUrl });
   await admin.connect();
@@ -77,7 +80,7 @@ export async function withTestDatabase<T>(run: (database: TestDatabase) => Promi
   try {
     await admin.query(`create database ${identifier}`);
     created = true;
-    return await run({ adminUrl, name, url: databaseUrl.toString() });
+    return await run({ adminUrl, name, runtimeUrl: runtimeUrl.toString(), url: databaseUrl.toString() });
   } finally {
     try {
       if (created) {
@@ -110,6 +113,29 @@ export async function withMigratedTestDatabase<T>(run: (database: TestDatabase) 
     if (migration.error) throw migration.error;
     if (migration.status !== 0) {
       throw new Error(`测试数据库迁移失败\n${migration.stdout}\n${migration.stderr}`);
+    }
+
+    const fixture = new Client({ connectionString: database.url });
+    await fixture.connect();
+    try {
+      await fixture.query(`
+        create function insert_test_fixture_event_dimensions()
+        returns trigger language plpgsql as $$
+        begin
+          insert into performance_event_analysis_dimensions(event_id,business_region_code,business_region_source_text,customer_unit)
+          select new.id,coalesce(nullif(orders.business_region_code,''),'TEST-FIXTURE'),
+                 coalesce(nullif(orders.business_region_source_text,''),'测试夹具'),orders.customer_unit
+          from performance_orders orders where orders.id=new.order_id;
+          return new;
+        end;
+        $$;
+        create trigger performance_events_test_fixture_dimensions
+        after insert on performance_events
+        for each row when (current_setting('application_name')<>'sampleflow-api-runtime')
+        execute function insert_test_fixture_event_dimensions();
+      `);
+    } finally {
+      await fixture.end();
     }
 
     return run(database);

@@ -8,7 +8,9 @@ import { withMigratedTestDatabase } from "./test-support/test-database.js";
 const { Pool } = pg;
 
 async function fixture(databaseUrl: string) {
-  const pool = new Pool({ connectionString: databaseUrl });
+  const runtimeUrl = new URL(databaseUrl);
+  runtimeUrl.searchParams.set("application_name", "sampleflow-api-runtime");
+  const pool = new Pool({ connectionString: runtimeUrl.toString() });
   await pool.query("insert into roles(code,name) values('sales_assistant_leader','销售助理组长')");
   const user = await pool.query<{ id: string }>(
     "insert into users(username,display_name,password_hash,password_salt) values('importer','导入人','x','x') returning id::text",
@@ -258,6 +260,12 @@ test("确认路径批量复用组织、订单、事件序列和记账期间读�
 
       assert.equal(confirmed.events, 40);
       assert.ok(queries.count() <= 10, `确认读取查询不应随行数或订单数增长，实际 ${queries.count()} 次`);
+      const snapshots = await context.pool.query<{ count: string }>(
+        `select count(*)::text from performance_event_analysis_dimensions dimensions
+         join performance_events event on event.id=dimensions.event_id where event.import_batch_id=$1`,
+        [preflight.batchId],
+      );
+      assert.equal(snapshots.rows[0]!.count,"40");
     } finally {
       await context.pool.end();
     }
@@ -297,16 +305,26 @@ test("历史导入按行保存事件归属并以发生日期和来源行号更�
       });
       assert.equal(preflight.status, "preflight_ready", JSON.stringify(preflight.issues));
       await confirmImportBatch(context.pool, preflight.batchId, context.actorUserId, []);
-      const result = await context.pool.query<{ customer_unit:string; business_region_source_text:string; business_region_code:string; salesperson_name:string; service_type:string; event_owners:string[] }>(
+      const result = await context.pool.query<{ customer_unit:string; business_region_source_text:string; business_region_code:string; salesperson_name:string; service_type:string; event_owners:string[]; event_dimensions:Array<{customerUnit:string;businessRegionSourceText:string;businessRegionCode:string}> }>(
         `select performance_order.customer_unit,performance_order.business_region_source_text,performance_order.business_region_code,
                 performance_order.salesperson_name,performance_order.service_type,
-                array_agg(event.salesperson_name order by event.occurred_on,event.source_row_number) event_owners
+                array_agg(event.salesperson_name order by event.occurred_on,event.source_row_number) event_owners,
+                jsonb_agg(jsonb_build_object(
+                  'customerUnit',dimensions.customer_unit,
+                  'businessRegionSourceText',dimensions.business_region_source_text,
+                  'businessRegionCode',dimensions.business_region_code
+                ) order by event.occurred_on,event.source_row_number) event_dimensions
          from performance_orders performance_order join performance_events event on event.order_id=performance_order.id
+         join performance_event_analysis_dimensions dimensions on dimensions.event_id=event.id
          where performance_order.qingflow_order_no='001-A' group by performance_order.id`,
       );
       assert.deepEqual(result.rows[0], {
         customer_unit:"单位乙",business_region_source_text:"上海市",business_region_code:"CN-SH",
         salesperson_name:"业务员乙",service_type:"咨询",event_owners:["业务员甲","业务员乙"],
+        event_dimensions:[
+          {customerUnit:"单位甲",businessRegionSourceText:"江苏省",businessRegionCode:"CN-JS"},
+          {customerUnit:"单位乙",businessRegionSourceText:"上海市",businessRegionCode:"CN-SH"},
+        ],
       });
     } finally {
       await context.pool.end();
@@ -408,14 +426,22 @@ test("关闭期间导入必须锁定并消费匹配的一次性更正授权", as
       await context.pool.query("update accounting_periods set status='closed' where period_month='2026-03-01'");
       const correction = await context.pool.query<{ id: string }>(
         `insert into accounting_correction_requests(period_month,order_id,event_type,occurred_on,reason,
+           business_region_code,business_region_source_text,customer_unit,analysis_dimension_evidence,
            requested_by_user_id,requested_by_person_id,requested_at,status,reviewed_by_user_id,reviewed_by_person_id,reviewed_at,expires_at)
-         select '2026-03-01',$1,'revenue_change','2026-03-06','获批导入更正',$2,requester_person.id,
+         select '2026-03-01',$1,'revenue_change','2026-03-06','获批导入更正','CN-JS','江苏省','单位甲','原始导入文件',$2,requester_person.id,
                 now(),'approved',approver.id,approver_person.id,now(),now()+interval '24 hours'
          from users requester join people requester_person on requester_person.user_id=requester.id,
               users approver join people approver_person on approver_person.user_id=approver.id
          where requester.id=$2 and approver.username='approver' returning id::text`,
         [order.rows[0]!.id, context.actorUserId],
       );
+      const mismatch = await preflightImportRows(context.pool, {
+        actorUserId: context.actorUserId, configId: context.configId,
+        sourceFileName: "closed-mismatch.xlsx", sourceBytes: Buffer.from("closed-mismatch"),
+        rows: [row({ rowNumber: 2, sourceRecordId: "SRC-MISMATCH", occurredOn: "2026-03-06", eventType: "revenue_change", amount: 90, customerUnit:"不匹配单位", correctionRequestId: Number(correction.rows[0]!.id) })],
+      });
+      assert.equal(mismatch.status,"blocked");
+      assert.ok(mismatch.issues.some((issue)=>issue.code==="CORRECTION_ANALYSIS_DIMENSIONS_MISMATCH"));
       const adjustment = await preflightImportRows(context.pool, {
         actorUserId: context.actorUserId, configId: context.configId,
         sourceFileName: "closed-adjustment.xlsx", sourceBytes: Buffer.from("closed-adjustment"),
@@ -444,6 +470,7 @@ test("重新上传原始历史文件时关联既有事件并补齐区域但不�
          values('001-A','客户甲','单位甲','业务员甲','检测','2026-03-05',100,100,100,'active',$1,now()) returning id::text`,
         [context.salespersonPersonId],
       );
+      await context.pool.query("begin");
       const event = await context.pool.query<{ id: string }>(
         `insert into performance_events(order_id,event_type,delta_amount,resulting_current_revenue,resulting_counted_amount,
            accounting_month,occurred_on,reason,salesperson_name,department_name,group_name,source_row_number,
@@ -453,10 +480,16 @@ test("重新上传原始历史文件时关联既有事件并补齐区域但不�
         [order.rows[0]!.id, context.salespersonPersonId],
       );
       await context.pool.query(
+        `insert into performance_event_analysis_dimensions(event_id,business_region_code,business_region_source_text,customer_unit)
+         values($1,'CN-JS','江苏省','单位甲')`,
+        [event.rows[0]!.id],
+      );
+      await context.pool.query(
         `insert into legacy_event_source_evidence(event_id,source_file_sha256,source_sheet,source_row_number,source_key)
          values($1,$2,'分子',2,$3)`,
         [event.rows[0]!.id, sourceHash, `legacy:${sourceHash}:分子:2`],
       );
+      await context.pool.query("commit");
       const preflight = await preflightImportRows(context.pool, {
         actorUserId: context.actorUserId, configId,
         sourceFileName: "原始数据1.xlsx", sourceBytes,
@@ -604,14 +637,20 @@ test("升级前旧事件在换文件重放时仍被识别为跨文件疑似重�
          values('001-A','客户甲','单位甲','江苏省','CN-JS',$1,'业务员甲','检测','2026-03-05',100,100,100,'active',now()) returning id::text`,
         [context.salespersonPersonId],
       );
-      await context.pool.query(
+      await context.pool.query("begin");
+      const event = await context.pool.query<{ id:string }>(
         `insert into performance_events(order_id,event_type,delta_amount,resulting_current_revenue,resulting_counted_amount,
            accounting_month,occurred_on,reason,salesperson_person_id,salesperson_name,department_name,group_name,
            source_file_sha256,source_sheet,source_row_number,source_key)
          values($1,'legacy_adjustment',100,100,100,'2026-03-01','2026-03-05','首次转录',$2,'业务员甲','销售一部','一组',
-           'old-file-hash','分子',2,'legacy:old-file-hash:分子:2')`,
+           'old-file-hash','分子',2,'legacy:old-file-hash:分子:2') returning id::text`,
         [order.rows[0]!.id, context.salespersonPersonId],
       );
+      await context.pool.query(
+        `insert into performance_event_analysis_dimensions(event_id,business_region_code,business_region_source_text,customer_unit)
+         values($1,'CN-JS','江苏省','单位甲')`,[event.rows[0]!.id],
+      );
+      await context.pool.query("commit");
 
       const repeated = await preflightImportRows(context.pool, {
         actorUserId: context.actorUserId,
