@@ -133,11 +133,13 @@ test("纯组长同时查看本人和小组并穿透组员订单事件", async ({
     const departmentB = await client.query<{ id: string }>("insert into org_units(name,unit_type) values('E2E 乙部','department') returning id::text");
     const groupA = await client.query<{ id: string }>("insert into org_units(name,unit_type,parent_id) values('E2E 甲组','group',$1) returning id::text", [departmentA.rows[0]!.id]);
     const groupB = await client.query<{ id: string }>("insert into org_units(name,unit_type,parent_id) values('E2E 乙组','group',$1) returning id::text", [departmentB.rows[0]!.id]);
+    const groupC = await client.query<{ id: string }>("insert into org_units(name,unit_type,parent_id) values('E2E 兼管组','group',$1) returning id::text", [departmentA.rows[0]!.id]);
     await client.query(
       `insert into org_responsibilities(person_id,org_unit_id,responsibility_type,effective_from)
-       values($1,$2,'leader','2026-01-01'),($3,$4,'leader','2026-01-01'),
-             ($1,$5,'supervisor','2026-01-01'),($3,$6,'supervisor','2026-01-01')`,
-      [person[users.leader], groupA.rows[0]!.id, person[users.outsider], groupB.rows[0]!.id, departmentA.rows[0]!.id, departmentB.rows[0]!.id],
+        values($1,$2,'leader','2026-01-01'),($3,$4,'leader','2026-01-01'),
+              ($1,$5,'supervisor','2026-01-01'),($3,$6,'supervisor','2026-01-01'),
+              ($1,$7,'leader','2026-01-01')`,
+      [person[users.leader], groupA.rows[0]!.id, person[users.outsider], groupB.rows[0]!.id, departmentA.rows[0]!.id, departmentB.rows[0]!.id, groupC.rows[0]!.id],
     );
     await client.query(
       `insert into org_memberships(person_id,department_id,group_id,effective_from)
@@ -158,12 +160,17 @@ test("纯组长同时查看本人和小组并穿透组员订单事件", async ({
          values($1,'group',$2,$3,$4) returning id::text`,
         [`${month}-01`, users.leader, person[users.leader], groupA.rows[0]!.id],
       );
+      const secondaryGroupGoal = await client.query<{ id: string }>(
+        `insert into goals(period_month,goal_level,owner_user_id,owner_person_id,org_unit_id)
+         values($1,'group',$2,$3,$4) returning id::text`,
+        [`${month}-01`, users.leader, person[users.leader], groupC.rows[0]!.id],
+      );
       const personalGoal = await client.query<{ id: string }>(
         `insert into goals(period_month,goal_level,owner_user_id,owner_person_id)
          values($1,'personal',$2,$3) returning id::text`,
         [`${month}-01`, users.leader, person[users.leader]],
       );
-      for (const [goalId, amount] of [[groupGoal.rows[0]!.id, groupTarget], [personalGoal.rows[0]!.id, personalTarget]] as const) {
+      for (const [goalId, amount] of [[groupGoal.rows[0]!.id, groupTarget], [secondaryGroupGoal.rows[0]!.id, 300 + offset * 10], [personalGoal.rows[0]!.id, personalTarget]] as const) {
         await client.query(
           `insert into goal_versions(goal_id,version_no,amount,status,created_by,created_by_person_id,change_reason)
            values($1,1,$2,'active',$3,$4,'E2E 小组首页')`,
@@ -249,4 +256,26 @@ test("纯组长同时查看本人和小组并穿透组员订单事件", async ({
   await team.getByRole("button", { name: "查看E2E 甲组差距构成" }).click();
   const gap = page.getByRole("dialog", { name: "E2E 甲组 · 小组差距构成" });
   await expect(gap.getByText(`目标 ${money(expected!.groupTarget)} − 事件净额 ${money(expected!.groupActual)} = 差距 ${money(expected!.groupTarget - expected!.groupActual)}`, { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "关闭" }).click();
+
+  let releaseFirstRequest=()=>{};
+  let firstRequestStarted=()=>{};
+  let firstRequestUrl="";
+  let blockFirst=true;
+  const firstStarted=new Promise<void>((resolve)=>{firstRequestStarted=resolve;});
+  const firstRelease=new Promise<void>((resolve)=>{releaseFirstRequest=resolve;});
+  await page.route("**/api/performance/group-achievement/events?*",async(route)=>{
+    if(blockFirst){blockFirst=false;firstRequestUrl=route.request().url();firstRequestStarted();await firstRelease;}
+    await route.continue();
+  });
+  await teamActual.click();
+  await page.locator('article[aria-label="E2E 兼管组目标达成"] button[aria-label="查看E2E 兼管组业绩构成"]').evaluate((button:HTMLButtonElement)=>button.click());
+  await firstStarted;
+  const staleResponse=page.waitForResponse(firstRequestUrl);
+  const secondaryDetails=page.getByRole("dialog", { name: "E2E 兼管组 · 小组业绩构成" });
+  await expect(secondaryDetails.getByText("0 位事件责任人 · 0 条事件 · 净额 ¥0.00", { exact: true })).toBeVisible();
+  releaseFirstRequest();
+  await staleResponse;
+  await expect(secondaryDetails).toBeVisible();
+  await expect(secondaryDetails.getByRole("heading", { name: "E2E 组员甲", exact: true })).toHaveCount(0);
 });

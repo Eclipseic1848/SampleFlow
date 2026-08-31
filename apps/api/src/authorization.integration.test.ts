@@ -424,8 +424,11 @@ test("个人目标首页使用上海当前月并让汇总与正负事件按分�
 test("组长个人与小组业绩分离且成员订单事件逐级按分对平", async () => {
   await withMigratedTestDatabase(async (database) => {
     const scenario = await seedAuthorizationScenario(database.url);
+    const successorUser = await seedTestUser(database.url, { username: "scope_successor", displayName: "甲组新组长", password: "Role@123", roleCode: "sales_leader", roleName: "业务员组长" });
     const client = new Client({ connectionString: database.url });
     await client.connect();
+    const successor = await client.query<{ person_id: string }>("select id::text as person_id from people where user_id=$1", [successorUser]);
+    const successorPersonId = successor.rows[0]!.person_id;
     const units = await client.query<{ department_id: string; group_a_id: string; group_b_id: string }>(
       `select (select id::text from org_units where name='甲部' and unit_type='department') as department_id,
               (select id::text from org_units where name='甲组' and unit_type='group') as group_a_id,
@@ -457,12 +460,12 @@ test("组长个人与小组业绩分离且成员订单事件逐级按分对平",
            accounting_month,occurred_on,reason,salesperson_person_id,salesperson_name,
            department_unit_id,department_name,group_unit_id,group_name,
            leader_person_id,leader_name,supervisor_person_id,supervisor_name)
-         select source.order_id,'revenue_change',-25,75,75,'2026-08-01','2026-08-15','小组负向调整',
-                source.salesperson_person_id,source.salesperson_name,source.department_unit_id,source.department_name,
-                source.group_unit_id,source.group_name,source.leader_person_id,source.leader_name,
-                source.supervisor_person_id,source.supervisor_name
-         from performance_events source where source.order_id=$1 and source.order_sequence=1`,
-        [scenario.orderIds[0]],
+          select source.order_id,'revenue_change',-25,75,75,'2026-08-01','2026-08-15','跨业务员负向调整',
+                 $2,'业务员乙',source.department_unit_id,source.department_name,
+                 source.group_unit_id,source.group_name,source.leader_person_id,source.leader_name,
+                 source.supervisor_person_id,source.supervisor_name
+          from performance_events source where source.order_id=$1 and source.order_sequence=1`,
+        [scenario.orderIds[0], scenario.people[scenario.users.bob]],
       );
       const groupGoal = await client.query<{ id: string }>(
         `insert into goals(period_month,goal_level,owner_user_id,owner_person_id,org_unit_id)
@@ -549,6 +552,30 @@ test("组长个人与小组业绩分离且成员订单事件逐级按分对平",
         headers: { cookie: aliceCookie },
       });
       assert.equal(deniedRole.statusCode, 403, deniedRole.body);
+
+      const successorCookie = await loginCookie(app, "scope_successor");
+      const transferClient = new Client({ connectionString: database.url });
+      await transferClient.connect();
+      try {
+        await transferClient.query(
+          "update org_responsibilities set person_id=$1 where org_unit_id=$2 and responsibility_type='leader'",
+          [successorPersonId, groupAId],
+        );
+        await transferClient.query("update sessions set expires_at=now()+interval '1 day',last_seen_at=now()");
+      } finally {
+        await transferClient.end();
+      }
+      const transferredDashboard = await app.inject({ method: "GET", url: "/api/performance/dashboard?month=2026-08", headers: { cookie: successorCookie } });
+      assert.equal(transferredDashboard.statusCode, 200, transferredDashboard.body);
+      assert.equal(transferredDashboard.json().groupAchievements[0].targetAmount, "1000.00");
+      assert.equal(transferredDashboard.json().groupAchievements[0].actualAmount, "215.00");
+      const transferredDetails = await app.inject({
+        method: "GET",
+        url: `/api/performance/group-achievement/events?month=2026-08&groupId=${groupAId}`,
+        headers: { cookie: successorCookie },
+      });
+      assert.equal(transferredDetails.statusCode, 200, transferredDetails.body);
+      assert.equal(transferredDetails.json().targetAmount, "1000.00");
     }, { clock: () => new Date("2026-08-14T16:30:00.000Z") });
   });
 });
