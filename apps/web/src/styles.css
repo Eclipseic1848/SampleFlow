@@ -263,6 +263,16 @@ form button:disabled { cursor: wait; opacity: .72; }
 .events-panel .panel-title button { border: 0; color: var(--blue); background: transparent; cursor: pointer; }
 .personal-drilldown { padding: 0 0 22px; }
 .personal-drilldown table { min-width: 800px; }
+.team-achievement { overflow: hidden; }
+.team-achievement > .panel-title { padding: 20px 22px 15px; }
+.team-achievement > .metric-band { margin-top: 0; border-right: 0; border-bottom: 0; border-left: 0; }
+.group-drilldown { padding: 20px 24px 24px; }
+.group-member { margin-top: 16px; overflow: hidden; }
+.group-member:first-child { margin-top: 0; }
+.group-member > .panel-title { padding: 16px 18px; }
+.group-order h4 { margin: 0; padding: 13px 18px; border-top: 1px solid var(--line); font-size: 13px; }
+.group-order h4 small { display: block; margin-top: 4px; color: var(--muted); font-weight: 400; }
+.group-order table { min-width: 800px; }
 table { width: 100%; border-collapse: collapse; white-space: nowrap; }
 th, td { padding: 13px 22px; border-top: 1px solid #e9edf2; text-align: left; font-size: 12px; }
 th { color: #68778a; background: #fafbfc; font-weight: 600; }

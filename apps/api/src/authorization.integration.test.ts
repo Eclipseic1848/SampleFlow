@@ -9,6 +9,12 @@ import { resolvePerformanceAccess } from "./modules/authorization.js";
 const { Client } = pg;
 const TEST_ORIGIN = "http://127.0.0.1:4174";
 
+function moneyCents(value: string): bigint {
+  const sign = value.startsWith("-") ? -1n : 1n;
+  const [whole, fraction = ""] = value.replace("-", "").split(".");
+  return sign * (BigInt(whole!) * 100n + BigInt(fraction.padEnd(2, "0").slice(0, 2)));
+}
+
 async function loginCookie(app: Parameters<Parameters<typeof withTestApi>[1]>[0], username: string): Promise<string> {
   const response = await app.inject({
     method: "POST",
@@ -377,12 +383,7 @@ test("个人目标首页使用上海当前月并让汇总与正负事件按分�
       assert.deepEqual(drilldownSummary, current.json().personalAchievement);
       const events = drilldownEvents as Array<{ deltaAmount: string; accountingMonth: string }>;
       assert.deepEqual(events.map((event) => event.deltaAmount).sort(), ["-25.00", "100.00"]);
-      const cents = (value: string) => {
-        const sign = value.startsWith("-") ? -1n : 1n;
-        const [whole, fraction = ""] = value.replace("-", "").split(".");
-        return sign * (BigInt(whole!) * 100n + BigInt(fraction.padEnd(2, "0").slice(0, 2)));
-      };
-      assert.equal(events.reduce((sum, event) => sum + cents(event.deltaAmount), 0n), cents(drilldown.json().actualAmount));
+      assert.equal(events.reduce((sum, event) => sum + moneyCents(event.deltaAmount), 0n), moneyCents(drilldown.json().actualAmount));
 
       const history = await app.inject({ method: "GET", url: "/api/performance/dashboard?month=2026-07", headers: { cookie } });
       assert.equal(history.statusCode, 200, history.body);
@@ -416,6 +417,138 @@ test("个人目标首页使用上海当前月并让汇总与正负事件按分�
       const invalid = await app.inject({ method: "GET", url: "/api/performance/dashboard?month=2026-13", headers: { cookie } });
       assert.equal(invalid.statusCode, 400, invalid.body);
       assert.equal(invalid.json().code, "MONTH_INVALID");
+    }, { clock: () => new Date("2026-08-14T16:30:00.000Z") });
+  });
+});
+
+test("组长个人与小组业绩分离且成员订单事件逐级按分对平", async () => {
+  await withMigratedTestDatabase(async (database) => {
+    const scenario = await seedAuthorizationScenario(database.url);
+    const client = new Client({ connectionString: database.url });
+    await client.connect();
+    const units = await client.query<{ department_id: string; group_a_id: string; group_b_id: string }>(
+      `select (select id::text from org_units where name='甲部' and unit_type='department') as department_id,
+              (select id::text from org_units where name='甲组' and unit_type='group') as group_a_id,
+              (select id::text from org_units where name='乙组' and unit_type='group') as group_b_id`,
+    );
+    const { department_id: departmentId, group_a_id: groupAId, group_b_id: groupBId } = units.rows[0]!;
+    try {
+      const leaderOrder = await client.query<{ id: string }>(
+        `insert into performance_orders
+          (qingflow_order_no,customer_name,customer_unit,salesperson_person_id,salesperson_name,
+           source_received_on,original_amount,current_revenue,counted_amount,lifecycle_state,posted_at)
+         values('TEAM-LEADER-1','组长本人客户','测试单位',$1,'甲组组长','2026-08-10',40,40,40,'active',now())
+         returning id::text`,
+        [scenario.people[scenario.users.leader]],
+      );
+      await client.query(
+        `insert into performance_events
+          (order_id,event_type,delta_amount,resulting_current_revenue,resulting_counted_amount,
+           accounting_month,occurred_on,reason,salesperson_person_id,salesperson_name,
+           department_unit_id,department_name,group_unit_id,group_name,
+           leader_person_id,leader_name,supervisor_person_id,supervisor_name)
+         values($1,'initial',40,40,40,'2026-08-01','2026-08-10','组长本人业绩',$2,'甲组组长',
+                $3,'甲部',$4,'甲组',$2,'甲组组长',$5,'甲部主管')`,
+        [leaderOrder.rows[0]!.id, scenario.people[scenario.users.leader], departmentId, groupAId, scenario.people[scenario.users.supervisor]],
+      );
+      await client.query(
+        `insert into performance_events
+          (order_id,event_type,delta_amount,resulting_current_revenue,resulting_counted_amount,
+           accounting_month,occurred_on,reason,salesperson_person_id,salesperson_name,
+           department_unit_id,department_name,group_unit_id,group_name,
+           leader_person_id,leader_name,supervisor_person_id,supervisor_name)
+         select source.order_id,'revenue_change',-25,75,75,'2026-08-01','2026-08-15','小组负向调整',
+                source.salesperson_person_id,source.salesperson_name,source.department_unit_id,source.department_name,
+                source.group_unit_id,source.group_name,source.leader_person_id,source.leader_name,
+                source.supervisor_person_id,source.supervisor_name
+         from performance_events source where source.order_id=$1 and source.order_sequence=1`,
+        [scenario.orderIds[0]],
+      );
+      const groupGoal = await client.query<{ id: string }>(
+        `insert into goals(period_month,goal_level,owner_user_id,owner_person_id,org_unit_id)
+         values('2026-08-01','group',$1,$2,$3) returning id::text`,
+        [scenario.users.leader, scenario.people[scenario.users.leader], groupAId],
+      );
+      const personalGoal = await client.query<{ id: string }>(
+        `insert into goals(period_month,goal_level,owner_user_id,owner_person_id)
+         values('2026-08-01','personal',$1,$2) returning id::text`,
+        [scenario.users.leader, scenario.people[scenario.users.leader]],
+      );
+      for (const [goalId, amount] of [[groupGoal.rows[0]!.id, 1000], [personalGoal.rows[0]!.id, 500]] as const) {
+        await client.query(
+          `insert into goal_versions(goal_id,version_no,amount,status,created_by,created_by_person_id,change_reason)
+           values($1,1,$2,'active',$3,$4,'小组首页测试')`,
+          [goalId, amount, scenario.users.manager, scenario.people[scenario.users.manager]],
+        );
+      }
+    } finally {
+      await client.end();
+    }
+
+    await withTestApi(database.url, async (app) => {
+      const leaderCookie = await loginCookie(app, "scope_leader");
+      const aliceCookie = await loginCookie(app, "scope_alice");
+      const sessionClient = new Client({ connectionString: database.url });
+      await sessionClient.connect();
+      try {
+        await sessionClient.query("update sessions set expires_at=now()+interval '1 day',last_seen_at=now()");
+      } finally {
+        await sessionClient.end();
+      }
+      const dashboard = await app.inject({ method: "GET", url: "/api/performance/dashboard?month=2026-08", headers: { cookie: leaderCookie } });
+      assert.equal(dashboard.statusCode, 200, dashboard.body);
+      assert.equal(dashboard.json().personalAchievement.actualAmount, "40.00");
+      assert.equal(dashboard.json().personalAchievement.targetAmount, "500.00");
+      assert.equal(dashboard.json().personalAchievement.eventCount, 1);
+      assert.deepEqual(dashboard.json().groupAchievements, [{
+        groupId: groupAId,
+        groupName: "甲组",
+        memberCount: 3,
+        goalId: dashboard.json().groupAchievements[0].goalId,
+        periodMonth: "2026-08",
+        targetAmount: "1000.00",
+        actualAmount: "215.00",
+        gapAmount: "785.00",
+        achievementRate: "21.50",
+        timeProgressRate: "48.39",
+        progressVariance: "-26.89",
+        calculationReason: null,
+        eventCount: 4,
+      }]);
+
+      const details = await app.inject({
+        method: "GET",
+        url: `/api/performance/group-achievement/events?month=2026-08&groupId=${groupAId}`,
+        headers: { cookie: leaderCookie },
+      });
+      assert.equal(details.statusCode, 200, details.body);
+      const { members, ...detailSummary } = details.json();
+      assert.deepEqual(detailSummary, dashboard.json().groupAchievements[0]);
+      const memberRows = members as Array<{ actualAmount: string; orders: Array<{ actualAmount: string; events: Array<{ deltaAmount: string }> }> }>;
+      const memberCents = memberRows.reduce((sum, member) => sum + moneyCents(member.actualAmount), 0n);
+      const orderCents = memberRows.flatMap((member) => member.orders).reduce((sum, order) => sum + moneyCents(order.actualAmount), 0n);
+      const eventRows = memberRows.flatMap((member) => member.orders.flatMap((order) => order.events));
+      const eventCents = eventRows.reduce((sum, event) => sum + moneyCents(event.deltaAmount), 0n);
+      assert.equal(memberCents, moneyCents(detailSummary.actualAmount));
+      assert.equal(orderCents, memberCents);
+      assert.equal(eventCents, memberCents);
+      assert.deepEqual(memberRows.map((member) => member.actualAmount).sort(), ["100.00", "40.00", "75.00"]);
+      assert.deepEqual(eventRows.map((event) => event.deltaAmount).sort(), ["-25.00", "100.00", "100.00", "40.00"]);
+      assert.doesNotMatch(details.body, /业务员丙|SCOPE-3/);
+
+      const deniedGroup = await app.inject({
+        method: "GET",
+        url: `/api/performance/group-achievement/events?month=2026-08&groupId=${groupBId}`,
+        headers: { cookie: leaderCookie },
+      });
+      assert.equal(deniedGroup.statusCode, 403, deniedGroup.body);
+      assert.equal(deniedGroup.json().code, "GROUP_SCOPE_FORBIDDEN");
+      const deniedRole = await app.inject({
+        method: "GET",
+        url: `/api/performance/group-achievement/events?month=2026-08&groupId=${groupAId}`,
+        headers: { cookie: aliceCookie },
+      });
+      assert.equal(deniedRole.statusCode, 403, deniedRole.body);
     }, { clock: () => new Date("2026-08-14T16:30:00.000Z") });
   });
 });

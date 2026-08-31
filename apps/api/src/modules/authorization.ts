@@ -73,18 +73,18 @@ export type PerformanceAccess = Readonly<{
 
 export async function resolvePerformanceAccess(database: Database, user: CurrentUser): Promise<PerformanceAccess> {
   const scopes = new Set(policiesFor(user.roles).map((policy) => policy.performanceScope));
-  if (scopes.has("all")) return { all: true, departmentIds: [], groupIds: [], personIds: [] };
-
   const personIds = [...scopes].some((scope) => ["self", "group", "department"].includes(scope)) ? [user.personId] : [];
-  const responsibility = await database.query<{ org_unit_id: string; responsibility_type: "leader" | "supervisor" }>(
-    `select distinct org_unit_id::text,responsibility_type
-     from org_responsibilities
-     where person_id=$1 and effective_from<=${BUSINESS_DATE_SQL}
-       and (effective_to is null or effective_to>=${BUSINESS_DATE_SQL})`,
-    [user.personId],
-  );
+  const responsibility = scopes.has("group") || scopes.has("department")
+    ? await database.query<{ org_unit_id: string; responsibility_type: "leader" | "supervisor" }>(
+      `select distinct org_unit_id::text,responsibility_type
+       from org_responsibilities
+       where person_id=$1 and effective_from<=${BUSINESS_DATE_SQL}
+         and (effective_to is null or effective_to>=${BUSINESS_DATE_SQL})`,
+      [user.personId],
+    )
+    : { rows: [] };
   return {
-    all: false,
+    all: scopes.has("all"),
     departmentIds: scopes.has("department")
       ? responsibility.rows.filter((row) => row.responsibility_type === "supervisor").map((row) => row.org_unit_id)
       : [],
