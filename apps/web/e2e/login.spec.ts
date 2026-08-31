@@ -196,6 +196,10 @@ test("目标未生效时页面不提供正式报表，生效后才可查看", as
        select id,1,2000,'pending_hr',$1,owner_person_id,'浏览器门禁测试' from pending_goal`,
       [userId],
     );
+    const activeGoal = await client.query<{ id: string }>(
+      "select id::text from goals where owner_user_id=$1 and period_month='2026-08-01'",
+      [userId],
+    );
     await client.end();
 
       await page.goto("/");
@@ -214,7 +218,14 @@ test("目标未生效时页面不提供正式报表，生效后才可查看", as
       await reportResponse;
       await expect(page.getByRole("heading", { name: "正式业绩报表" })).toBeVisible();
       await expect(page.getByText("目标已生效，达成率按该层级目标独立计算")).toBeVisible();
-      await expect(page.getByRole("dialog").getByText("¥1,000.00", { exact: true })).toBeVisible();
+      const reportDialog = page.getByRole("dialog");
+      await expect(reportDialog.getByText("生效目标", { exact: true }).locator("..")).toContainText("¥1,000.00");
+      await expect(reportDialog.getByText("实际业绩", { exact: true }).locator("..")).toContainText("¥0.00");
+      await expect(reportDialog.getByText("目标差距", { exact: true }).locator("..")).toContainText("¥1,000.00");
+      const downloadPromise = page.waitForEvent("download");
+      await reportDialog.getByRole("button", { name: "导出正式报表" }).click();
+      const download = await downloadPromise;
+      expect(download.suggestedFilename()).toBe(`sampleflow-formal-report-2026-08-${activeGoal.rows[0]!.id}.csv`);
 });
 
 test("销售经理可从选择器创建顶层目标并完成总经理到人事审批", async ({ database, page }) => {

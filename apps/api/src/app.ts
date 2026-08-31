@@ -52,7 +52,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
   await registerImports(app, database);
   await registerGoals(app, database);
   await registerAdmin(app, database);
-  await registerExports(app, database);
+  await registerExports(app, database, options.clock);
 
   app.get("/api/health", async () => ({
     status: "ok",

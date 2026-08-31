@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import pg from "pg";
 import { seedTestUser } from "./test-support/fixtures.js";
@@ -843,6 +844,7 @@ test("多个销售经理根目标不会被任意选为全公司正式目标", as
     });
     const client = new Client({ connectionString: database.url });
     await client.connect();
+    const rootGoalIds: string[] = [];
     try {
       const secondManager = await client.query<{person_id:string}>("select id::text as person_id from people where user_id=$1", [secondManagerId]);
       for (const [ownerUserId, ownerPersonId, amount] of [
@@ -853,6 +855,7 @@ test("多个销售经理根目标不会被任意选为全公司正式目标", as
           "insert into goals(period_month,goal_level,owner_user_id,owner_person_id) values('2026-08-01','sales_manager',$1,$2) returning id::text",
           [ownerUserId, ownerPersonId],
         );
+        rootGoalIds.push(goal.rows[0]!.id);
         await client.query(
           `insert into goal_versions(goal_id,version_no,amount,status,created_by,created_by_person_id,change_reason)
            values($1,1,$2,'active',$3,$4,'多根目标歧义回归')`,
@@ -871,6 +874,14 @@ test("多个销售经理根目标不会被任意选为全公司正式目标", as
         assert.equal(dashboard.json().salesAchievement.targetAmount, null, username);
         assert.equal(dashboard.json().salesAchievement.achievementRate, null, username);
         assert.equal(dashboard.json().salesAchievement.calculationReason, "TARGET_SCOPE_AMBIGUOUS", username);
+        for (const url of [
+          `/api/performance/formal-reports/${rootGoalIds[0]}`,
+          `/api/exports/formal-reports/${rootGoalIds[0]}.csv`,
+        ]) {
+          const report = await app.inject({ method:"GET",url,headers:{cookie} });
+          assert.equal(report.statusCode, 409, `${username}: ${url}: ${report.body}`);
+          assert.equal(report.json().code, "TARGET_SCOPE_AMBIGUOUS");
+        }
       }
     });
   });
@@ -1217,11 +1228,16 @@ test("组织创建与任职写入保持未配置单元停用并记录审计",asy
   });
 });
 
-test("正式报表与导出仅使用已生效目标，且不阻断原始业绩账本", async () => {
+test("四层正式报表页面与 CSV 同口径、同权限并留下无正文审计", async () => {
   await withMigratedTestDatabase(async (database) => {
     const scenario = await seedAuthorizationScenario(database.url);
     const client = new Client({ connectionString: database.url });
     await client.connect();
+    const units = await client.query<{ id: string; name: string }>(
+      "select id::text,name from org_units where name=any($1::text[])",
+      [["甲部", "甲组"]],
+    );
+    const unitIds = Object.fromEntries(units.rows.map((unit) => [unit.name, unit.id]));
     const pendingGroupGoal = await client.query<{ id: string }>(
       `insert into goals(period_month,goal_level,owner_user_id,owner_person_id) values('2026-08-01','group',$1,$2) returning id::text`,
       [scenario.users.leader, scenario.people[scenario.users.leader]],
@@ -1231,13 +1247,42 @@ test("正式报表与导出仅使用已生效目标，且不阻断原始业绩�
        values($1,1,2000,'pending_hr',$2,$3,'尚未生效的组目标')`,
       [pendingGroupGoal.rows[0]!.id, scenario.users.manager, scenario.people[scenario.users.manager]],
     );
+    const activeGoals = await client.query<{ id: string; goal_level: "sales_manager" | "department" | "group" }>(
+      `insert into goals(period_month,goal_level,owner_user_id,owner_person_id,org_unit_id)
+       values('2026-08-01','group',$1,$2,$3),
+             ('2026-08-01','department',$4,$5,$6),
+             ('2026-08-01','sales_manager',$7,$8,null)
+       returning id::text,goal_level`,
+      [
+        scenario.users.leader, scenario.people[scenario.users.leader], unitIds["甲组"],
+        scenario.users.supervisor, scenario.people[scenario.users.supervisor], unitIds["甲部"],
+        scenario.users.manager, scenario.people[scenario.users.manager],
+      ],
+    );
+    const goalIds = Object.fromEntries(activeGoals.rows.map((goal) => [goal.goal_level, goal.id]));
+    await client.query(
+      `insert into goal_versions(goal_id,version_no,amount,status,created_by,created_by_person_id,change_reason)
+       values($1,1,2000,'active',$4,$5,'小组正式报表'),
+             ($2,1,5000,'active',$4,$5,'部门正式报表'),
+             ($3,1,10000,'active',$4,$5,'销售组织正式报表')`,
+      [goalIds.group, goalIds.department, goalIds.sales_manager, scenario.users.hr, scenario.people[scenario.users.hr]],
+    );
+    const gatedGoals = await client.query<{ id: string; period_month: string }>(
+      `insert into goals(period_month,goal_level,owner_user_id,owner_person_id)
+       values('2099-09-01','personal',$1,$2),('2026-07-01','personal',$3,$4)
+       returning id::text,period_month::text`,
+      [scenario.users.alice, scenario.people[scenario.users.alice], scenario.users.bob, scenario.people[scenario.users.bob]],
+    );
+    const gatedGoalIds = Object.fromEntries(gatedGoals.rows.map((goal) => [goal.period_month.slice(0, 7), goal.id]));
+    await client.query(
+      `insert into goal_versions(goal_id,version_no,amount,status,created_by,created_by_person_id,change_reason)
+       values($1,1,1000,'active',$3,$4,'未来月份门禁'),($2,1,0,'active',$3,$4,'零目标门禁')`,
+      [gatedGoalIds["2099-09"], gatedGoalIds["2026-07"], scenario.users.hr, scenario.people[scenario.users.hr]],
+    );
     await client.end();
     const pendingGroupGoalId = pendingGroupGoal.rows[0]!.id;
     await withTestApi(database.url, async (app) => {
       const leaderCookie = await loginCookie(app, "scope_leader");
-      const rawLedger = await app.inject({ method: "GET", url: "/api/performance/dashboard", headers: { cookie: leaderCookie } });
-      assert.equal(rawLedger.statusCode, 200, rawLedger.body);
-
       for (const url of [
         `/api/performance/formal-reports/${pendingGroupGoalId}`,
         `/api/exports/formal-reports/${pendingGroupGoalId}.csv`,
@@ -1246,40 +1291,96 @@ test("正式报表与导出仅使用已生效目标，且不阻断原始业绩�
         assert.equal(blocked.statusCode, 409, `${url}: ${blocked.body}`);
         assert.equal(blocked.json().code, "TARGET_NOT_ACTIVE");
       }
+      for (const [goalId, username, reason] of [
+        [gatedGoalIds["2099-09"], "scope_alice", "PERIOD_IN_FUTURE"],
+        [gatedGoalIds["2026-07"], "scope_bob", "TARGET_AMOUNT_NOT_POSITIVE"],
+      ] as const) {
+        const cookie = await loginCookie(app, username);
+        for (const url of [
+          `/api/performance/formal-reports/${goalId}`,
+          `/api/exports/formal-reports/${goalId}.csv`,
+        ]) {
+          const blocked = await app.inject({ method: "GET", url, headers: { cookie } });
+          assert.equal(blocked.statusCode, 409, `${url}: ${blocked.body}`);
+          assert.equal(blocked.json().code, reason);
+        }
+      }
 
-      const aliceCookie = await loginCookie(app, "scope_alice");
-      const activeReport = await app.inject({
-        method: "GET",
-        url: `/api/performance/formal-reports/${scenario.goalIds[0]}`,
-        headers: { cookie: aliceCookie },
-      });
-      assert.equal(activeReport.statusCode, 200, activeReport.body);
-      assert.deepEqual(activeReport.json(), {
-        goalId: scenario.goalIds[0],
-        periodMonth: "2026-08",
-        level: "personal",
-        ownerName: "业务员甲",
-        targetAmount: "1000.00",
-        actualAmount: "100.00",
-        achievementRate: "10.00",
-      });
+      const cases = [
+        { level: "personal", goalId: scenario.goalIds[0]!, username: "scope_alice", deniedUsername: "scope_bob", ownerName: "业务员甲", targetAmount: "1000.00", actualAmount: "100.00", gapAmount: "900.00", achievementRate: "10.00", actorUserId: scenario.users.alice },
+        { level: "group", goalId: goalIds.group!, username: "scope_leader", deniedUsername: "scope_carol", ownerName: "甲组组长", targetAmount: "2000.00", actualAmount: "200.00", gapAmount: "1800.00", achievementRate: "10.00", actorUserId: scenario.users.leader },
+        { level: "department", goalId: goalIds.department!, username: "scope_supervisor", deniedUsername: "scope_leader", ownerName: "甲部主管", targetAmount: "5000.00", actualAmount: "200.00", gapAmount: "4800.00", achievementRate: "4.00", actorUserId: scenario.users.supervisor },
+        { level: "sales_manager", goalId: goalIds.sales_manager!, username: "scope_manager", deniedUsername: "scope_supervisor", ownerName: "销售经理", targetAmount: "10000.00", actualAmount: "300.00", gapAmount: "9700.00", achievementRate: "3.00", actorUserId: scenario.users.manager },
+      ] as const;
+      const expectedHashes = new Map<string, string>();
+      for (const item of cases) {
+        const cookie = await loginCookie(app, item.username);
+        const dashboard = await app.inject({ method: "GET", url: "/api/performance/dashboard?month=2026-08", headers: { cookie } });
+        assert.equal(dashboard.statusCode, 200, dashboard.body);
+        const dashboardBody = dashboard.json();
+        const dashboardAchievement = item.level === "personal"
+          ? dashboardBody.personalAchievement
+          : item.level === "group"
+            ? dashboardBody.groupAchievements.find((achievement: { goalId: string | null }) => achievement.goalId === item.goalId)
+            : item.level === "department"
+              ? dashboardBody.departmentAchievements.find((achievement: { goalId: string | null }) => achievement.goalId === item.goalId)
+              : dashboardBody.salesAchievement;
+        assert.deepEqual(
+          {
+            targetAmount: dashboardAchievement?.targetAmount,
+            actualAmount: dashboardAchievement?.actualAmount,
+            gapAmount: dashboardAchievement?.gapAmount,
+            achievementRate: dashboardAchievement?.achievementRate,
+          },
+          { targetAmount: item.targetAmount, actualAmount: item.actualAmount, gapAmount: item.gapAmount, achievementRate: item.achievementRate },
+        );
+        const activeReport = await app.inject({
+          method: "GET",
+          url: `/api/performance/formal-reports/${item.goalId}`,
+          headers: { cookie },
+        });
+        assert.equal(activeReport.statusCode, 200, activeReport.body);
+        assert.deepEqual(activeReport.json(), {
+          goalId: item.goalId,
+          periodMonth: "2026-08",
+          level: item.level,
+          ownerName: item.ownerName,
+          targetAmount: item.targetAmount,
+          actualAmount: item.actualAmount,
+          gapAmount: item.gapAmount,
+          achievementRate: item.achievementRate,
+        });
 
-      const activeExport = await app.inject({
-        method: "GET",
-        url: `/api/exports/formal-reports/${scenario.goalIds[0]}.csv`,
-        headers: { cookie: aliceCookie },
-      });
-      assert.equal(activeExport.statusCode, 200, activeExport.body);
-      assert.match(activeExport.body, /正式业绩报表/);
-      assert.match(activeExport.body, /10\.00%/);
+        const activeExport = await app.inject({
+          method: "GET",
+          url: `/api/exports/formal-reports/${item.goalId}.csv`,
+          headers: { cookie },
+        });
+        assert.equal(activeExport.statusCode, 200, activeExport.body);
+        assert.match(String(activeExport.headers["content-type"]), /^text\/csv/);
+        const expectedRow = ["2026-08", item.level, item.ownerName, item.targetAmount, item.actualAmount, item.gapAmount, `${item.achievementRate}%`]
+          .map((value) => `"${value}"`).join(",");
+        assert.ok(activeExport.body.includes(expectedRow), activeExport.body);
+        expectedHashes.set(item.goalId, createHash("sha256").update(activeExport.body).digest("hex"));
+
+        const deniedCookie = await loginCookie(app, item.deniedUsername);
+        for (const url of [
+          `/api/performance/formal-reports/${item.goalId}`,
+          `/api/exports/formal-reports/${item.goalId}.csv`,
+        ]) {
+          const denied = await app.inject({ method: "GET", url, headers: { cookie: deniedCookie } });
+          assert.equal(denied.statusCode, 404, `${url}: ${denied.body}`);
+        }
+      }
 
       const adminCookie = await loginCookie(app, "scope_admin");
-      const adminDenied = await app.inject({
-        method: "GET",
-        url: `/api/performance/formal-reports/${scenario.goalIds[0]}`,
-        headers: { cookie: adminCookie },
-      });
-      assert.equal(adminDenied.statusCode, 403, adminDenied.body);
+      for (const url of [
+        `/api/performance/formal-reports/${scenario.goalIds[0]}`,
+        `/api/exports/formal-reports/${scenario.goalIds[0]}.csv`,
+      ]) {
+        const adminDenied = await app.inject({ method: "GET", url, headers: { cookie: adminCookie } });
+        assert.equal(adminDenied.statusCode, 403, adminDenied.body);
+      }
 
       const hrCookie = await loginCookie(app, "scope_hr");
       const hrReport = await app.inject({
@@ -1288,6 +1389,52 @@ test("正式报表与导出仅使用已生效目标，且不阻断原始业绩�
         headers: { cookie: hrCookie },
       });
       assert.equal(hrReport.statusCode, 200, hrReport.body);
+
+      const verification = new Client({ connectionString: database.url });
+      await verification.connect();
+      try {
+        const completed = await verification.query<{
+          actor_user_id: string;
+          entity_id: string;
+          before_data: unknown;
+          after_data: { filterSummary: { goalId: string; periodMonth: string; level: string }; rowCount: number; status: string; requestId: string; fileSha256: string | null };
+        }>(
+          `select actor_user_id::text,entity_id,before_data,after_data
+           from audit_logs
+           where action='performance.formal_report_export' and after_data->>'status'='completed'
+           order by entity_id::bigint`,
+        );
+        assert.equal(completed.rowCount, cases.length);
+        for (const audit of completed.rows) {
+          const expected = cases.find((item) => item.goalId === audit.entity_id)!;
+          assert.equal(audit.actor_user_id, expected.actorUserId);
+          assert.equal(audit.before_data, null);
+          assert.deepEqual(audit.after_data.filterSummary, { goalId: expected.goalId, periodMonth: "2026-08", level: expected.level });
+          assert.equal(audit.after_data.rowCount, 1);
+          assert.equal(audit.after_data.status, "completed");
+          assert.ok(audit.after_data.requestId);
+          assert.equal(audit.after_data.fileSha256, expectedHashes.get(expected.goalId));
+          assert.doesNotMatch(JSON.stringify(audit.after_data), /正式业绩报表|目标月份/);
+        }
+        const blockedAudit = await verification.query<{ after_data: { rowCount: number; status: string; requestId: string; fileSha256: string | null; failureCode: string } }>(
+          `select after_data from audit_logs
+           where action='performance.formal_report_export' and entity_id=$1 and after_data->>'status'='blocked'`,
+          [pendingGroupGoalId],
+        );
+        assert.equal(blockedAudit.rowCount, 1);
+        assert.deepEqual(
+          {
+            rowCount: blockedAudit.rows[0]!.after_data.rowCount,
+            status: blockedAudit.rows[0]!.after_data.status,
+            fileSha256: blockedAudit.rows[0]!.after_data.fileSha256,
+            failureCode: blockedAudit.rows[0]!.after_data.failureCode,
+          },
+          { rowCount: 0, status: "blocked", fileSha256: null, failureCode: "TARGET_NOT_ACTIVE" },
+        );
+        assert.ok(blockedAudit.rows[0]!.after_data.requestId);
+      } finally {
+        await verification.end();
+      }
     });
   });
 });

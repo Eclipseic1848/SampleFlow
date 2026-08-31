@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { PoolClient } from "pg";
 import type { Database } from "../db.js";
+import { businessDate } from "../domain/business-time.js";
 import { AccountingPeriodError, accountingMonth, consumeApprovedCorrection, lockApprovedCorrection } from "../modules/accounting-periods.js";
 import type { OrganizationSnapshot } from "../modules/organization.js";
 import { decidePerformanceEvent, PerformanceRuleError, type PerformanceCommand, type PerformanceState } from "../domain/performance.js";
@@ -213,15 +214,6 @@ function validDate(value: string): boolean {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
   const parsed = new Date(`${value}T00:00:00Z`);
   return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
-}
-
-function businessDate(): string {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Asia/Shanghai",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(new Date());
 }
 
 function comparableOrderNo(value: string): string {
@@ -495,7 +487,7 @@ export async function preflightImportRows(database: Database, input: Readonly<{
     return personId && validDate(row.occurredOn) ? [{ personId, occurredOn: row.occurredOn }] : [];
   });
   const organizations = await loadOrganizationSnapshots(database, organizationPairs);
-  const today = businessDate();
+  const today = businessDate(new Date());
 
   for (const row of input.rows) {
     const rowIssuesBefore = issues.length;
