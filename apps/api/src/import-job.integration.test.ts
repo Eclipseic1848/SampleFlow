@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
 import pg from "pg";
-import { confirmImportBatch, preflightImportRows, type ImportSourceRow } from "./services/import-job.js";
+import { confirmDimensionBackfillBatch, confirmImportBatch, preflightDimensionBackfillRows, preflightImportRows, type ImportSourceRow } from "./services/import-job.js";
 import { withMigratedTestDatabase } from "./test-support/test-database.js";
 
 const { Pool } = pg;
@@ -527,6 +527,218 @@ test("重新上传原始历史文件时关联既有事件并补齐区域但不�
       assert.equal(replay.summary.reconciliations, 0);
       assert.ok(replay.issues.some((issue) => issue.code === "SOURCE_RECORD_ALREADY_IMPORTED"));
       await confirmImportBatch(context.pool, replay.batchId, context.actorUserId, []);
+    } finally { await context.pool.end(); }
+  });
+});
+
+test("历史分析维度补齐只写快照且预检、重放和冲突保持安全", async () => {
+  await withMigratedTestDatabase(async (database) => {
+    const context = await fixture(database.url);
+    try {
+      const configId = await legacyConfig(context.pool);
+      await context.pool.query("update import_configs set business_region_mapping=$2::jsonb where id=$1", [configId, JSON.stringify({ "江苏省":"CN-JS", "上海市":"CN-SH" })]);
+      const sourceBytes = Buffer.from("synthetic-dimension-backfill");
+      const sourceHash = createHash("sha256").update(sourceBytes).digest("hex");
+      const order = await context.pool.query<{ id: string }>(
+        `insert into performance_orders(qingflow_order_no,customer_name,customer_unit,salesperson_name,service_type,
+           source_received_on,original_amount,current_revenue,counted_amount,lifecycle_state,salesperson_person_id,posted_at)
+         values('001-A','客户甲','旧单位','业务员甲','旧服务','2026-03-05',100,100,100,'active',$1,now()) returning id::text`,
+        [context.salespersonPersonId],
+      );
+      await context.pool.query("begin");
+      await context.pool.query("set local session_replication_role=replica");
+      const event = await context.pool.query<{ id: string }>(
+        `insert into performance_events(order_id,event_type,delta_amount,resulting_current_revenue,resulting_counted_amount,
+           accounting_month,occurred_on,reason,salesperson_name,department_name,group_name,source_row_number,salesperson_person_id,order_sequence)
+         values($1,'legacy_adjustment',100,100,100,'2026-03-01','2026-03-05','首次转录','业务员甲','销售一部','一组',2,$2,1)
+         returning id::text`,
+        [order.rows[0]!.id, context.salespersonPersonId],
+      );
+      await context.pool.query(
+        `insert into legacy_event_source_evidence(event_id,source_file_sha256,source_sheet,source_row_number,source_key)
+         values($1,$2,'分子',2,$3)`,
+        [event.rows[0]!.id, sourceHash, `legacy:${sourceHash}:分子:2`],
+      );
+      await context.pool.query("commit");
+      const sourceRow = row({ sheet:"分子", sourceRecordId:undefined, eventType:"legacy_adjustment", customerUnit:"单位甲", businessRegionSourceText:"江苏省" });
+
+      const preflight = await preflightDimensionBackfillRows(context.pool, {
+        actorUserId:context.actorUserId, configId, sourceFileName:"合成历史.xlsx", sourceBytes, rows:[sourceRow],
+      });
+      assert.equal(preflight.status, "preflight_ready");
+      assert.deepEqual(preflight.summary, { rows:1, readyMapped:1, pending:0, alreadyMapped:0, blocking:0, totalAmount:100 });
+      assert.equal(preflight.reconciliation.matched, true);
+      assert.deepEqual(preflight.mappings.map((mapping) => ({ eventId:mapping.eventId, status:mapping.status, region:mapping.businessRegionCode, unit:mapping.customerUnit })), [
+        { eventId:event.rows[0]!.id, status:"ready", region:"CN-JS", unit:"单位甲" },
+      ]);
+      const before = await context.pool.query(
+        `select (select count(*) from performance_event_analysis_dimensions)::int dimensions,
+                (select count(*) from legacy_event_analysis_dimension_backfills)::int receipts`,
+      );
+      assert.deepEqual(before.rows[0], { dimensions:0, receipts:0 });
+
+      const concurrent = await Promise.all([
+        confirmDimensionBackfillBatch(context.pool, preflight.batchId, context.actorUserId),
+        confirmDimensionBackfillBatch(context.pool, preflight.batchId, context.actorUserId),
+      ]);
+      assert.deepEqual(concurrent.map((result) => result.replayed).sort(), [false,true]);
+      assert.ok(concurrent.every((result) => result.applied === 1 && result.alreadyMapped === 0 && result.pending === 0));
+      const written = await context.pool.query(
+        `select dimensions.business_region_code,dimensions.business_region_source_text,dimensions.customer_unit,
+                receipt.source_file_sha256,receipt.confirmed_by::text,receipt.result,
+                event.event_type,event.delta_amount::text,event.reason,evidence.source_key,
+                performance_order.customer_unit order_customer_unit,performance_order.service_type order_service_type
+         from performance_event_analysis_dimensions dimensions
+         join legacy_event_analysis_dimension_backfills receipt on receipt.event_id=dimensions.event_id
+         join performance_events event on event.id=dimensions.event_id
+         join legacy_event_source_evidence evidence on evidence.event_id=event.id
+         join performance_orders performance_order on performance_order.id=event.order_id`,
+      );
+      assert.deepEqual(written.rows[0], {
+        business_region_code:"CN-JS", business_region_source_text:"江苏省", customer_unit:"单位甲",
+        source_file_sha256:sourceHash, confirmed_by:context.actorUserId, result:"applied",
+        event_type:"legacy_adjustment", delta_amount:"100.00", reason:"首次转录", source_key:`legacy:${sourceHash}:分子:2`,
+        order_customer_unit:"旧单位", order_service_type:"旧服务",
+      });
+      await assert.rejects(
+        context.pool.query("update legacy_event_analysis_dimension_backfills set result='applied' where event_id=$1", [event.rows[0]!.id]),
+        /不可更新或删除/,
+      );
+      await assert.rejects(
+        context.pool.query("update import_batches set purpose='ledger_import' where id=$1", [preflight.batchId]),
+        /导入来源证据不可修改/,
+      );
+      const audit = await context.pool.query<{ actor_user_id:string; after_data:Record<string, unknown> }>(
+        "select actor_user_id::text,after_data from audit_logs where action='import.dimension_backfill_confirmed' and entity_id=$1",
+        [preflight.batchId],
+      );
+      assert.equal(audit.rows[0]!.actor_user_id, context.actorUserId);
+      assert.equal(audit.rows[0]!.after_data.sourceSha256, sourceHash);
+      assert.equal(audit.rows[0]!.after_data.result, "applied");
+      assert.equal(typeof audit.rows[0]!.after_data.confirmedAt, "string");
+
+      const repeatedSource = await preflightDimensionBackfillRows(context.pool, {
+        actorUserId:context.actorUserId, configId, sourceFileName:"合成历史-再次核对.xlsx", sourceBytes, rows:[sourceRow],
+      });
+      assert.deepEqual(repeatedSource.summary, { rows:1, readyMapped:0, pending:0, alreadyMapped:1, blocking:0, totalAmount:100 });
+      assert.deepEqual(
+        await confirmDimensionBackfillBatch(context.pool, repeatedSource.batchId, context.actorUserId),
+        { batchId:repeatedSource.batchId, replayed:false, applied:0, alreadyMapped:1, pending:0 },
+      );
+
+      const conflict = await preflightDimensionBackfillRows(context.pool, {
+        actorUserId:context.actorUserId, configId, sourceFileName:"合成历史-冲突.xlsx", sourceBytes,
+        rows:[{ ...sourceRow, customerUnit:"冲突单位" }],
+      });
+      assert.equal(conflict.status, "blocked");
+      assert.ok(conflict.issues.some((issue) => issue.code === "DIMENSION_BACKFILL_CONFLICT"));
+      await assert.rejects(confirmDimensionBackfillBatch(context.pool, conflict.batchId, context.actorUserId), /存在阻断错误/);
+      const totals = await context.pool.query(
+        `select (select count(*) from performance_event_analysis_dimensions)::int dimensions,
+                (select count(*) from legacy_event_analysis_dimension_backfills)::int receipts`,
+      );
+      assert.deepEqual(totals.rows[0], { dimensions:1, receipts:1 });
+    } finally { await context.pool.end(); }
+  });
+});
+
+test("历史维度补齐中途失败时整批回滚并允许安全重试", async () => {
+  await withMigratedTestDatabase(async (database) => {
+    const context = await fixture(database.url);
+    try {
+      const configId = await legacyConfig(context.pool);
+      await context.pool.query("update import_configs set business_region_mapping=$2::jsonb where id=$1", [configId, JSON.stringify({ "江苏省":"CN-JS", "上海市":"CN-SH" })]);
+      const sourceBytes = Buffer.from("synthetic-atomic-dimension-backfill");
+      const sourceHash = createHash("sha256").update(sourceBytes).digest("hex");
+      const inputs = [
+        { rowNumber:2, orderNo:"ATOMIC-1", amount:60, reason:"合成补齐一", customerUnit:"合成单位一" },
+        { rowNumber:3, orderNo:"ATOMIC-2", amount:40, reason:"合成补齐二", customerUnit:"合成单位二" },
+      ];
+      const eventIds:string[] = [];
+      await context.pool.query("begin");
+      await context.pool.query("set local session_replication_role=replica");
+      for (const input of inputs) {
+        const order = await context.pool.query<{ id:string }>(
+          `insert into performance_orders(qingflow_order_no,customer_name,customer_unit,salesperson_name,service_type,
+             source_received_on,original_amount,current_revenue,counted_amount,lifecycle_state,salesperson_person_id,posted_at)
+           values($1,'合成客户','旧单位','业务员甲','旧服务','2026-03-05',$2,$2,$2,'active',$3,now()) returning id::text`,
+          [input.orderNo, input.amount, context.salespersonPersonId],
+        );
+        const event = await context.pool.query<{ id:string }>(
+          `insert into performance_events(order_id,event_type,delta_amount,resulting_current_revenue,resulting_counted_amount,
+             accounting_month,occurred_on,reason,salesperson_name,department_name,group_name,source_row_number,salesperson_person_id,order_sequence)
+           values($1,'legacy_adjustment',$2,$2,$2,'2026-03-01','2026-03-05',$3,'业务员甲','销售一部','一组',$4,$5,1)
+           returning id::text`,
+          [order.rows[0]!.id, input.amount, input.reason, input.rowNumber, context.salespersonPersonId],
+        );
+        eventIds.push(event.rows[0]!.id);
+        await context.pool.query(
+          `insert into legacy_event_source_evidence(event_id,source_file_sha256,source_sheet,source_row_number,source_key)
+           values($1,$2,'分子',$3,$4)`,
+          [event.rows[0]!.id, sourceHash, input.rowNumber, `legacy:${sourceHash}:分子:${input.rowNumber}`],
+        );
+      }
+      await context.pool.query("commit");
+      const rows = inputs.map((input) => row({
+        sheet:"分子", rowNumber:input.rowNumber, sourceRecordId:undefined, orderNo:input.orderNo,
+        eventType:"legacy_adjustment", amount:input.amount, reason:input.reason, customerUnit:input.customerUnit,
+      }));
+      const partial = await preflightDimensionBackfillRows(context.pool, {
+        actorUserId:context.actorUserId, configId, sourceFileName:"合成部分补齐.xlsx", sourceBytes, rows:[rows[0]!],
+      });
+      assert.deepEqual(partial.summary, { rows:1, readyMapped:1, pending:1, alreadyMapped:0, blocking:0, totalAmount:100 });
+      assert.deepEqual(partial.reconciliation, {
+        source:{ events:2, totalAmount:100 }, readyMapped:{ events:1, totalAmount:60 },
+        alreadyMapped:{ events:0, totalAmount:0 }, pending:{ events:1, totalAmount:40 }, blocked:{ events:0, totalAmount:0 }, matched:true,
+      });
+      assert.deepEqual(
+        await confirmDimensionBackfillBatch(context.pool, partial.batchId, context.actorUserId),
+        { batchId:partial.batchId, replayed:false, applied:1, alreadyMapped:0, pending:1 },
+      );
+      assert.deepEqual(
+        await confirmDimensionBackfillBatch(context.pool, partial.batchId, context.actorUserId),
+        { batchId:partial.batchId, replayed:true, applied:1, alreadyMapped:0, pending:1 },
+      );
+      const preflight = await preflightDimensionBackfillRows(context.pool, {
+        actorUserId:context.actorUserId, configId, sourceFileName:"合成原子补齐.xlsx", sourceBytes, rows,
+      });
+      assert.equal(preflight.status, "preflight_ready");
+      await context.pool.query(
+        `create function fail_dimension_backfill_receipt() returns trigger language plpgsql as $$
+         begin raise exception '补齐凭据故障注入'; end $$`,
+      );
+      await context.pool.query(
+        `create trigger fail_dimension_backfill_receipt before insert on legacy_event_analysis_dimension_backfills
+         for each statement execute function fail_dimension_backfill_receipt()`,
+      );
+      await assert.rejects(
+        confirmDimensionBackfillBatch(context.pool, preflight.batchId, context.actorUserId),
+        /补齐凭据故障注入/,
+      );
+      const state = await context.pool.query<{ event_id:string; dimensions:number; receipts:number }>(
+        `select event.id::text event_id,
+                (select count(*)::int from performance_event_analysis_dimensions dimensions where dimensions.event_id=event.id) dimensions,
+                (select count(*)::int from legacy_event_analysis_dimension_backfills receipt where receipt.event_id=event.id) receipts
+         from performance_events event where event.id=any($1::bigint[]) order by event.id`,
+        [eventIds],
+      );
+      assert.deepEqual(state.rows.map((item) => [item.event_id,item.dimensions,item.receipts]), [
+        [eventIds[0],1,1],
+        [eventIds[1],0,0],
+      ]);
+      const failed = await context.pool.query<{ status:string; result:string }>(
+        `select batch.status,audit.after_data->>'result' result from import_batches batch
+         join audit_logs audit on audit.entity_id=batch.id::text and audit.action='import.dimension_backfill_confirm_failed'
+         where batch.id=$1`,
+        [preflight.batchId],
+      );
+      assert.deepEqual(failed.rows[0], { status:"preflight_ready", result:"retryable" });
+      await context.pool.query("drop trigger fail_dimension_backfill_receipt on legacy_event_analysis_dimension_backfills");
+      await context.pool.query("drop function fail_dimension_backfill_receipt()");
+      assert.deepEqual(
+        await confirmDimensionBackfillBatch(context.pool, preflight.batchId, context.actorUserId),
+        { batchId:preflight.batchId, replayed:false, applied:1, alreadyMapped:1, pending:0 },
+      );
     } finally { await context.pool.end(); }
   });
 });

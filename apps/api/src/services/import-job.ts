@@ -52,6 +52,43 @@ type ExistingImportRecord = Readonly<{
   sourcePayloadFingerprint: string | null;
 }>;
 
+type DimensionBackfillRow = Readonly<{
+  sheet: string;
+  rowNumber: number;
+  sourceKey: string;
+  orderNo: string;
+  occurredOn: string;
+  salespersonSourceKey: string;
+  amount: number;
+  reason: string;
+  businessRegionCode: string;
+  businessRegionSourceText: string;
+  customerUnit: string;
+}>;
+
+type DimensionBackfillTarget = Readonly<{
+  event_id: string;
+  source_file_sha256: string;
+  source_sheet: string;
+  source_row_number: string;
+  source_key: string;
+  event_type: string;
+  order_no: string;
+  occurred_on: string;
+  salesperson_source_key: string | null;
+  delta_amount: string;
+  reason: string | null;
+  business_region_code: string | null;
+  business_region_source_text: string | null;
+  customer_unit: string | null;
+  receipt_source_sha256: string | null;
+}>;
+
+export type DimensionBackfillMapping = Readonly<DimensionBackfillRow & {
+  eventId: string;
+  status: "ready" | "already_mapped";
+}>;
+
 export type ImportReconciliationSummary = Readonly<{
   rows: number;
   orders: number;
@@ -316,15 +353,15 @@ function simulateOrderRows(initialState: PerformanceState, rows: readonly Normal
   }
 }
 
-function addIssue(issues: ImportIssue[], row: ImportSourceRow, code: string, message: string) {
+function addIssue(issues: ImportIssue[], row: Readonly<{ rowNumber:number }>, code: string, message: string) {
   issues.push({ rowNumber: row.rowNumber, code, severity: "blocking", message });
 }
 
-function addWarning(issues: ImportIssue[], row: ImportSourceRow, code: string, message: string) {
+function addWarning(issues: ImportIssue[], row: Readonly<{ rowNumber:number }>, code: string, message: string) {
   issues.push({ rowNumber: row.rowNumber, code, severity: "warning", message });
 }
 
-function addInfo(issues: ImportIssue[], row: ImportSourceRow, code: string, message: string) {
+function addInfo(issues: ImportIssue[], row: Readonly<{ rowNumber:number }>, code: string, message: string) {
   issues.push({ rowNumber: row.rowNumber, code, severity: "info", message });
 }
 
@@ -339,7 +376,7 @@ async function loadApprovedConfig(database: Database, configId: string): Promise
   return config;
 }
 
-function reconciliationSummary(rows: readonly NormalizedRow[]): ImportReconciliationSummary {
+function reconciliationSummary(rows: readonly Readonly<{ occurredOn:string; amount:number; orderNo:string }>[]): ImportReconciliationSummary {
   const monthly = new Map<string, { events: number; totalCents: number }>();
   let totalCents = 0;
   for (const row of rows) {
@@ -455,6 +492,156 @@ function normalizeRow(
     row.reason,
   ]));
   return { ...row, eventType, sourceKey, duplicateFingerprint, businessRegionCode, personId, organization };
+}
+
+function normalizeDimensionBackfillRow(
+  config: ImportConfigRow,
+  sourceHash: string,
+  row: ImportSourceRow,
+  issues: ImportIssue[],
+  today: string,
+): DimensionBackfillRow | null {
+  const before = issues.length;
+  if (row.eventType !== "legacy_adjustment") addIssue(issues, row, "DIMENSION_BACKFILL_EVENT_TYPE_INVALID", "历史维度补齐只接受 legacy_adjustment 来源行");
+  if (row.sourceRecordId !== undefined) addIssue(issues, row, "DIMENSION_BACKFILL_SOURCE_KEY_INVALID", "历史维度补齐必须使用来源文件哈希、工作表和行号定位");
+  if (!row.sheet || !Number.isInteger(row.rowNumber) || row.rowNumber <= 1) addIssue(issues, row, "SOURCE_POSITION_INVALID", "来源工作表和行号无效");
+  if (!row.orderNo || row.orderNo.length > 100 || row.orderNo !== row.orderNo.trim() || /[\u0000-\u001f\u007f]/.test(row.orderNo)) {
+    addIssue(issues, row, "ORDER_NO_INVALID", "订单编号必须是无首尾空格和控制字符的精确文本");
+  }
+  if (!validDate(row.occurredOn) || row.occurredOn > today) addIssue(issues, row, "OCCURRED_ON_INVALID", "发生日期无效或晚于当前业务日");
+  if (!row.salespersonSourceKey || row.salespersonSourceKey.length > 200) addIssue(issues, row, "PERSON_SOURCE_KEY_INVALID", "业务员来源标识必须是 1 至 200 个字符");
+  if (!row.customerUnit || row.customerUnit.length > 300) addIssue(issues, row, "CUSTOMER_UNIT_INVALID", "客户单位必须是 1 至 300 个字符");
+  if (!row.businessRegionSourceText || row.businessRegionSourceText.length > 100) addIssue(issues, row, "BUSINESS_REGION_SOURCE_INVALID", "业务区域原文必须是 1 至 100 个字符");
+  if (row.reason.length > 500) addIssue(issues, row, "REASON_INVALID", "原因不能超过 500 个字符");
+  const centValue = row.amount * 100;
+  if (!Number.isFinite(row.amount) || Math.abs(row.amount) > 99_999_999_999.99 || Math.abs(centValue - Math.round(centValue)) > 1e-7) {
+    addIssue(issues, row, "AMOUNT_INVALID", "金额必须是有效的两位小数范围数字");
+  }
+  const businessRegionCode = config.business_region_mapping[row.businessRegionSourceText];
+  if (!businessRegionCode) addIssue(issues, row, "BUSINESS_REGION_UNMAPPED", "业务区域原文没有已批准的精确映射");
+  if (issues.length !== before || !businessRegionCode) return null;
+  return {
+    sheet: row.sheet,
+    rowNumber: row.rowNumber,
+    sourceKey: `legacy:${sourceHash}:${row.sheet}:${row.rowNumber}`,
+    orderNo: row.orderNo,
+    occurredOn: row.occurredOn,
+    salespersonSourceKey: row.salespersonSourceKey,
+    amount: row.amount,
+    reason: row.reason,
+    businessRegionCode,
+    businessRegionSourceText: row.businessRegionSourceText,
+    customerUnit: row.customerUnit,
+  };
+}
+
+async function loadDimensionBackfillTargets(
+  database: Pick<PoolClient, "query">,
+  sourceHash: string,
+  sourceKeys: readonly string[],
+): Promise<DimensionBackfillTarget[]> {
+  const result = await database.query<DimensionBackfillTarget>(
+    `select evidence.event_id::text,evidence.source_file_sha256,evidence.source_sheet,
+            evidence.source_row_number::text,evidence.source_key,event.event_type,
+            performance_order.qingflow_order_no order_no,event.occurred_on::text,
+            salesperson.source_key salesperson_source_key,event.delta_amount::text,event.reason,
+            dimensions.business_region_code,dimensions.business_region_source_text,dimensions.customer_unit,
+            receipt.source_file_sha256 receipt_source_sha256
+     from legacy_event_source_evidence evidence
+     join performance_events event on event.id=evidence.event_id
+     join performance_orders performance_order on performance_order.id=event.order_id
+     left join people salesperson on salesperson.id=event.salesperson_person_id
+     left join performance_event_analysis_dimensions dimensions on dimensions.event_id=event.id
+     left join legacy_event_analysis_dimension_backfills receipt on receipt.event_id=event.id
+     where evidence.source_file_sha256=$1 or evidence.source_key=any($2::text[])
+     order by evidence.source_sheet,evidence.source_row_number,evidence.event_id`,
+    [sourceHash, sourceKeys],
+  );
+  return result.rows;
+}
+
+function dimensionBackfillEvaluation(
+  sourceHash: string,
+  rows: readonly DimensionBackfillRow[],
+  targets: readonly DimensionBackfillTarget[],
+) {
+  const issues: ImportIssue[] = [];
+  const mappings: DimensionBackfillMapping[] = [];
+  const bySourceKey = new Map(targets.map((target) => [target.source_key, target]));
+  const seenEvents = new Set<string>();
+  for (const row of rows) {
+    const target = bySourceKey.get(row.sourceKey);
+    if (!target) {
+      addIssue(issues, row, "CONTROLLED_SOURCE_NOT_FOUND", "来源哈希、工作表和行号无法匹配既有历史事件证据");
+      continue;
+    }
+    const sourceMatches = target.source_file_sha256 === sourceHash
+      && target.source_sheet === row.sheet
+      && Number(target.source_row_number) === row.rowNumber
+      && target.source_key === row.sourceKey;
+    const eventMatches = target.event_type === "legacy_adjustment"
+      && target.order_no === row.orderNo
+      && String(target.occurred_on).slice(0, 10) === row.occurredOn
+      && target.salesperson_source_key === row.salespersonSourceKey
+      && Math.round(Number(target.delta_amount) * 100) === Math.round(row.amount * 100)
+      && (target.reason ?? "") === row.reason;
+    if (!sourceMatches || !eventMatches) {
+      addIssue(issues, row, "SOURCE_RECORD_CONFLICT", "受控来源位置已存在，但事件事实与本次来源行不一致");
+      continue;
+    }
+    if (seenEvents.has(target.event_id)) {
+      addIssue(issues, row, "DIMENSION_BACKFILL_EVENT_DUPLICATE", "同一历史事件不能在一个补齐批次中重复出现");
+      continue;
+    }
+    seenEvents.add(target.event_id);
+    const hasDimensions = target.business_region_code !== null;
+    if (hasDimensions) {
+      const sameDimensions = target.business_region_code === row.businessRegionCode
+        && target.business_region_source_text === row.businessRegionSourceText
+        && target.customer_unit === row.customerUnit;
+      if (!sameDimensions || target.receipt_source_sha256 !== sourceHash) {
+        addIssue(issues, row, "DIMENSION_BACKFILL_CONFLICT", "事件已有分析维度，但维度值或受控来源凭据与本次补齐不一致");
+        continue;
+      }
+      mappings.push({ ...row, eventId: target.event_id, status: "already_mapped" });
+      continue;
+    }
+    if (target.receipt_source_sha256 !== null) {
+      addIssue(issues, row, "DIMENSION_BACKFILL_CONFLICT", "事件补齐凭据与分析维度状态不一致");
+      continue;
+    }
+    mappings.push({ ...row, eventId: target.event_id, status: "ready" });
+  }
+  const scope = targets.filter((target) => target.source_file_sha256 === sourceHash);
+  if (!scope.length) issues.push({ rowNumber:0, code:"CONTROLLED_SOURCE_EMPTY", severity:"blocking", message:"来源哈希没有匹配任何既有历史事件证据" });
+  const readyMapped = mappings.filter((mapping) => mapping.status === "ready");
+  const alreadyMapped = mappings.filter((mapping) => mapping.status === "already_mapped");
+  const readyEventIds = new Set(readyMapped.map((mapping) => mapping.eventId));
+  const alreadyMappedEventIds = new Set(alreadyMapped.map((mapping) => mapping.eventId));
+  const unresolvedPending = scope.filter((target) => target.business_region_code === null && !readyEventIds.has(target.event_id));
+  const blockedTargets = scope.filter((target) => target.business_region_code !== null && !alreadyMappedEventIds.has(target.event_id));
+  const amount = (items: readonly Readonly<{ amount?:number; delta_amount?:string }>[]) => items.reduce(
+    (sum, item) => sum + Math.round((item.amount ?? Number(item.delta_amount)) * 100), 0,
+  ) / 100;
+  const sourceTotalAmount = amount(scope);
+  const readyMappedTotalAmount = amount(readyMapped);
+  const alreadyMappedTotalAmount = amount(alreadyMapped);
+  const pendingTotalAmount = amount(unresolvedPending);
+  const blockedTotalAmount = amount(blockedTargets);
+  const matched = scope.length === readyMapped.length + alreadyMapped.length + unresolvedPending.length + blockedTargets.length
+    && Math.round(sourceTotalAmount * 100) === Math.round((readyMappedTotalAmount + alreadyMappedTotalAmount + pendingTotalAmount + blockedTotalAmount) * 100);
+  return {
+    issues,
+    mappings,
+    reconciliation: {
+      source: { events:scope.length, totalAmount:sourceTotalAmount },
+      readyMapped: { events:readyMapped.length, totalAmount:readyMappedTotalAmount },
+      alreadyMapped: { events:alreadyMapped.length, totalAmount:alreadyMappedTotalAmount },
+      pending: { events:unresolvedPending.length, totalAmount:pendingTotalAmount },
+      blocked: { events:blockedTargets.length, totalAmount:blockedTotalAmount },
+      matched,
+    },
+  };
 }
 
 export async function preflightImportRows(database: Database, input: Readonly<{
@@ -775,6 +962,112 @@ export async function preflightImportRows(database: Database, input: Readonly<{
   };
 }
 
+export async function preflightDimensionBackfillRows(database: Database, input: Readonly<{
+  actorUserId: string;
+  configId: string;
+  sourceFileName: string;
+  sourceBytes: Uint8Array;
+  rows: readonly ImportSourceRow[];
+}>) {
+  const operator = await database.query(
+    "select 1 from user_roles where user_id=$1 and role_code=any($2::text[])",
+    [input.actorUserId, ["sales_assistant", "sales_assistant_leader"]],
+  );
+  if (!operator.rowCount) throw new ImportJobError("仅业绩数据维护角色可以运行历史维度补齐预检");
+  const config = await loadApprovedConfig(database, input.configId);
+  if (config.fixed_event_type !== "legacy_adjustment" || !config.allow_legacy_source_key) {
+    throw new ImportJobError("历史维度补齐只能使用已批准的专用历史导入配置");
+  }
+  const sourceHash = sha256(input.sourceBytes);
+  const issues: ImportIssue[] = [];
+  const normalized: DimensionBackfillRow[] = [];
+  const seenSourceKeys = new Set<string>();
+  const today = businessDate(new Date());
+  for (const row of input.rows) {
+    const value = normalizeDimensionBackfillRow(config, sourceHash, row, issues, today);
+    if (!value) continue;
+    if (seenSourceKeys.has(value.sourceKey)) addIssue(issues, row, "SOURCE_KEY_DUPLICATE", "批次内来源位置重复");
+    seenSourceKeys.add(value.sourceKey);
+    normalized.push(value);
+  }
+  const targets = await loadDimensionBackfillTargets(database, sourceHash, normalized.map((row) => row.sourceKey));
+  const evaluated = dimensionBackfillEvaluation(sourceHash, normalized, targets);
+  issues.push(...evaluated.issues);
+  if (config.expected_reconciliation) {
+    const actual = reconciliationSummary(normalized);
+    if (!sameReconciliation(actual, config.expected_reconciliation)) {
+      issues.push({ rowNumber:0, code:"RECONCILIATION_MISMATCH", severity:"blocking", message:"来源文件的整体或逐月数量、订单和金额与获批配置不一致" });
+    }
+  }
+  const blocking = issues.filter((issue) => issue.severity === "blocking").length;
+  const readyMapped = evaluated.mappings.filter((mapping) => mapping.status === "ready");
+  const alreadyMapped = evaluated.mappings.filter((mapping) => mapping.status === "already_mapped");
+  const summary = {
+    rows: input.rows.length,
+    readyMapped: readyMapped.length,
+    pending: evaluated.reconciliation.pending.events,
+    alreadyMapped: alreadyMapped.length,
+    blocking,
+    totalAmount: evaluated.reconciliation.source.totalAmount,
+  };
+  const issuesByRow = new Map<number, ImportIssue[]>();
+  for (const issue of issues) {
+    const current = issuesByRow.get(issue.rowNumber);
+    if (current) current.push(issue);
+    else issuesByRow.set(issue.rowNumber, [issue]);
+  }
+  const client = await database.connect();
+  let batchId = "";
+  try {
+    await client.query("begin");
+    await client.query("select pg_advisory_xact_lock(hashtext('sampleflow:performance-import-preflight'))");
+    const batch = await client.query<{ id:string }>(
+      `insert into import_batches(config_id,source_file_name,source_sha256,source_bytes,purpose,status,uploaded_by,
+         row_count,order_count,event_count,reconciliation_count,total_amount,warning_count,blocking_count,anomalies,reconciliation_summary)
+       values($1,$2,$3,$4,'dimension_backfill',$5,$6,$7,$8,$9,$10,$11,0,$12,$13::jsonb,$14::jsonb) returning id::text`,
+      [input.configId, input.sourceFileName, sourceHash, Buffer.from(input.sourceBytes), blocking ? "blocked" : "preflight_ready",
+       input.actorUserId, input.rows.length, new Set(evaluated.mappings.map((mapping) => mapping.orderNo)).size, readyMapped.length,
+       alreadyMapped.length, summary.totalAmount, blocking, JSON.stringify(issues), JSON.stringify(evaluated.reconciliation)],
+    );
+    batchId = batch.rows[0]!.id;
+    if (evaluated.mappings.length) {
+      await client.query(
+        `insert into import_batch_rows(batch_id,source_sheet,source_row_number,source_key,duplicate_fingerprint,normalized_data,issues)
+         select $1,item->>'sheet',(item->>'rowNumber')::int,item->>'sourceKey',item->>'duplicateFingerprint',
+                item-'issues'-'duplicateFingerprint',item->'issues'
+         from jsonb_array_elements($2::jsonb) item`,
+        [batchId, JSON.stringify(evaluated.mappings.map((mapping) => ({
+          ...mapping,
+          duplicateFingerprint:sha256(mapping.sourceKey),
+          issues:issuesByRow.get(mapping.rowNumber) ?? [],
+        })))],
+      );
+    }
+    await client.query(
+      `insert into audit_logs(actor_user_id,action,entity_type,entity_id,after_data)
+       values($1,'import.dimension_backfill_preflighted','import_batch',$2,
+         jsonb_build_object('sourceSha256',$3::text,'status',$4::text,'rows',$5::int,'readyMapped',$6::int,'alreadyMapped',$7::int,'pending',$8::int,'blocking',$9::int,'reconciliation',$10::jsonb))`,
+      [input.actorUserId, batchId, sourceHash, blocking ? "blocked" : "preflight_ready", input.rows.length,
+       readyMapped.length, alreadyMapped.length, summary.pending, blocking, JSON.stringify(evaluated.reconciliation)],
+    );
+    await client.query("commit");
+  } catch (error) {
+    await client.query("rollback");
+    throw error;
+  } finally {
+    client.release();
+  }
+  return {
+    batchId,
+    status: blocking ? "blocked" as const : "preflight_ready" as const,
+    sourceSha256: sourceHash,
+    issues,
+    summary,
+    reconciliation: evaluated.reconciliation,
+    mappings: evaluated.mappings,
+  };
+}
+
 async function assertLeader(client: PoolClient, actorUserId: string): Promise<string> {
   const role = await client.query<{ person_id: string | null }>(
     `select people.id::text as person_id from user_roles
@@ -878,6 +1171,145 @@ async function assertAccountingPeriodsOpen(client: PoolClient, months: readonly 
   if (closed) throw new AccountingPeriodError(`记账期间已关闭：${String(closed.period_month).slice(0, 7)}`);
 }
 
+export async function confirmDimensionBackfillBatch(
+  database: Database,
+  batchId: string,
+  actorUserId: string,
+  ipAddress = "127.0.0.1",
+) {
+  const client = await database.connect();
+  let attempted = false;
+  let sourceHash = "";
+  try {
+    await client.query("begin");
+    await client.query("select pg_advisory_xact_lock(hashtext('sampleflow:dimension-backfill'))");
+    await assertLeader(client, actorUserId);
+    const found = await client.query<{
+      status:string;
+      purpose:string;
+      source_sha256:string;
+      event_count:number;
+      reconciliation_count:number;
+      reconciliation_summary:{ confirmation?:{ pending?:number } };
+    }>(
+      `select status,purpose,source_sha256,event_count,reconciliation_count,reconciliation_summary
+       from import_batches where id=$1 for update`,
+      [batchId],
+    );
+    const batch = found.rows[0];
+    if (!batch) throw new ImportJobError("导入批次不存在");
+    if (batch.purpose !== "dimension_backfill") throw new ImportJobError("当前批次不是历史维度补齐批次");
+    sourceHash = batch.source_sha256;
+    if (batch.status === "imported") {
+      await client.query("rollback");
+      return {
+        batchId,
+        replayed:true,
+        applied:Number(batch.event_count),
+        alreadyMapped:Number(batch.reconciliation_count),
+        pending:Number(batch.reconciliation_summary.confirmation?.pending ?? 0),
+      };
+    }
+    if (batch.status === "blocked") throw new ImportJobError("导入批次存在阻断错误，不能确认");
+    if (batch.status !== "preflight_ready") throw new ImportJobError("导入批次当前状态不能确认");
+    const config = await client.query<{ status:string; fixed_event_type:string|null; allow_legacy_source_key:boolean }>(
+      `select config.status,config.fixed_event_type,config.allow_legacy_source_key
+       from import_batches batch join import_configs config on config.id=batch.config_id where batch.id=$1`,
+      [batchId],
+    );
+    if (config.rows[0]?.status !== "approved" || config.rows[0].fixed_event_type !== "legacy_adjustment" || !config.rows[0].allow_legacy_source_key) {
+      throw new ImportJobError("历史维度补齐配置已失效，请重新预检");
+    }
+    const loaded = await client.query<{ id:string; normalized_data:DimensionBackfillMapping }>(
+      "select id::text,normalized_data from import_batch_rows where batch_id=$1 order by source_sheet,source_row_number",
+      [batchId],
+    );
+    const rows = loaded.rows.map((item) => item.normalized_data);
+    const batchRowIds = new Map(loaded.rows.map((item) => [item.normalized_data.sourceKey, item.id]));
+    attempted = true;
+    const targets = await loadDimensionBackfillTargets(client, sourceHash, rows.map((row) => row.sourceKey));
+    const evaluated = dimensionBackfillEvaluation(sourceHash, rows, targets);
+    if (evaluated.issues.length || evaluated.mappings.length !== rows.length) {
+      throw new ImportJobError("确认时受控来源或目标维度状态已变化，请重新预检");
+    }
+    const stagedBySourceKey = new Map(rows.map((row) => [row.sourceKey, row]));
+    for (const mapping of evaluated.mappings) {
+      const staged = stagedBySourceKey.get(mapping.sourceKey);
+      if (!staged || staged.eventId !== mapping.eventId
+        || staged.businessRegionCode !== mapping.businessRegionCode
+        || staged.businessRegionSourceText !== mapping.businessRegionSourceText
+        || staged.customerUnit !== mapping.customerUnit) {
+        throw new ImportJobError("确认时补齐映射与预检证据不一致，请重新预检");
+      }
+    }
+    const toApply = evaluated.mappings.filter((mapping) => mapping.status === "ready");
+    const alreadyMapped = evaluated.mappings.length - toApply.length;
+    const unresolvedPending = evaluated.reconciliation.pending.events;
+    const unresolvedPendingAmount = evaluated.reconciliation.pending.totalAmount;
+    const confirmedAt = new Date().toISOString();
+    if (toApply.length) {
+      const values = toApply.map((mapping) => ({
+        event_id:mapping.eventId,
+        business_region_code:mapping.businessRegionCode,
+        business_region_source_text:mapping.businessRegionSourceText,
+        customer_unit:mapping.customerUnit,
+        batch_row_id:batchRowIds.get(mapping.sourceKey),
+      }));
+      if (values.some((value) => !value.batch_row_id)) throw new ImportJobError("补齐批次缺少不可变行证据");
+      await client.query(
+        `insert into performance_event_analysis_dimensions(event_id,business_region_code,business_region_source_text,customer_unit)
+         select item.event_id,item.business_region_code,item.business_region_source_text,item.customer_unit
+         from jsonb_to_recordset($1::jsonb) item(event_id bigint,business_region_code text,business_region_source_text text,customer_unit text)`,
+        [JSON.stringify(values)],
+      );
+      await client.query(
+        `insert into legacy_event_analysis_dimension_backfills
+          (event_id,batch_id,batch_row_id,source_file_sha256,confirmed_by,confirmed_at,result)
+         select item.event_id,$2,item.batch_row_id,$3,$4,$5,'applied'
+         from jsonb_to_recordset($1::jsonb) item(event_id bigint,batch_row_id bigint)`,
+        [JSON.stringify(values), batchId, sourceHash, actorUserId, confirmedAt],
+      );
+    }
+    const result = toApply.length ? "applied" : "replayed";
+    const confirmation = { result, applied:toApply.length, alreadyMapped, pending:unresolvedPending, pendingAmount:unresolvedPendingAmount };
+    await client.query(
+      `update import_batches set status='imported',confirmed_by=$2,confirmed_at=$3,event_count=$4,reconciliation_count=$5,
+         reconciliation_summary=reconciliation_summary||jsonb_build_object('confirmation',$6::jsonb)
+       where id=$1`,
+      [batchId, actorUserId, confirmedAt, toApply.length, alreadyMapped, JSON.stringify(confirmation)],
+    );
+    await client.query(
+      `insert into audit_logs(actor_user_id,action,entity_type,entity_id,after_data,ip_address)
+       values($1,'import.dimension_backfill_confirmed','import_batch',$2,
+         jsonb_build_object('sourceSha256',$3::text,'confirmedAt',$4::text,'result',$5::text,'applied',$6::int,'alreadyMapped',$7::int,'pending',$8::int,'pendingAmount',$9::numeric),$10)`,
+      [actorUserId, batchId, sourceHash, confirmedAt, result, toApply.length, alreadyMapped, unresolvedPending, unresolvedPendingAmount, ipAddress],
+    );
+    await client.query("commit");
+    return { batchId, replayed:false, applied:toApply.length, alreadyMapped, pending:unresolvedPending };
+  } catch (error) {
+    await client.query("rollback");
+    if (attempted) {
+      const terminal = error instanceof ImportJobError;
+      const result = terminal ? "blocked" : "retryable";
+      await database.query(
+        `with failed as (
+           update import_batches set status=case when $7::boolean then 'failed' else status end,anomalies=anomalies||$3::jsonb
+           where id=$1 and status='preflight_ready' returning id
+         )
+         insert into audit_logs(actor_user_id,action,entity_type,entity_id,after_data,ip_address)
+         select $2,'import.dimension_backfill_confirm_failed','import_batch',$1,
+                jsonb_build_object('sourceSha256',$4::text,'confirmedAt',$5::text,'result',$8::text),$6
+         from failed`,
+        [batchId, actorUserId, JSON.stringify([{ code:terminal ? "CONFIRM_BLOCKED" : "CONFIRM_RETRYABLE", severity:terminal ? "blocking" : "warning", message:terminal ? "受控来源或并发冲突，整批已回滚" : "临时确认失败，正式维度已回滚，可重试" }]),
+         sourceHash, new Date().toISOString(), ipAddress, terminal, result],
+      );
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 export async function confirmImportBatch(database: Database, batchId: string, actorUserId: string, confirmedWarnings: readonly string[], ipAddress = "127.0.0.1") {
   const client = await database.connect();
   let ledgerAttempted = false;
@@ -888,19 +1320,21 @@ export async function confirmImportBatch(database: Database, batchId: string, ac
     const now = new Date();
     const found = await client.query<{
       status: string;
+      purpose: string;
       warning_count: number;
       anomalies: ImportIssue[];
       imported_orders: number;
       imported_events: number;
       reconciled_events: number;
     }>(
-      `select status,warning_count,anomalies,order_count as imported_orders,event_count as imported_events,
+      `select status,purpose,warning_count,anomalies,order_count as imported_orders,event_count as imported_events,
               reconciliation_count as reconciled_events
        from import_batches where id=$1 for update`,
       [batchId],
     );
     const batch = found.rows[0];
     if (!batch) throw new ImportJobError("导入批次不存在");
+    if (batch.purpose !== "ledger_import") throw new ImportJobError("当前批次不是业绩入账批次");
     if (batch.status === "imported") {
       await client.query("rollback");
       return { batchId, replayed: true, orders: batch.imported_orders, events: batch.imported_events, reconciliations: batch.reconciled_events };

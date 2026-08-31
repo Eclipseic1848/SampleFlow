@@ -1,5 +1,8 @@
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
+import { parseImportWorkbook, type ImportLayout } from "../../api/src/domain/performance-import-xlsx.js";
 import { seedTestUser } from "../../api/src/test-support/fixtures.js";
 import { expect, test } from "./full-stack.js";
 
@@ -86,6 +89,55 @@ test("销售助理组长可用标准模板预检并确认整批入账", async ({
       await expect(page.getByRole("row",{name:/2026-03.*1.*100\.00/})).toBeVisible();
       await page.getByRole("button",{name:"确认整批入账"}).click();
       await expect(page.getByRole("heading",{name:"Excel 批量导入"})).toBeHidden();await expect(page.getByText("001-A",{exact:true})).toBeVisible();
+});
+
+test("销售助理组长可在桌面端预检并确认合成历史分析维度补齐", async ({ database, page }) => {
+    await seedTestUser(database.url,{username:"e2e_backfill_leader",displayName:"E2E 补齐组长",password:"E2ePass@123",roleCode:"sales_assistant_leader",roleName:"销售助理组长"});
+    const sourceBytes=await readFile(importTemplate);const sourceHash=createHash("sha256").update(sourceBytes).digest("hex");
+    const client=new Client({connectionString:database.url});await client.connect();
+    try{
+      const standard=await client.query<{sheet_name:string;expected_headers:unknown[];column_mapping:ImportLayout["columnMapping"]}>("select sheet_name,expected_headers,column_mapping from import_configs where config_key='standard-performance'");
+      const columnMapping={...standard.rows[0]!.column_mapping};delete columnMapping.sourceRecordId;delete columnMapping.eventType;
+      const parsed=await parseImportWorkbook("SampleFlow标准业绩导入模板.xlsx",sourceBytes,{sheetName:standard.rows[0]!.sheet_name,expectedHeaders:standard.rows[0]!.expected_headers,columnMapping,personMapping:{},fixedEventType:"legacy_adjustment"});
+      const source=parsed[0]!;
+      const salesperson=await client.query<{id:string}>("insert into people(display_name,identity_source,source_key) values('补齐示例业务员','e2e',$1) returning id::text",[source.salespersonSourceKey]);
+      const order=await client.query<{id:string}>(
+        `insert into performance_orders(qingflow_order_no,customer_name,customer_unit,salesperson_name,service_type,
+           source_received_on,original_amount,current_revenue,counted_amount,lifecycle_state,salesperson_person_id,posted_at)
+         values($1,$2,'旧单位','补齐示例业务员','旧服务',$3,$4,$4,$4,'active',$5,now()) returning id::text`,
+        [source.orderNo,source.customerName,source.occurredOn,source.amount,salesperson.rows[0]!.id],
+      );
+      await client.query("begin");await client.query("set local session_replication_role=replica");
+      const event=await client.query<{id:string}>(
+        `insert into performance_events(order_id,event_type,delta_amount,resulting_current_revenue,resulting_counted_amount,
+           accounting_month,occurred_on,reason,salesperson_name,department_name,group_name,source_row_number,salesperson_person_id,order_sequence)
+         values($1,'legacy_adjustment',$2,$2,$2,date_trunc('month',$3::date)::date,$3,$4,'补齐示例业务员','合成销售部','合成销售组',$5,$6,1)
+         returning id::text`,
+        [order.rows[0]!.id,source.amount,source.occurredOn,source.reason,source.rowNumber,salesperson.rows[0]!.id],
+      );
+      await client.query(
+        `insert into legacy_event_source_evidence(event_id,source_file_sha256,source_sheet,source_row_number,source_key)
+         values($1,$2,$3,$4,$5)`,
+        [event.rows[0]!.id,sourceHash,source.sheet,source.rowNumber,`legacy:${sourceHash}:${source.sheet}:${source.rowNumber}`],
+      );
+      await client.query("commit");
+      await client.query(
+        `insert into import_configs(config_key,version,name,status,sheet_name,expected_headers,column_mapping,allowed_event_types,
+           business_region_mapping,fixed_event_type,allow_legacy_source_key,approved_at)
+         values('e2e-dimension-backfill',1,'E2E 历史维度补齐','approved',$1,$2::jsonb,$3::jsonb,'["legacy_adjustment"]'::jsonb,
+           $4::jsonb,'legacy_adjustment',true,now())`,
+        [standard.rows[0]!.sheet_name,JSON.stringify(standard.rows[0]!.expected_headers),JSON.stringify(columnMapping),JSON.stringify({[source.businessRegionSourceText]:"EXT-TRADE"})],
+      );
+      await page.setViewportSize({width:1280,height:900});await page.goto("/");await page.getByLabel("账号").fill("e2e_backfill_leader");await page.getByLabel("密码",{exact:true}).fill("E2ePass@123");await page.getByRole("button",{name:"进入 SampleFlow"}).click();
+      await page.getByRole("button",{name:"订单业绩",exact:true}).click();await page.getByRole("button",{name:"Excel 导入"}).click();
+      await page.getByLabel("历史分析维度补齐").check();await expect(page.getByText("上传原始受控工作簿",{exact:false})).toBeVisible();
+      await page.locator('input[type="file"]').setInputFiles(importTemplate);await page.getByRole("button",{name:"运行只读预检"}).click();
+      await expect(page.getByRole("heading",{name:"预检通过，等待确认"})).toBeVisible();await expect(page.getByRole("heading",{name:"来源对账"})).toBeVisible();
+      await expect(page.getByRole("row",{name:new RegExp(`${source.rowNumber}.*可补齐.*EXT-TRADE.*${source.customerUnit}`)})).toBeVisible();
+      await page.getByRole("button",{name:"确认补齐分析维度"}).click();await expect(page.getByRole("heading",{name:"Excel 批量导入"})).toBeHidden();
+      const dimensions=await client.query<{business_region_code:string;business_region_source_text:string;customer_unit:string}>("select business_region_code,business_region_source_text,customer_unit from performance_event_analysis_dimensions where event_id=$1",[event.rows[0]!.id]);
+      expect(dimensions.rows[0]).toEqual({business_region_code:"EXT-TRADE",business_region_source_text:source.businessRegionSourceText,customer_unit:source.customerUnit});
+    }finally{await client.query("rollback").catch(()=>{});await client.end();}
 });
 
 test("订单台账以前后游标稳定浏览并在刷新后开启新快照", async ({ database, page }) => {

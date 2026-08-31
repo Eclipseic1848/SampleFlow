@@ -125,9 +125,10 @@ test("导入配置草稿与批准遵守销售助理组长/人事职责分离", a
       assert.equal(deniedList.statusCode, 403);
       const visible = await app.inject({ method: "GET", url: "/api/imports/configs", headers: assistant });
       assert.equal(visible.statusCode, 200, visible.body);
-      const visibleConfigs = visible.json<{ configs: { id: string; status: string; name:string; requiredColumns:string[]; expectedReconciliation?: unknown }[] }>().configs;
+      const visibleConfigs = visible.json<{ configs: { id: string; status: string; name:string; requiredColumns:string[]; expectedReconciliation?: unknown; fixedEventType?:string|null }[] }>().configs;
       assert.ok(visibleConfigs.some((item) => item.id === id && item.status === "approved" && item.name === "线下格式修订" && item.requiredColumns.includes("orderNo")));
       assert.deepEqual(visibleConfigs.find((item) => item.id === historicalId)?.expectedReconciliation, historicalConfig.expectedReconciliation);
+      assert.equal(visibleConfigs.find((item) => item.id === historicalId)?.fixedEventType, "legacy_adjustment");
     });
   });
 });

@@ -322,6 +322,7 @@ th { color: #68778a; background: #fafbfc; font-weight: 600; }
 .modal-actions button { width: auto; height: 40px; margin: 0; border: 1px solid var(--line); border-radius: 6px; color: #39495d; background: #fff; }
 .modal-actions button[type="submit"] { border-color: var(--blue); color: #fff; background: var(--blue); }
 .import-form { display: grid; gap: 18px; }
+.import-mode { margin: 0; padding: 0; border: 0; display: flex; gap: 18px; } .import-mode legend { margin-bottom: 8px; color: var(--muted); font-size: 12px; } .import-mode label { display: flex; align-items: center; gap: 7px; color: var(--navy); font-size: 13px; font-weight: 700; cursor: pointer; } .import-mode input { width: 16px; height: 16px; }
 .import-guidance { padding: 12px 14px; border-left: 3px solid var(--blue); background: #edf4ff; display: grid; gap: 5px; }
 .import-guidance a { width: fit-content; color: var(--blue); font-size: 13px; font-weight: 700; }
 .import-guidance span { color: #526175; font-size: 12px; }
