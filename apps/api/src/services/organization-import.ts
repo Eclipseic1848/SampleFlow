@@ -236,20 +236,13 @@ export async function applyOrganizationImport(database:Database, input:Organizat
     );
     const orders = await client.query(
       `with resolved as (
-         select order_id,min(salesperson_person_id) as person_id
-         from performance_events where event_type='legacy_adjustment' group by order_id
-         having count(distinct salesperson_person_id)=1
+         select distinct on (order_id) order_id,salesperson_person_id as person_id,salesperson_name
+         from performance_events where event_type='legacy_adjustment' and salesperson_person_id is not null
+         order by order_id,occurred_on desc,source_row_number desc,id desc
        )
-       update performance_orders o set salesperson_person_id=r.person_id
-       from resolved r where o.id=r.order_id and o.salesperson_person_id is null`,
+       update performance_orders o set salesperson_person_id=r.person_id,salesperson_name=r.salesperson_name
+       from resolved r where o.id=r.order_id`,
     );
-    const conflictingOrders = await client.query<{count:string}>(
-      `select count(*)::text as count from (
-         select order_id from performance_events where event_type='legacy_adjustment'
-         group by order_id having count(distinct salesperson_person_id)<>1
-       ) conflict`,
-    );
-    if (Number(conflictingOrders.rows[0]!.count)>0) throw new Error(`存在 ${conflictingOrders.rows[0]!.count} 笔订单关联多个或零个人员身份`);
     const amountAfter = await client.query<{amount:string}>("select coalesce(sum(delta_amount),0)::text as amount from performance_events where event_type='legacy_adjustment'");
     if (amountBefore.rows[0]!.amount!==amountAfter.rows[0]!.amount) throw new Error("组织回填改变了历史业绩金额");
 

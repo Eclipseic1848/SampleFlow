@@ -138,3 +138,52 @@ test("组织初始化可重放，保留金额并拒绝同来源替换映射", as
     }
   });
 });
+
+test("组织回填允许历史订单更换业务员并以最后一条作为当前业务员", async () => {
+  await withMigratedTestDatabase(async (database) => {
+    const pool = new Pool({ connectionString:database.url });
+    try {
+      const order = await pool.query<{id:string}>(
+        `insert into performance_orders(qingflow_order_no,customer_name,customer_unit,salesperson_name,source_received_on,
+           original_amount,current_revenue,counted_amount,lifecycle_state,posted_at)
+         values('TRANSFER-1','客户','单位','导入甲','2026-01-02',100,80,80,'active',now()) returning id::text`,
+      );
+      await pool.query(
+        `insert into performance_events(order_id,event_type,delta_amount,resulting_current_revenue,resulting_counted_amount,
+           accounting_month,occurred_on,reason,salesperson_name,department_name,group_name,source_row_number)
+         values($1,'legacy_adjustment',100,100,100,'2026-01-01','2026-01-02','历史导入','导入甲','一部','一组',2),
+               ($1,'legacy_adjustment',-20,80,80,'2026-01-01','2026-01-03','历史调整','导入乙','二部','二组',3)`,
+        [order.rows[0]!.id],
+      );
+      await pool.query(
+        `insert into legacy_import_runs(source_file,source_sha256,source_rows,imported_orders,imported_events)
+         values('fixture.xlsx','source-a',2,1,2)`,
+      );
+
+      const report = await applyOrganizationImport(pool,input());
+      assert.equal(report.backfilledOrders,1);
+      assert.equal(report.backfilledEvents,2);
+      const current = await pool.query<{ salesperson_name:string; person_name:string }>(
+        `select performance_order.salesperson_name,person.display_name person_name
+         from performance_orders performance_order join people person on person.id=performance_order.salesperson_person_id
+         where performance_order.id=$1`,
+        [order.rows[0]!.id],
+      );
+      assert.deepEqual(current.rows[0],{ salesperson_name:"导入乙",person_name:"导入乙" });
+      const events = await pool.query<{source_row_number:number;person_name:string;department_name:string;group_name:string}>(
+        `select event.source_row_number::int,person.display_name person_name,department.name department_name,work_group.name group_name
+         from performance_events event join people person on person.id=event.salesperson_person_id
+         join org_units department on department.id=event.department_unit_id
+         join org_units work_group on work_group.id=event.group_unit_id
+         where event.order_id=$1 order by event.source_row_number`,
+        [order.rows[0]!.id],
+      );
+      assert.deepEqual(events.rows,[
+        { source_row_number:2,person_name:"导入甲",department_name:"一部",group_name:"一组" },
+        { source_row_number:3,person_name:"导入乙",department_name:"二部",group_name:"二组" },
+      ]);
+    } finally {
+      await pool.end();
+    }
+  });
+});
