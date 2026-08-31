@@ -5,6 +5,8 @@ import { checkDatabaseSchema, db } from "./db.js";
 try {
   await checkDatabaseSchema();
   const app = await buildApp();
+  const e2eReadyToken = process.env.NODE_ENV === "test" ? process.env.SAMPLEFLOW_E2E_READY_TOKEN : undefined;
+  if (e2eReadyToken) app.get("/api/__e2e/ready", async () => ({ token: e2eReadyToken }));
 
   const close = async () => {
     await app.close();

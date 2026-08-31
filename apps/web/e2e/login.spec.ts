@@ -1,34 +1,10 @@
-import { spawn } from "node:child_process";
-import { once } from "node:events";
 import { fileURLToPath } from "node:url";
-import { expect, test } from "@playwright/test";
 import pg from "pg";
 import { seedTestUser } from "../../api/src/test-support/fixtures.js";
-import { withMigratedTestDatabase } from "../../api/src/test-support/test-database.js";
+import { expect, test } from "./full-stack.js";
 
-const apiRoot = fileURLToPath(new URL("../../api/", import.meta.url));
 const { Client } = pg;
-const apiPort=process.env.SAMPLEFLOW_E2E_API_PORT;
-const webPort=process.env.SAMPLEFLOW_E2E_WEB_PORT;
-if(!apiPort||!webPort)throw new Error("缺少隔离 E2E 端口");
-const apiBaseUrl=`http://127.0.0.1:${apiPort}`;
-const webBaseUrl=`http://127.0.0.1:${webPort}`;
 const importTemplate=fileURLToPath(new URL("../public/SampleFlow标准业绩导入模板.xlsx",import.meta.url));
-
-async function waitForApi(url: string, exited: () => boolean): Promise<void> {
-  const deadline = Date.now() + 15_000;
-  while (Date.now() < deadline) {
-    if (exited()) throw new Error("测试 API 在就绪前退出");
-    try {
-      const response = await fetch(url);
-      if (response.ok) return;
-    } catch {
-      // API 尚未监听时继续等待。
-    }
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error("等待测试 API 就绪超时");
-}
 
 test("API 返回空 502 时登录页显示服务不可用而不是 JSON 解析错误", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
@@ -58,8 +34,7 @@ test("API 返回空 502 时登录页显示服务不可用而不是 JSON 解析�
   await expect(page.getByRole("alert")).not.toContainText("Unexpected end of JSON input");
 });
 
-test("销售助理可通过真实 API 登录", async ({ page }) => {
-  await withMigratedTestDatabase(async (database) => {
+test("销售助理可通过真实 API 登录", async ({ database, page }) => {
     await seedTestUser(database.url, {
       username: "e2e_sales_assistant",
       displayName: "E2E 销售助理",
@@ -68,20 +43,6 @@ test("销售助理可通过真实 API 登录", async ({ page }) => {
       roleName: "销售助理",
     });
 
-    const api = spawn(process.execPath, ["--import", "tsx", "src/server.ts"], {
-      cwd: apiRoot,
-      env: {
-        ...process.env,
-        API_PORT: apiPort,
-        APP_ORIGINS: webBaseUrl,
-        DATABASE_URL: database.url,
-        NODE_ENV: "test",
-      },
-      stdio: "ignore",
-    });
-
-    try {
-      await waitForApi(`${apiBaseUrl}/api/ready`, () => api.exitCode !== null);
       const guestResponse = page.waitForResponse((response) => response.url().endsWith("/api/auth/me"));
       await page.goto("/");
       expect((await guestResponse).status()).toBe(401);
@@ -100,17 +61,9 @@ test("销售助理可通过真实 API 登录", async ({ page }) => {
       expect((await loginResponse).status()).toBe(200);
       expect((await dashboardResponse).status()).toBe(200);
       await expect(page.getByRole("heading", { name: "业绩账本总览" })).toBeVisible();
-    } finally {
-      if (api.exitCode === null) {
-        api.kill();
-        await once(api, "exit");
-      }
-    }
-  });
 });
 
-test("销售助理组长可用标准模板预检并确认整批入账", async ({ page }) => {
-  await withMigratedTestDatabase(async (database) => {
+test("销售助理组长可用标准模板预检并确认整批入账", async ({ database, page }) => {
     await seedTestUser(database.url,{username:"e2e_import_leader",displayName:"E2E 导入组长",password:"E2ePass@123",roleCode:"sales_assistant_leader",roleName:"销售助理组长"});
     const hr=await seedTestUser(database.url,{username:"e2e_import_hr",displayName:"E2E 导入人事",password:"E2ePass@123",roleCode:"hr",roleName:"人事部"});
     const client=new Client({connectionString:database.url});await client.connect();
@@ -123,9 +76,6 @@ test("销售助理组长可用标准模板预检并确认整批入账", async ({
       await client.query("insert into org_memberships(person_id,department_id,group_id,effective_from) values($1,$2,$3,'2026-01-01')",[personId("示例业务员"),department.rows[0]!.id,group.rows[0]!.id]);
       await client.query("update import_configs set status='approved',business_region_mapping='{\"外贸\":\"EXT-TRADE\"}',approved_by=$1,approved_at=now() where config_key='standard-performance'",[hr]);
     }finally{await client.end();}
-    const api=spawn(process.execPath,["--import","tsx","src/server.ts"],{cwd:apiRoot,env:{...process.env,API_PORT:apiPort,APP_ORIGINS:webBaseUrl,DATABASE_URL:database.url,NODE_ENV:"test"},stdio:"ignore"});
-    try{
-      await waitForApi(`${apiBaseUrl}/api/ready`,()=>api.exitCode!==null);
       await page.setViewportSize({width:390,height:844});
       await page.goto("/");await page.getByLabel("账号").fill("e2e_import_leader");await page.getByLabel("密码",{exact:true}).fill("E2ePass@123");await page.getByRole("button",{name:"进入 SampleFlow"}).click();
       await page.getByRole("button",{name:"订单业绩",exact:true}).click();await page.getByRole("button",{name:"Excel 导入"}).click();
@@ -136,12 +86,9 @@ test("销售助理组长可用标准模板预检并确认整批入账", async ({
       await expect(page.getByRole("row",{name:/2026-03.*1.*100\.00/})).toBeVisible();
       await page.getByRole("button",{name:"确认整批入账"}).click();
       await expect(page.getByRole("heading",{name:"Excel 批量导入"})).toBeHidden();await expect(page.getByText("001-A",{exact:true})).toBeVisible();
-    }finally{if(api.exitCode===null){api.kill();await once(api,"exit");}}
-  });
 });
 
-test("首次登录用户看到密码强度并完成改密", async ({ page }) => {
-  await withMigratedTestDatabase(async (database) => {
+test("首次登录用户看到密码强度并完成改密", async ({ database, page }) => {
     await seedTestUser(database.url, {
       username: "e2e_password_change",
       displayName: "E2E 首次改密用户",
@@ -151,20 +98,6 @@ test("首次登录用户看到密码强度并完成改密", async ({ page }) => 
       roleName: "销售助理",
     });
 
-    const api = spawn(process.execPath, ["--import", "tsx", "src/server.ts"], {
-      cwd: apiRoot,
-      env: {
-        ...process.env,
-        API_PORT: apiPort,
-        APP_ORIGINS: webBaseUrl,
-        DATABASE_URL: database.url,
-        NODE_ENV: "test",
-      },
-      stdio: "ignore",
-    });
-
-    try {
-      await waitForApi(`${apiBaseUrl}/api/ready`, () => api.exitCode !== null);
       await page.setViewportSize({ width: 390, height: 844 });
       await page.goto("/");
       await page.getByLabel("账号").fill("e2e_password_change");
@@ -201,17 +134,9 @@ test("首次登录用户看到密码强度并完成改密", async ({ page }) => 
       await page.getByRole("button", { name: "保存新密码" }).click();
       await dashboardResponse;
       await expect(page.getByRole("heading", { name: "业绩账本总览" })).toBeVisible();
-    } finally {
-      if (api.exitCode === null) {
-        api.kill();
-        await once(api, "exit");
-      }
-    }
-  });
 });
 
-test("系统管理员在账号管理页查看只读角色权限说明", async ({ page }) => {
-  await withMigratedTestDatabase(async (database) => {
+test("系统管理员在账号管理页查看只读角色权限说明", async ({ database, page }) => {
     await seedTestUser(database.url, {
       username: "e2e_system_admin",
       displayName: "E2E 系统管理员",
@@ -220,20 +145,6 @@ test("系统管理员在账号管理页查看只读角色权限说明", async ({
       roleName: "系统管理员",
     });
 
-    const api = spawn(process.execPath, ["--import", "tsx", "src/server.ts"], {
-      cwd: apiRoot,
-      env: {
-        ...process.env,
-        API_PORT: apiPort,
-        APP_ORIGINS: webBaseUrl,
-        DATABASE_URL: database.url,
-        NODE_ENV: "test",
-      },
-      stdio: "ignore",
-    });
-
-    try {
-      await waitForApi(`${apiBaseUrl}/api/ready`, () => api.exitCode !== null);
       await page.setViewportSize({ width: 390, height: 844 });
       await page.goto("/");
       await page.getByLabel("账号").fill("e2e_system_admin");
@@ -257,17 +168,9 @@ test("系统管理员在账号管理页查看只读角色权限说明", async ({
 
       const matrixScroller = page.locator(".permission-matrix-card .orders-table-wrap");
       expect(await matrixScroller.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true);
-    } finally {
-      if (api.exitCode === null) {
-        api.kill();
-        await once(api, "exit");
-      }
-    }
-  });
 });
 
-test("目标未生效时页面不提供正式报表，生效后才可查看", async ({ page }) => {
-  await withMigratedTestDatabase(async (database) => {
+test("目标未生效时页面不提供正式报表，生效后才可查看", async ({ database, page }) => {
     const userId = await seedTestUser(database.url, {
       username: "e2e_salesperson_report",
       displayName: "E2E 业务员",
@@ -295,14 +198,6 @@ test("目标未生效时页面不提供正式报表，生效后才可查看", as
     );
     await client.end();
 
-    const api = spawn(process.execPath, ["--import", "tsx", "src/server.ts"], {
-      cwd: apiRoot,
-      env: { ...process.env, API_PORT: apiPort, APP_ORIGINS:webBaseUrl, DATABASE_URL: database.url, NODE_ENV: "test" },
-      stdio: "ignore",
-    });
-
-    try {
-      await waitForApi(`${apiBaseUrl}/api/ready`, () => api.exitCode !== null);
       await page.goto("/");
       await page.getByLabel("账号").fill("e2e_salesperson_report");
       await page.getByLabel("密码", { exact: true }).fill("Report@123");
@@ -320,18 +215,10 @@ test("目标未生效时页面不提供正式报表，生效后才可查看", as
       await expect(page.getByRole("heading", { name: "正式业绩报表" })).toBeVisible();
       await expect(page.getByText("目标已生效，达成率按该层级目标独立计算")).toBeVisible();
       await expect(page.getByRole("dialog").getByText("¥1,000.00", { exact: true })).toBeVisible();
-    } finally {
-      if (api.exitCode === null) {
-        api.kill();
-        await once(api, "exit");
-      }
-    }
-  });
 });
 
-test("销售经理可从选择器创建顶层目标并完成总经理到人事审批", async ({ page }) => {
+test("销售经理可从选择器创建顶层目标并完成总经理到人事审批", async ({ database, page }) => {
   test.slow();
-  await withMigratedTestDatabase(async (database) => {
     const managerId=await seedTestUser(database.url,{username:"e2e_goal_manager",displayName:"E2E 销售经理",password:"Goal@123",roleCode:"sales_manager",roleName:"销售经理"});
     const supervisorId=await seedTestUser(database.url,{username:"e2e_goal_supervisor",displayName:"E2E 业务主管",password:"Goal@123",roleCode:"sales_supervisor",roleName:"业务主管"});
     await seedTestUser(database.url,{username:"e2e_goal_gm",displayName:"E2E 总经理",password:"Goal@123",roleCode:"general_manager",roleName:"总经理"});
@@ -347,13 +234,10 @@ test("销售经理可从选择器创建顶层目标并完成总经理到人事�
       await setup.query("update org_units set is_active=true where id=$1",[department.rows[0]!.id]);
     }finally{await setup.end();}
 
-    const api=spawn(process.execPath,["--import","tsx","src/server.ts"],{cwd:apiRoot,env:{...process.env,API_PORT:apiPort,APP_ORIGINS:webBaseUrl,DATABASE_URL:database.url,NODE_ENV:"test"},stdio:"ignore"});
     const login=async(username:string)=>{await page.getByLabel("账号").fill(username);await page.getByLabel("密码",{exact:true}).fill("Goal@123");await page.getByRole("button",{name:"进入 SampleFlow"}).click();};
     const logout=async()=>{await page.getByRole("button",{name:"退出登录"}).click();await expect(page.getByRole("heading",{name:"登录系统"})).toBeVisible();};
-    try{
       let delayedGoalOptions=false;
       await page.route("**/api/goals/options?*",async(route)=>{if(!delayedGoalOptions&&route.request().url().includes("periodMonth=2026-11")&&route.request().url().includes("level=sales_manager")){delayedGoalOptions=true;await new Promise((resolve)=>setTimeout(resolve,6000));}await route.continue();});
-      await waitForApi(`${apiBaseUrl}/api/ready`,()=>api.exitCode!==null);
       await page.goto("/");await login("e2e_goal_manager");await expect(page.getByRole("button",{name:"目标管理"})).toBeVisible();
       const illegalRoot=await page.evaluate(async({ownerPersonId})=>{const csrf=document.cookie.split("; ").find((item)=>item.startsWith("sampleflow_csrf="))?.split("=")[1]??"";const response=await fetch("/api/goals",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":decodeURIComponent(csrf)},body:JSON.stringify({periodMonth:"2026-11",level:"sales_manager",ownerPersonId:Number(ownerPersonId),orgUnitId:null,parentGoalId:999999,amount:1000,changeReason:"非法顶层父目标"})});return{status:response.status,body:await response.text()};},{ownerPersonId:managerPersonId});
       expect(illegalRoot.status).toBe(400);expect(illegalRoot.body).not.toMatch(/constraint|foreign key/i);
@@ -395,13 +279,10 @@ test("销售经理可从选择器创建顶层目标并完成总经理到人事�
       await page.getByLabel("目标金额").fill("800");await page.getByLabel("下达原因").fill("部门十一月目标");
       await page.getByRole("button",{name:"提交待确认"}).click();
       await expect(page.getByRole("row").filter({hasText:"E2E 业务主管"})).toContainText("待责任人签名");
-    }finally{if(api.exitCode===null){api.kill();await once(api,"exit");}}
-  });
 });
 
-test("目标修改申请在审批中心完成填金额、重签、终审和联动选择",async({page})=>{
+test("目标修改申请在审批中心完成填金额、重签、终审和联动选择",async({database,page})=>{
   test.slow();
-  await withMigratedTestDatabase(async(database)=>{
     const users={
       manager:await seedTestUser(database.url,{username:"e2e_change_manager",displayName:"E2E 变更经理",password:"Goal@123",roleCode:"sales_manager",roleName:"销售经理"}),
       supervisor:await seedTestUser(database.url,{username:"e2e_change_supervisor",displayName:"E2E 变更主管",password:"Goal@123",roleCode:"sales_supervisor",roleName:"业务主管"}),
@@ -424,11 +305,9 @@ test("目标修改申请在审批中心完成填金额、重签、终审和联�
       const personalGoal=await setup.query<{id:string}>("insert into goals(period_month,goal_level,owner_user_id,owner_person_id,parent_goal_id) values('2026-12-01','personal',$1,$2,$3) returning id::text",[users.salesperson,person(users.salesperson),groupGoal.rows[0]!.id]);
       for(const [goalId,amount,creator,owner] of [[top.rows[0]!.id,1000,users.manager,users.manager],[departmentGoal.rows[0]!.id,800,users.manager,users.supervisor],[groupGoal.rows[0]!.id,600,users.supervisor,users.leader],[personalGoal.rows[0]!.id,400,users.leader,users.salesperson]] as const){await setup.query("insert into goal_versions(goal_id,version_no,amount,status,created_by,created_by_person_id,signed_by,signed_by_person_id,signed_at,signature_text,change_reason) values($1,1,$2,'active',$3,$4,$5,$6,now(),'初始确认','E2E 变更初始目标')",[goalId,amount,creator,person(creator),owner,person(owner)]);}
     }finally{await setup.end();}
-    const api=spawn(process.execPath,["--import","tsx","src/server.ts"],{cwd:apiRoot,env:{...process.env,API_PORT:apiPort,APP_ORIGINS:webBaseUrl,DATABASE_URL:database.url,NODE_ENV:"test"},stdio:"ignore"});
     const login=async(username:string)=>{await page.getByLabel("账号").fill(username);await page.getByLabel("密码",{exact:true}).fill("Goal@123");await page.getByRole("button",{name:"进入 SampleFlow"}).click();};
     const logout=async()=>{await page.getByRole("button",{name:"退出登录"}).click();await expect(page.getByRole("heading",{name:"登录系统"})).toBeVisible();};
-    try{
-      await waitForApi(`${apiBaseUrl}/api/ready`,()=>api.exitCode!==null);await page.goto("/");
+      await page.goto("/");
       await login("e2e_change_salesperson");await page.getByRole("button",{name:"目标管理"}).click();
       const personalRow=page.getByRole("row").filter({hasText:"E2E 变更业务员"});await personalRow.getByRole("button",{name:"申请修改"}).click();
       await page.getByLabel("修改原因").fill("客户结构发生变化");await page.getByLabel("建议金额（可选）").fill("450");await page.getByRole("button",{name:"提交修改申请"}).click();
@@ -473,26 +352,15 @@ test("目标修改申请在审批中心完成填金额、重签、终审和联�
       await page.getByLabel("处理方式").selectOption("adjust_parent");await page.getByLabel("联动原因").fill("需要同步调整小组目标");await page.getByRole("button",{name:"确认联动选择"}).click();
       const changeCard=page.locator("section.workflow-card").filter({has:page.getByRole("heading",{name:"目标修改申请"})});
       await expect(changeCard.getByRole("row").filter({hasText:"E2E 变更组长"}).filter({hasText:"需要同步调整小组目标"})).toContainText("待处理");
-    }finally{if(api.exitCode===null){api.kill();await once(api,"exit");}}
-  });
 });
 
-test("系统管理员通过页面办理组织异动并保留前后有效期", async ({ page }) => {
-  await withMigratedTestDatabase(async (database) => {
+test("系统管理员通过页面办理组织异动并保留前后有效期", async ({ database, page }) => {
     await seedTestUser(database.url,{username:"e2e_org_admin",displayName:"E2E 组织管理员",password:"OrgAdmin@123",roleCode:"system_admin",roleName:"系统管理员"});
     await seedTestUser(database.url,{username:"e2e_org_assistant",displayName:"E2E 异动销售助理",password:"OrgAssistant@123",roleCode:"sales_assistant",roleName:"销售助理"});
     await seedTestUser(database.url,{username:"e2e_org_member",displayName:"E2E 异动业务员",password:"OrgMember@123",roleCode:"salesperson",roleName:"业务员"});
     await seedTestUser(database.url,{username:"e2e_org_leader",displayName:"E2E 异动组长",password:"OrgLeader@123",roleCode:"sales_leader",roleName:"业务员组长"});
     await seedTestUser(database.url,{username:"e2e_org_supervisor",displayName:"E2E 异动主管",password:"OrgSupervisor@123",roleCode:"sales_supervisor",roleName:"业务主管"});
 
-    const api=spawn(process.execPath,["--import","tsx","src/server.ts"],{
-      cwd:apiRoot,
-      env:{...process.env,API_PORT:apiPort,APP_ORIGINS:webBaseUrl,DATABASE_URL:database.url,NODE_ENV:"test"},
-      stdio:"ignore",
-    });
-
-    try{
-      await waitForApi(`${apiBaseUrl}/api/ready`,()=>api.exitCode!==null);
       await page.goto("/");
       await page.getByLabel("账号").fill("e2e_org_admin");
       await page.getByLabel("密码",{exact:true}).fill("OrgAdmin@123");
@@ -566,15 +434,10 @@ test("系统管理员通过页面办理组织异动并保留前后有效期", as
       await expect(events).toHaveCount(2);
       await expect(events.nth(0)).toContainText("E2E 原部门 / E2E 原小组");
       await expect(events.nth(1)).toContainText("E2E 新部门 / E2E 新小组");
-    }finally{
-      if(api.exitCode===null){api.kill();await once(api,"exit");}
-    }
-  });
 });
 
-test("订单搜索与不可变事件链在浏览器和数据库中保持一致", async ({ page },testInfo) => {
+test("订单搜索与不可变事件链在浏览器和数据库中保持一致", async ({ database, page },testInfo) => {
   test.slow();
-  await withMigratedTestDatabase(async (database) => {
     await seedTestUser(database.url, {
       username: "e2e_ledger_assistant",
       displayName: "E2E 账本销售助理",
@@ -628,14 +491,6 @@ test("订单搜索与不可变事件链在浏览器和数据库中保持一致",
       await setup.query("update org_units set is_active=true where id=any($1::bigint[])",[[department.rows[0]!.id,group.rows[0]!.id]]);
     }finally{await setup.end();}
 
-    const api = spawn(process.execPath, ["--import", "tsx", "src/server.ts"], {
-      cwd: apiRoot,
-      env: { ...process.env, API_PORT: apiPort, APP_ORIGINS:webBaseUrl, DATABASE_URL: database.url, NODE_ENV: "test" },
-      stdio: "ignore",
-    });
-
-    try {
-      await waitForApi(`${apiBaseUrl}/api/ready`, () => api.exitCode !== null);
       await page.goto("/");
       await page.getByLabel("账号").fill("e2e_ledger_assistant");
       await page.getByLabel("密码", { exact: true }).fill("Ledger@123");
@@ -739,11 +594,4 @@ test("订单搜索与不可变事件链在浏览器和数据库中保持一致",
         expect(result.rows.map((row)=>Number(row.delta_amount))).toEqual([110,-10,-100,100]);
         expect(result.rows.map((row)=>row.order_sequence)).toEqual([1,2,3,4]);
       }finally{await evidence.end();}
-    } finally {
-      if (api.exitCode === null) {
-        api.kill();
-        await once(api, "exit");
-      }
-    }
-  });
 });
