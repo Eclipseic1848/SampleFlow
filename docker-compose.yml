@@ -27,8 +27,8 @@ services:
       DB_HOST: db
       DB_PORT: 5432
       DB_NAME: ${POSTGRES_DB:-sampleflow}
-      DB_USER: ${POSTGRES_USER:-sampleflow}
-      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_USER: ${DB_APP_USER:?请设置 DB_APP_USER}
+      DB_PASSWORD: ${DB_APP_PASSWORD:?请设置 DB_APP_PASSWORD}
     depends_on:
       db:
         condition: service_healthy
@@ -49,12 +49,36 @@ services:
       DB_HOST: db
       DB_PORT: 5432
       DB_NAME: ${POSTGRES_DB:-sampleflow}
-      DB_USER: ${POSTGRES_USER:-sampleflow}
-      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_USER: ${DB_MIGRATION_USER:?请设置 DB_MIGRATION_USER}
+      DB_PASSWORD: ${DB_MIGRATION_PASSWORD:?请设置 DB_MIGRATION_PASSWORD}
     depends_on:
       db:
         condition: service_healthy
     command: ["node", "apps/api/dist/cli/migrate.js"]
+
+  db-provision-roles:
+    profiles: ["operations"]
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: "no"
+    environment:
+      NODE_ENV: production
+      DB_ADMIN_HOST: db
+      DB_ADMIN_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-sampleflow}
+      DB_ADMIN_USER: ${POSTGRES_USER:-sampleflow}
+      DB_ADMIN_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_MIGRATION_USER: ${DB_MIGRATION_USER:?请设置 DB_MIGRATION_USER}
+      DB_MIGRATION_PASSWORD: ${DB_MIGRATION_PASSWORD:?请设置 DB_MIGRATION_PASSWORD}
+      DB_APP_USER: ${DB_APP_USER:?请设置 DB_APP_USER}
+      DB_APP_PASSWORD: ${DB_APP_PASSWORD:?请设置 DB_APP_PASSWORD}
+      DB_BACKUP_USER: ${DB_BACKUP_USER:?请设置 DB_BACKUP_USER}
+      DB_BACKUP_PASSWORD: ${DB_BACKUP_PASSWORD:?请设置 DB_BACKUP_PASSWORD}
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["node", "apps/api/dist/cli/provision-database-roles.js"]
 
   admin-bootstrap:
     profiles: ["operations"]
@@ -67,8 +91,8 @@ services:
       DB_HOST: db
       DB_PORT: 5432
       DB_NAME: ${POSTGRES_DB:-sampleflow}
-      DB_USER: ${POSTGRES_USER:-sampleflow}
-      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_USER: ${DB_APP_USER:?请设置 DB_APP_USER}
+      DB_PASSWORD: ${DB_APP_PASSWORD:?请设置 DB_APP_PASSWORD}
       BOOTSTRAP_ADMIN_USERNAME: ${BOOTSTRAP_ADMIN_USERNAME:-sampleflow-admin}
     depends_on:
       db:
@@ -86,8 +110,8 @@ services:
       DB_HOST: db
       DB_PORT: 5432
       DB_NAME: ${POSTGRES_DB:-sampleflow}
-      DB_USER: ${POSTGRES_USER:-sampleflow}
-      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_USER: ${DB_APP_USER:?请设置 DB_APP_USER}
+      DB_PASSWORD: ${DB_APP_PASSWORD:?请设置 DB_APP_PASSWORD}
       IMPORT_SOURCE_FILE: /imports/source.xlsx
       IMPORT_CONFIG_ID: ${IMPORT_CONFIG_ID:-}
       IMPORT_OPERATOR_USER_ID: ${IMPORT_OPERATOR_USER_ID:-}
@@ -109,8 +133,8 @@ services:
       DB_HOST: db
       DB_PORT: 5432
       DB_NAME: ${POSTGRES_DB:-sampleflow}
-      DB_USER: ${POSTGRES_USER:-sampleflow}
-      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_USER: ${DB_APP_USER:?请设置 DB_APP_USER}
+      DB_PASSWORD: ${DB_APP_PASSWORD:?请设置 DB_APP_PASSWORD}
       IMPORT_BATCH_ID: ${IMPORT_BATCH_ID:-}
       IMPORT_OPERATOR_USER_ID: ${IMPORT_OPERATOR_USER_ID:-}
       IMPORT_CONFIRMED_WARNINGS: ${IMPORT_CONFIRMED_WARNINGS:-}
