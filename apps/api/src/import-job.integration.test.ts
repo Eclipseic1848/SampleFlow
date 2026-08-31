@@ -182,6 +182,108 @@ test("历史导入整体和逐月对账一致且重复执行不增加数据", as
   });
 });
 
+test("历史导入按行保存事件归属并以发生日期和来源行号更新订单当前投影", async () => {
+  await withMigratedTestDatabase(async (database) => {
+    const context = await fixture(database.url);
+    try {
+      const units = await context.pool.query<{ department_id: string; group_id: string }>(
+        `select department.id::text department_id,work_group.id::text group_id
+         from org_units department join org_units work_group on work_group.parent_id=department.id
+         where department.name='销售一部' and work_group.name='一组'`,
+      );
+      const second = await context.pool.query<{ id: string }>(
+        "insert into people(display_name,identity_source,source_key) values('业务员乙','fixture','person:b') returning id::text",
+      );
+      await context.pool.query(
+        "insert into org_memberships(person_id,department_id,group_id,effective_from) values($1,$2,$3,'2026-01-01')",
+        [second.rows[0]!.id, units.rows[0]!.department_id, units.rows[0]!.group_id],
+      );
+      const configId = await legacyConfig(context.pool);
+      await context.pool.query("update import_configs set business_region_mapping=$2::jsonb,expected_reconciliation=$3::jsonb where id=$1", [configId, JSON.stringify({ "江苏省":"CN-JS", "上海市":"CN-SH" }), JSON.stringify({
+        rows: 2, orders: 1, events: 2, totalAmount: 150,
+        monthly: [{ month: "2026-03", events: 2, totalAmount: 150 }],
+      })]);
+      const preflight = await preflightImportRows(context.pool, {
+        actorUserId: context.actorUserId,
+        configId,
+        sourceFileName: "legacy-owner-change.xlsx",
+        sourceBytes: Buffer.from("legacy-owner-change"),
+        rows: [
+          row({ sheet: "分子", sourceRecordId: undefined, businessSequence: 2, eventType: "legacy_adjustment" }),
+          row({ sheet: "分子", rowNumber: 3, sourceRecordId: undefined, businessSequence: 1, customerUnit: "单位乙", businessRegionSourceText: "上海市", salespersonSourceKey: "person:b", serviceType: "咨询", eventType: "legacy_adjustment", amount: 50 }),
+        ],
+      });
+      assert.equal(preflight.status, "preflight_ready", JSON.stringify(preflight.issues));
+      await confirmImportBatch(context.pool, preflight.batchId, context.actorUserId, []);
+      const result = await context.pool.query<{ customer_unit:string; business_region_source_text:string; business_region_code:string; salesperson_name:string; service_type:string; event_owners:string[] }>(
+        `select performance_order.customer_unit,performance_order.business_region_source_text,performance_order.business_region_code,
+                performance_order.salesperson_name,performance_order.service_type,
+                array_agg(event.salesperson_name order by event.occurred_on,event.source_row_number) event_owners
+         from performance_orders performance_order join performance_events event on event.order_id=performance_order.id
+         where performance_order.qingflow_order_no='001-A' group by performance_order.id`,
+      );
+      assert.deepEqual(result.rows[0], {
+        customer_unit:"单位乙",business_region_source_text:"上海市",business_region_code:"CN-SH",
+        salesperson_name:"业务员乙",service_type:"咨询",event_owners:["业务员甲","业务员乙"],
+      });
+    } finally {
+      await context.pool.end();
+    }
+  });
+});
+
+test("历史导入不得覆盖已有普通业务订单", async () => {
+  await withMigratedTestDatabase(async (database) => {
+    const context = await fixture(database.url);
+    try {
+      const normal = await preflightImportRows(context.pool, {
+        actorUserId:context.actorUserId,configId:context.configId,
+        sourceFileName:"normal.xlsx",sourceBytes:Buffer.from("normal"),rows:[row()],
+      });
+      await confirmImportBatch(context.pool,normal.batchId,context.actorUserId,[]);
+      const configId = await legacyConfig(context.pool);
+      const legacy = await preflightImportRows(context.pool, {
+        actorUserId:context.actorUserId,configId,
+        sourceFileName:"legacy-collision.xlsx",sourceBytes:Buffer.from("legacy-collision"),
+        rows:[row({ sheet:"分子",sourceRecordId:undefined,eventType:"legacy_adjustment",customerUnit:"覆盖单位" })],
+      });
+      assert.equal(legacy.status,"blocked");
+      assert.ok(legacy.issues.some((issue)=>issue.code==="ORDER_FACT_CONFLICT"));
+      const order = await context.pool.query<{customer_unit:string}>("select customer_unit from performance_orders where qingflow_order_no='001-A'");
+      assert.equal(order.rows[0]!.customer_unit,"单位甲");
+    } finally {
+      await context.pool.end();
+    }
+  });
+});
+
+test("补录较旧历史行不会回退订单当前投影", async () => {
+  await withMigratedTestDatabase(async (database) => {
+    const context = await fixture(database.url);
+    try {
+      const configId = await legacyConfig(context.pool);
+      const newer = await preflightImportRows(context.pool, {
+        actorUserId:context.actorUserId,configId,
+        sourceFileName:"newer.xlsx",sourceBytes:Buffer.from("newer"),
+        rows:[row({ sheet:"分子",rowNumber:3,sourceRecordId:undefined,occurredOn:"2026-04-05",eventType:"legacy_adjustment",customerUnit:"最新单位",serviceType:"咨询" })],
+      });
+      await confirmImportBatch(context.pool,newer.batchId,context.actorUserId,[]);
+      const older = await preflightImportRows(context.pool, {
+        actorUserId:context.actorUserId,configId,
+        sourceFileName:"older.xlsx",sourceBytes:Buffer.from("older"),
+        rows:[row({ sheet:"分子",sourceRecordId:undefined,eventType:"legacy_adjustment",customerUnit:"旧单位",serviceType:"检测" })],
+      });
+      await confirmImportBatch(context.pool,older.batchId,context.actorUserId,[]);
+      const current = await context.pool.query<{customer_unit:string;service_type:string}>(
+        "select customer_unit,service_type from performance_orders where qingflow_order_no='001-A'",
+      );
+      assert.deepEqual(current.rows[0],{customer_unit:"最新单位",service_type:"咨询"});
+    } finally {
+      await context.pool.end();
+    }
+  });
+});
+
 test("批次内订单基础事实冲突列出具体字段", async () => {
   await withMigratedTestDatabase(async (database) => {
     const context = await fixture(database.url);
@@ -251,6 +353,7 @@ test("重新上传原始历史文件时关联既有事件并补齐区域但不�
     const context = await fixture(database.url);
     try {
       const configId = await legacyConfig(context.pool);
+      await context.pool.query("update import_configs set business_region_mapping=$2::jsonb where id=$1",[configId,JSON.stringify({"江苏省":"CN-JS","上海市":"CN-SH"})]);
       const sourceBytes = Buffer.from("original-legacy-workbook");
       const sourceHash = createHash("sha256").update(sourceBytes).digest("hex");
       const order = await context.pool.query<{ id: string }>(
@@ -272,17 +375,10 @@ test("重新上传原始历史文件时关联既有事件并补齐区域但不�
          values($1,$2,'分子',2,$3)`,
         [event.rows[0]!.id, sourceHash, `legacy:${sourceHash}:分子:2`],
       );
-      const mismatch = await preflightImportRows(context.pool, {
-        actorUserId: context.actorUserId, configId,
-        sourceFileName: "原始数据1-服务类型冲突.xlsx", sourceBytes,
-        rows: [row({ sheet: "分子", sourceRecordId: undefined, eventType: "legacy_adjustment", serviceType: "其他服务" })],
-      });
-      assert.equal(mismatch.status, "blocked");
-      assert.ok(mismatch.issues.some((issue) => issue.code === "ORDER_FACT_CONFLICT" && issue.message.includes("serviceType")));
       const preflight = await preflightImportRows(context.pool, {
         actorUserId: context.actorUserId, configId,
         sourceFileName: "原始数据1.xlsx", sourceBytes,
-        rows: [row({ sheet: "分子", sourceRecordId: undefined, eventType: "legacy_adjustment" })],
+        rows: [row({ sheet: "分子", sourceRecordId: undefined, eventType: "legacy_adjustment", customerUnit:"单位乙",businessRegionSourceText:"上海市",serviceType:"其他服务" })],
       });
       assert.equal(preflight.status, "preflight_ready");
       assert.equal(preflight.summary.reconciliations, 1);
@@ -292,10 +388,10 @@ test("重新上传原始历史文件时关联既有事件并补齐区域但不�
       assert.equal(confirmed.reconciliations, 1);
       const evidence = await context.pool.query<{
         event_id: string; batch_id: string; reconciled_by: string; source_operator_status: string;
-        business_region_source_text: string; business_region_code: string; import_batch_id: string | null; event_count: number;
+        customer_unit:string; service_type:string; business_region_source_text:string; business_region_code:string; import_batch_id:string|null; event_count:number;
       }>(
         `select reconciliation.event_id::text,reconciliation.batch_id::text,reconciliation.reconciled_by::text,
-                reconciliation.source_operator_status,performance_order.business_region_source_text,
+                reconciliation.source_operator_status,performance_order.customer_unit,performance_order.service_type,performance_order.business_region_source_text,
                 performance_order.business_region_code,event.import_batch_id::text,
                 (select count(*)::int from performance_events) event_count
          from legacy_event_import_reconciliations reconciliation
@@ -304,13 +400,13 @@ test("重新上传原始历史文件时关联既有事件并补齐区域但不�
       );
       assert.deepEqual(evidence.rows[0], {
         event_id: event.rows[0]!.id, batch_id: preflight.batchId, reconciled_by: context.actorUserId,
-        source_operator_status: "unknown", business_region_source_text: "江苏省", business_region_code: "CN-JS",
+        source_operator_status:"unknown",customer_unit:"单位乙",service_type:"其他服务",business_region_source_text:"上海市",business_region_code:"CN-SH",
         import_batch_id: null, event_count: 1,
       });
       const replay = await preflightImportRows(context.pool, {
         actorUserId: context.actorUserId, configId,
         sourceFileName: "原始数据1-再次核对.xlsx", sourceBytes,
-        rows: [row({ sheet: "分子", sourceRecordId: undefined, eventType: "legacy_adjustment" })],
+        rows: [row({ sheet: "分子", sourceRecordId: undefined, eventType: "legacy_adjustment", customerUnit:"单位乙",businessRegionSourceText:"上海市",serviceType:"其他服务" })],
       });
       assert.equal(replay.summary.events, 0);
       assert.equal(replay.summary.reconciliations, 0);

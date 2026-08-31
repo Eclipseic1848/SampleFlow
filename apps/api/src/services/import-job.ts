@@ -184,6 +184,12 @@ function compareImportRows(left: NormalizedRow, right: NormalizedRow): number {
     || left.rowNumber - right.rowNumber;
 }
 
+function compareLegacyProjectionRows(left: NormalizedRow, right: NormalizedRow): number {
+  return left.occurredOn.localeCompare(right.occurredOn)
+    || left.rowNumber - right.rowNumber
+    || left.sheet.localeCompare(right.sheet);
+}
+
 function validateBusinessSequences(rows: readonly NormalizedRow[], issues: ImportIssue[], existingByDate: ReadonlyMap<string, readonly (number | null)[]> = new Map()): void {
   const byDate = new Map<string, NormalizedRow[]>();
   for (const row of rows) byDate.set(row.occurredOn, [...(byDate.get(row.occurredOn) ?? []), row]);
@@ -480,7 +486,8 @@ export async function preflightImportRows(database: Database, input: Readonly<{
     const existingFacts = await database.query<Record<string, unknown>>(
       `select qingflow_order_no,customer_name,customer_unit,business_region_source_text,business_region_code,
               salesperson_person_id::text,service_type,source_received_on::text,original_amount::text,
-              current_revenue::text,counted_amount::text,lifecycle_state
+              current_revenue::text,counted_amount::text,lifecycle_state,
+              (select count(*)::int from performance_events where order_id=performance_orders.id and event_type<>'legacy_adjustment') non_legacy_event_count
        from performance_orders where qingflow_order_no=any($1::text[])`,
       [[...new Set(normalized.map((row) => row.orderNo))]],
     );
@@ -645,11 +652,13 @@ async function assertLeader(client: PoolClient, actorUserId: string): Promise<st
 function orderFactDifferences(existing: Record<string, unknown>, row: NormalizedRow): string[] {
   const differences: string[] = [];
   if (existing.customer_name !== row.customerName) differences.push("customerName");
+  if (row.eventType === "legacy_adjustment") {
+    if (Number(existing.non_legacy_event_count)>0) differences.push("existingNonLegacyEvents");
+    return differences;
+  }
   if (existing.customer_unit !== row.customerUnit) differences.push("customerUnit");
-  if (!(row.eventType === "legacy_adjustment" && existing.business_region_source_text == null)
-      && existing.business_region_source_text !== row.businessRegionSourceText) differences.push("businessRegionSourceText");
-  if (!(row.eventType === "legacy_adjustment" && existing.business_region_code == null)
-      && existing.business_region_code !== row.businessRegionCode) differences.push("businessRegionCode");
+  if (existing.business_region_source_text !== row.businessRegionSourceText) differences.push("businessRegionSourceText");
+  if (existing.business_region_code !== row.businessRegionCode) differences.push("businessRegionCode");
   if (String(existing.salesperson_person_id) !== row.personId) differences.push("salespersonPersonId");
   if (String(existing.service_type ?? "") !== row.serviceType) differences.push("serviceType");
   if (row.eventType === "initial") {
@@ -662,6 +671,7 @@ function orderFactDifferences(existing: Record<string, unknown>, row: Normalized
 function batchOrderFactDifferences(left: NormalizedRow, right: NormalizedRow): string[] {
   const differences: string[] = [];
   if (left.customerName !== right.customerName) differences.push("customerName");
+  if (left.eventType === "legacy_adjustment") return differences;
   if (left.customerUnit !== right.customerUnit) differences.push("customerUnit");
   if (left.businessRegionSourceText !== right.businessRegionSourceText) differences.push("businessRegionSourceText");
   if (left.businessRegionCode !== right.businessRegionCode) differences.push("businessRegionCode");
@@ -695,6 +705,18 @@ async function insertEvent(
      row.organization.supervisorPersonId, batchId, row.sheet, row.rowNumber, row.sourceRecordId ?? null, row.sourceKey, row.businessSequence ?? null],
   );
   return inserted.rows[0]!.id;
+}
+
+async function updateLegacyOrderProjection(client: PoolClient, orderId: string, eventId: string, row: NormalizedRow): Promise<void> {
+  await client.query(
+    `update performance_orders set customer_unit=$2,business_region_source_text=$3,business_region_code=$4,
+       salesperson_person_id=$5,salesperson_name=$6,service_type=$7
+     where id=$1 and $8=(
+       select event.id::text from performance_events event where event.order_id=$1 and event.event_type='legacy_adjustment'
+       order by event.occurred_on desc,event.source_row_number desc nulls last,event.source_sheet desc nulls last,event.id desc limit 1
+     )`,
+    [orderId,row.customerUnit,row.businessRegionSourceText,row.businessRegionCode,row.personId,row.organization.salespersonName,row.serviceType||null,eventId],
+  );
 }
 
 export async function confirmImportBatch(database: Database, batchId: string, actorUserId: string, confirmedWarnings: readonly string[], ipAddress = "127.0.0.1") {
@@ -778,13 +800,14 @@ export async function confirmImportBatch(database: Database, batchId: string, ac
     let importedEvents = 0;
     let reconciledEvents = 0;
 
-    for (const reconciliation of reconciliationRows) {
+    for (const reconciliation of reconciliationRows.sort((left,right)=>compareImportRows(left.row,right.row))) {
       const existing = await client.query<Record<string, unknown>>(
         `select event.id::text,event.event_type,event.import_batch_id::text,event.order_id::text,
                 performance_order.customer_name,performance_order.customer_unit,
                 performance_order.business_region_source_text,performance_order.business_region_code,
                 performance_order.salesperson_person_id::text,performance_order.service_type,
-                performance_order.source_received_on::text,performance_order.original_amount::text
+                performance_order.source_received_on::text,performance_order.original_amount::text,
+                (select count(*)::int from performance_events where order_id=performance_order.id and event_type<>'legacy_adjustment') non_legacy_event_count
          from performance_events event join performance_orders performance_order on performance_order.id=event.order_id
          left join legacy_event_source_evidence source_evidence on source_evidence.event_id=event.id
          where event.id=$1 and coalesce(event.source_key,source_evidence.source_key)=$2 for update of performance_order`,
@@ -796,13 +819,7 @@ export async function confirmImportBatch(database: Database, batchId: string, ac
       }
       const differences = orderFactDifferences(event, reconciliation.row);
       if (differences.length) throw new ImportJobError(`订单基础事实冲突：${reconciliation.row.orderNo}；字段差异：${differences.join("、")}`);
-      if (event.business_region_source_text == null && event.business_region_code == null) {
-        await client.query(
-          `update performance_orders set business_region_source_text=$2,business_region_code=$3
-           where id=$1 and business_region_source_text is null and business_region_code is null`,
-          [event.order_id, reconciliation.row.businessRegionSourceText, reconciliation.row.businessRegionCode],
-        );
-      }
+      await updateLegacyOrderProjection(client,String(event.order_id),reconciliation.eventId,reconciliation.row);
       await client.query(
         `insert into legacy_event_import_reconciliations(event_id,batch_id,batch_row_id,reconciled_by,source_operator_status)
          values($1,$2,$3,$4,'unknown')`,
@@ -819,7 +836,8 @@ export async function confirmImportBatch(database: Database, batchId: string, ac
         `select id::text,customer_name,customer_unit,business_region_source_text,business_region_code,salesperson_person_id::text,service_type,
                 source_received_on::text,original_amount::text,
                 current_revenue::text,counted_amount::text,lifecycle_state,
-                (select count(*)::int from performance_events where order_id=performance_orders.id) as event_count
+                (select count(*)::int from performance_events where order_id=performance_orders.id) as event_count,
+                (select count(*)::int from performance_events where order_id=performance_orders.id and event_type<>'legacy_adjustment') non_legacy_event_count
          from performance_orders where qingflow_order_no=$1 for update`,
         [orderNo],
       );
@@ -828,6 +846,7 @@ export async function confirmImportBatch(database: Database, batchId: string, ac
       let state: PerformanceState = { currentRevenue: 0, countedAmount: 0, lifecycle: "draft" };
       let priorEventCount = 0;
       let preserveHistoricalReview = false;
+      let latestLegacyProjection: { row: NormalizedRow; eventId: string } | undefined;
       if (existing.rows[0]) {
         const differences = orderFactDifferences(existing.rows[0], first);
         if (differences.length) throw new ImportJobError(`订单基础事实冲突：${orderNo}；字段差异：${differences.join("、")}`);
@@ -879,6 +898,9 @@ export async function confirmImportBatch(database: Database, batchId: string, ac
         if (row.eventType === "legacy_adjustment") {
           counted = Math.round((counted + row.amount) * 100) / 100;
           eventId = await insertEvent(client, batchId, orderId, row, actorUserId, row.eventType, row.amount, Math.max(0, counted), counted);
+          if (!latestLegacyProjection || compareLegacyProjectionRows(latestLegacyProjection.row,row)<0) {
+            latestLegacyProjection={row,eventId};
+          }
         } else {
           const command = commandFromImportRow(row)!;
           let decision;
@@ -906,6 +928,7 @@ export async function confirmImportBatch(database: Database, batchId: string, ac
         "update performance_orders set current_revenue=$2,counted_amount=$3,lifecycle_state=$4 where id=$1",
         [orderId, currentRevenue, countedAmount, lifecycle],
       );
+      if (latestLegacyProjection) await updateLegacyOrderProjection(client,orderId,latestLegacyProjection.eventId,latestLegacyProjection.row);
     }
     await client.query(
       "update import_batches set status='imported',confirmed_by=$2,confirmed_at=now(),order_count=$3,event_count=$4,reconciliation_count=$5 where id=$1",
