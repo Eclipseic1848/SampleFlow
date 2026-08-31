@@ -1,6 +1,8 @@
 import type { Database } from "../db.js";
 import type { CurrentUser } from "./auth.js";
 
+type QueryDatabase = Pick<Database, "query">;
+
 export type BusinessScope = "none" | "self" | "group" | "department" | "all";
 
 type RolePolicy = Readonly<{
@@ -71,7 +73,7 @@ export type PerformanceAccess = Readonly<{
   personIds: string[];
 }>;
 
-export async function resolvePerformanceAccess(database: Database, user: CurrentUser): Promise<PerformanceAccess> {
+export async function resolvePerformanceAccess(database: QueryDatabase, user: CurrentUser): Promise<PerformanceAccess> {
   const scopes = new Set(policiesFor(user.roles).map((policy) => policy.performanceScope));
   const personIds = [...scopes].some((scope) => ["self", "group", "department"].includes(scope)) ? [user.personId] : [];
   const responsibility = scopes.has("group") || scopes.has("department")
@@ -112,7 +114,7 @@ export function performanceScopeValues(access: PerformanceAccess): unknown[] {
 
 export type GoalAccess = Readonly<{ all: boolean; ownerPersonIds: string[] }>;
 
-export async function resolveGoalAccess(database: Database, user: CurrentUser): Promise<GoalAccess> {
+export async function resolveGoalAccess(database: QueryDatabase, user: CurrentUser): Promise<GoalAccess> {
   const scopes = new Set(policiesFor(user.roles).map((policy) => policy.goalScope));
   if (scopes.has("all")) return { all: true, ownerPersonIds: [] };
   const ownerPersonIds = new Set<string>();

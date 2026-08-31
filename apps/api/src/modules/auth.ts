@@ -288,8 +288,8 @@ export async function registerAuth(app: FastifyInstance, db: Database, clock: ()
         await client.query("update sessions set revoked_at = now() where token_hash = $1 and revoked_at is null", [hashSessionToken(token)]);
         await client.query(
           `insert into audit_logs(actor_user_id,action,entity_type,entity_id,ip_address)
-           values($1,'auth.logout','session',$1,$2)`,
-          [request.currentUser.id, request.ip],
+           values($1,'auth.logout','session',$2,$3)`,
+          [request.currentUser.id, request.currentUser.id, request.ip],
         );
         await client.query("commit");
       } catch (error) {
