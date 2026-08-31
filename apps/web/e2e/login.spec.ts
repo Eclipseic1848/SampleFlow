@@ -261,6 +261,27 @@ test("订单组合筛选由 URL 恢复并区分空集、失败和无权限", asy
     await page.getByRole("button", { name: "关闭" }).click();
     expect(page.url()).toBe(secondPageUrl);
 
+    const exportButton=page.getByRole("button",{name:"导出全部匹配订单"});
+    await expect(exportButton).toBeVisible({timeout:1_000});
+    const [exportRequest,download]=await Promise.all([
+      page.waitForRequest("**/api/exports/performance.csv*"),
+      page.waitForEvent("download"),
+      exportButton.click(),
+    ]);
+    const exportParams=new URL(exportRequest.url()).searchParams;
+    expect(Object.fromEntries(exportParams)).toEqual({
+      search:"E2E-FILTER-",month:matching.month,status:matching.status,salesperson:matching.salesperson,
+      department:matching.department,group:matching.group,region:matching.region,customerUnit:matching.customerUnit,
+    });
+    expect(exportParams.has("cursor")).toBe(false);
+    const downloadStream=await download.createReadStream();
+    let exportedCsv="";
+    for await(const chunk of downloadStream)exportedCsv+=chunk.toString("utf8");
+    expect(exportedCsv.split("\r\n")).toHaveLength(52);
+    expect(exportedCsv).toContain('"E2E-FILTER-0001"');
+    expect(exportedCsv).toContain('"E2E-FILTER-0051"');
+    expect(exportedCsv).not.toContain("E2E-OTHER-0001");
+
     await page.goBack();
     await expect(ledger.getByText("E2E-FILTER-0051", { exact: true })).toBeVisible();
     await page.goForward();

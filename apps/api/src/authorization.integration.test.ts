@@ -1467,6 +1467,238 @@ test("订单组合筛选始终叠加服务端权限范围", async () => {
   });
 });
 
+test("订单导出复用组合筛选、权限范围与安全审计", async () => {
+  await withMigratedTestDatabase(async (database) => {
+    const scenario = await seedAuthorizationScenario(database.url);
+    const setup = new Client({ connectionString: database.url });
+    await setup.connect();
+    try {
+    await setup.query(
+      `with source as (
+         select salesperson_person_id,department_unit_id,group_unit_id,leader_person_id,supervisor_person_id
+         from performance_events where order_id=$1 limit 1
+       ), orders as (
+         insert into performance_orders
+           (qingflow_order_no,customer_name,customer_unit,business_region_source_text,business_region_code,
+            salesperson_person_id,salesperson_name,source_received_on,original_amount,current_revenue,counted_amount,
+            lifecycle_state,created_at,posted_at)
+         select 'EXPORT-MATCH-'||lpad(series::text,4,'0'),E'\t=危险客户','+危险单位',E'\t=江苏原文','CN-JS',
+                source.salesperson_person_id,'业务员甲','2026-08-15',123.45,123.45,120.5,'active',
+                '2026-08-31T14:00:00Z','2026-08-31T14:00:00Z'
+         from source cross join generate_series(1,51) series returning id
+       )
+       insert into performance_events
+         (order_id,event_type,delta_amount,resulting_current_revenue,resulting_counted_amount,
+          accounting_month,occurred_on,reason,salesperson_person_id,salesperson_name,
+          department_unit_id,department_name,group_unit_id,group_name,leader_person_id,leader_name,
+          supervisor_person_id,supervisor_name)
+       select orders.id,'initial',120.5,123.45,120.5,'2026-08-01','2026-08-15','导出回归',
+              source.salesperson_person_id,'业务员甲',source.department_unit_id,'甲部',source.group_unit_id,'甲组',
+              source.leader_person_id,'甲组组长',source.supervisor_person_id,'甲部主管'
+       from orders cross join source`,
+      [scenario.orderIds[0]],
+    );
+    await setup.query(
+      `with source as (
+         select salesperson_person_id,department_unit_id,group_unit_id,leader_person_id,supervisor_person_id
+         from performance_events where order_id=$1 limit 1
+       ), inserted as (
+         insert into performance_orders
+           (qingflow_order_no,customer_name,customer_unit,business_region_source_text,business_region_code,
+            salesperson_person_id,salesperson_name,source_received_on,original_amount,current_revenue,counted_amount,lifecycle_state,posted_at)
+         select 'EXPORT-OUT-OF-SCOPE','=危险客户范围外','+危险单位','浙江原文','CN-JS',
+                salesperson_person_id,'业务员甲','2026-08-15',1,1,1,'active','2026-08-31T14:00:00Z'
+         from source returning id
+       )
+       insert into performance_events
+         (order_id,event_type,delta_amount,resulting_current_revenue,resulting_counted_amount,
+          accounting_month,occurred_on,reason,salesperson_person_id,salesperson_name,
+          department_unit_id,department_name,group_unit_id,group_name,leader_person_id,leader_name,
+          supervisor_person_id,supervisor_name)
+       select inserted.id,'initial',1,1,1,'2026-08-01','2026-08-15','范围外导出回归',
+              source.salesperson_person_id,'业务员甲',source.department_unit_id,'甲部',source.group_unit_id,'甲组',
+              source.leader_person_id,'甲组组长',source.supervisor_person_id,'甲部主管'
+       from inserted cross join source`,
+      [scenario.orderIds[2]],
+    );
+
+    const pool = new Pool({ connectionString: database.url });
+    let exportReadCount = 0;
+    let exportQuery: { statement: string; values: unknown[] } | null = null;
+    const patched = new WeakSet<pg.PoolClient>();
+    pool.on("acquire", (client) => {
+      if (patched.has(client)) return;
+      patched.add(client);
+      const originalQuery = client.query.bind(client);
+      client.query = ((...args: unknown[]) => {
+        const statement = typeof args[0] === "string" ? args[0] : String((args[0] as { text?: string })?.text ?? "");
+        if (/^\s*(select|with)\b/i.test(statement) && !/\bfrom sessions\b/i.test(statement)) exportReadCount += 1;
+        if (/business_region_source_text/i.test(statement) && /from performance_orders/i.test(statement)) {
+          const values = typeof args[0] === "string" ? args[1] : (args[0] as { values?: unknown[] }).values;
+          exportQuery = { statement, values: Array.isArray(values) ? [...values] : [] };
+        }
+        return originalQuery(...args as [string, unknown[]]);
+      }) as typeof client.query;
+    });
+    const app = await buildApp({ database: pool, logger: false, clock: () => new Date("2026-08-31T16:30:00Z") });
+    try {
+      const leaderCookie = await loginCookie(app, "scope_leader");
+      const filters = new URLSearchParams({
+        search: "EXPORT-",
+        month: "2026-08",
+        status: "active",
+        salesperson: "业务员甲",
+        department: "甲部",
+        group: "甲组",
+        region: "CN-JS",
+        customerUnit: "+危险单位",
+      });
+      exportReadCount = 0;
+      const response = await app.inject({ method: "GET", url: `/api/exports/performance.csv?${filters}`, headers: { cookie: leaderCookie } });
+      assert.equal(response.statusCode, 200, response.body);
+      assert.ok(exportReadCount <= 2, `排除会话认证后，订单导出权限与数据读取应不超过 2 次，实际 ${exportReadCount} 次`);
+      const smallReadCount = exportReadCount;
+      assert.match(String(response.headers["content-type"]), /^text\/csv; charset=utf-8/);
+      assert.match(String(response.headers["content-disposition"]), /sampleflow-orders-2026-09-01\.csv/);
+      assert.equal(response.body.charCodeAt(0), 0xfeff);
+      const lines = response.body.split("\r\n");
+      assert.equal(lines.length, 52);
+      assert.equal(lines[0], '\ufeff"订单编号","客户","客户单位","业务员","部门","小组","来源区域原文","标准业务区域","到样日期","当前营业额","当前计入金额","状态"');
+      assert.ok(lines.some((line) => line.includes('"EXPORT-MATCH-0001"')));
+      assert.ok(lines.every((line) => !line.includes("EXPORT-OUT-OF-SCOPE")));
+      assert.ok(lines.some((line) => line.includes('"\'\t=危险客户"') && line.includes('"\'+危险单位"') && line.includes('"\'\t=江苏原文"')));
+      assert.ok(lines.some((line) => line.includes(',123.45,120.5,"active"')));
+
+      async function assertExportPlanHasNoPerRowEventScan() {
+        assert.ok(exportQuery);
+        type PlanNode = { "Parent Relationship"?: string; "Relation Name"?: string; "Actual Loops"?: number; Plans?: PlanNode[] };
+        const explained = await setup.query<{ "QUERY PLAN": Array<{ Plan: PlanNode }> }>(
+          `explain (analyze,format json) ${exportQuery.statement}`,
+          exportQuery.values,
+        );
+        const repeatedNodes: PlanNode[] = [];
+        const visit = (node: PlanNode) => {
+          if ((node["Actual Loops"] ?? 0) > 1
+            && (node["Parent Relationship"] === "SubPlan" || node["Relation Name"] === "performance_events")) repeatedNodes.push(node);
+          node.Plans?.forEach(visit);
+        };
+        visit(explained.rows[0]!["QUERY PLAN"][0]!.Plan);
+        assert.deepEqual(repeatedNodes, []);
+      }
+      await assertExportPlanHasNoPerRowEventScan();
+
+      const adminCookie = await loginCookie(app, "scope_admin");
+      const denied = await app.inject({ method: "GET", url: `/api/exports/performance.csv?${filters}`, headers: { cookie: adminCookie } });
+      assert.equal(denied.statusCode, 403, denied.body);
+
+      await setup.query(
+        `with source as (
+           select salesperson_person_id,department_unit_id,group_unit_id,leader_person_id,supervisor_person_id
+           from performance_events where order_id=$1 limit 1
+         ), orders as (
+           insert into performance_orders
+             (qingflow_order_no,customer_name,customer_unit,business_region_source_text,business_region_code,
+              salesperson_person_id,salesperson_name,source_received_on,original_amount,current_revenue,counted_amount,
+              lifecycle_state,created_at,posted_at)
+           select 'EXPORT-MATCH-'||lpad(series::text,4,'0'),E'\t=危险客户','+危险单位',E'\t=江苏原文','CN-JS',
+                  source.salesperson_person_id,'业务员甲','2026-08-15',123.45,123.45,120.5,'active',
+                  '2026-08-31T14:00:00Z','2026-08-31T14:00:00Z'
+           from source cross join generate_series(52,2850) series returning id
+         )
+         insert into performance_events
+           (order_id,event_type,delta_amount,resulting_current_revenue,resulting_counted_amount,
+            accounting_month,occurred_on,reason,salesperson_person_id,salesperson_name,
+            department_unit_id,department_name,group_unit_id,group_name,leader_person_id,leader_name,
+            supervisor_person_id,supervisor_name,order_sequence)
+         select orders.id,'initial',120.5,123.45,120.5,'2026-08-01','2026-08-15','大规模导出回归',
+                source.salesperson_person_id,'业务员甲',source.department_unit_id,'甲部',source.group_unit_id,'甲组',
+                source.leader_person_id,'甲组组长',source.supervisor_person_id,'甲部主管',1
+         from orders cross join source`,
+        [scenario.orderIds[0]],
+      );
+      await setup.query(
+        `with source as (
+           select salesperson_person_id,department_unit_id,group_unit_id,leader_person_id,supervisor_person_id
+           from performance_events where order_id=$1 limit 1
+         )
+         insert into performance_events
+           (order_id,event_type,delta_amount,resulting_current_revenue,resulting_counted_amount,
+            accounting_month,occurred_on,reason,salesperson_person_id,salesperson_name,
+            department_unit_id,department_name,group_unit_id,group_name,leader_person_id,leader_name,
+            supervisor_person_id,supervisor_name,order_sequence)
+         select orders.id,'legacy_adjustment',0,123.45,120.5,'2026-08-01','2026-08-16','大规模导出回归',
+                source.salesperson_person_id,'业务员甲',source.department_unit_id,'甲部',source.group_unit_id,'甲组',
+                source.leader_person_id,'甲组组长',source.supervisor_person_id,'甲部主管',2
+         from performance_orders orders cross join source
+         where orders.qingflow_order_no between 'EXPORT-MATCH-0052' and 'EXPORT-MATCH-1902'`,
+        [scenario.orderIds[0]],
+      );
+      const largeCounts = await setup.query<{ orders: string; events: string }>(
+        `select count(*)::text as orders,
+                (select count(*)::text from performance_events events join performance_orders orders on orders.id=events.order_id
+                 where orders.qingflow_order_no like 'EXPORT-MATCH-%') as events
+         from performance_orders where qingflow_order_no like 'EXPORT-MATCH-%'`,
+      );
+      assert.deepEqual(largeCounts.rows[0], { orders: "2850", events: "4701" });
+
+      exportReadCount = 0;
+      const largeResponse = await app.inject({ method: "GET", url: `/api/exports/performance.csv?${filters}`, headers: { cookie: leaderCookie } });
+      assert.equal(largeResponse.statusCode, 200, largeResponse.body);
+      assert.ok(exportReadCount <= 2, `大规模订单导出读取应不超过 2 次，实际 ${exportReadCount} 次`);
+      assert.ok(Math.abs(exportReadCount - smallReadCount) <= 1, `小规模 ${smallReadCount} 次、大规模 ${exportReadCount} 次，读取次数差应不超过 1`);
+      assert.equal(largeResponse.body.split("\r\n").length, 2851);
+      assert.match(largeResponse.body, /EXPORT-MATCH-0052/);
+      assert.match(largeResponse.body, /EXPORT-MATCH-2850/);
+      assert.doesNotMatch(largeResponse.body, /EXPORT-OUT-OF-SCOPE/);
+      await assertExportPlanHasNoPerRowEventScan();
+
+      const address = await app.listen({ host: "127.0.0.1", port: 0 });
+      const controller = new AbortController();
+      await setup.query("begin");
+      try {
+        await setup.query("lock table performance_orders in access exclusive mode");
+        const abortResponse = await fetch(`${address}/api/exports/performance.csv?${filters}`, { headers: { cookie: leaderCookie }, signal: controller.signal });
+        assert.equal(abortResponse.status, 200);
+        controller.abort();
+        await assert.rejects(abortResponse.text(), (error: unknown) => error instanceof Error && error.name === "AbortError");
+      } finally {
+        await setup.query("rollback");
+      }
+      let aborted = false;
+      for (let attempt = 0; attempt < 100 && !aborted; attempt += 1) {
+        const result = await setup.query<{ exists: boolean }>(
+          `select exists(select 1 from audit_logs where action='performance.order_export' and after_data->>'failureCode'='EXPORT_ABORTED') as exists`,
+        );
+        aborted = result.rows[0]!.exists;
+        if (!aborted) await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      assert.equal(aborted, true, "客户端中断后应释放查询并记录 EXPORT_ABORTED");
+
+      const audits = await setup.query<{ actor_user_id: string; after_data: { filterSummary: Record<string,string>; rowCount: number; status: string; requestId: string; fileSha256: string | null; failureCode?: string } }>(
+        `select actor_user_id::text,after_data from audit_logs where action='performance.order_export' order by id`,
+      );
+      assert.equal(audits.rowCount, 4);
+      assert.deepEqual(audits.rows.map((row) => ({ actor: row.actor_user_id, rowCount: row.after_data.rowCount, status: row.after_data.status, failureCode: row.after_data.failureCode })), [
+        { actor: scenario.users.leader, rowCount: 51, status: "completed", failureCode: undefined },
+        { actor: scenario.users.admin, rowCount: 0, status: "blocked", failureCode: "ACCESS_DENIED" },
+        { actor: scenario.users.leader, rowCount: 2850, status: "completed", failureCode: undefined },
+        { actor: scenario.users.leader, rowCount: 0, status: "blocked", failureCode: "EXPORT_ABORTED" },
+      ]);
+      assert.deepEqual(audits.rows[0]!.after_data.filterSummary, Object.fromEntries(filters));
+      assert.equal(audits.rows[0]!.after_data.fileSha256, createHash("sha256").update(response.body).digest("hex"));
+      assert.equal(audits.rows[2]!.after_data.fileSha256, createHash("sha256").update(largeResponse.body).digest("hex"));
+      assert.ok(audits.rows.every((row) => row.after_data.requestId));
+      assert.doesNotMatch(JSON.stringify(audits.rows), /EXPORT-MATCH|危险客户|江苏原文/);
+    } finally {
+      await app.close();
+      await pool.end();
+    }
+    } finally {
+      await setup.end();
+    }
+  });
+});
+
 test("组织创建与任职写入保持未配置单元停用并记录审计",async()=>{
   await withMigratedTestDatabase(async(database)=>{
     const scenario=await seedAuthorizationScenario(database.url);

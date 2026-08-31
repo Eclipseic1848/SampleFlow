@@ -13,6 +13,7 @@ import { standardBusinessRegionName } from "../domain/business-regions.js";
 import { hasAnyRole, PERFORMANCE_EDITOR_ROLES } from "./auth.js";
 import { canReadPerformance, pendingGoalSql, pendingGoalValues, performanceScopeSql, performanceScopeValues, resolvePerformanceAccess } from "./authorization.js";
 import { achievementCalculationReason, loadFormalReport } from "./formal-reports.js";
+import { latestOrderEventJoinSql, normalizeOrderFilters, orderFilterQuerySchema, orderFilterSql, orderFilterValues, type OrderFilters } from "./order-query.js";
 import { OrganizationResolutionError, resolveOrganization } from "./organization.js";
 import {
   accountingMonth,
@@ -40,27 +41,8 @@ const ORDER_PAGE_SIZE = 50;
 const postgresBigintIdSchema = z.string().refine(
   (value) => /^[1-9]\d*$/.test(value) && BigInt(value) <= 9_223_372_036_854_775_807n,
 );
-const orderTextFilterSchema = z.string().trim().min(1).max(300);
-const orderListQuerySchema = z.object({
-  search: z.string().trim().max(100).optional(),
-  month: z.string().regex(/^[1-9]\d{3}-(0[1-9]|1[0-2])$/).optional(),
-  status: z.enum(["draft", "active", "paused", "zero", "historical_review_required"]).optional(),
-  salesperson: orderTextFilterSchema.optional(),
-  department: orderTextFilterSchema.optional(),
-  group: orderTextFilterSchema.optional(),
-  region: z.string().refine((value) => standardBusinessRegionName(value) !== undefined).optional(),
-  customerUnit: orderTextFilterSchema.optional(),
+const orderListQuerySchema = orderFilterQuerySchema.extend({
   cursor: z.string().min(1).max(2048).optional(),
-});
-const orderCursorFiltersSchema = z.strictObject({
-  search: z.string().max(100),
-  month: z.string().max(7),
-  status: z.string().max(40),
-  salesperson: z.string().max(300),
-  department: z.string().max(300),
-  group: z.string().max(300),
-  region: z.string().max(20),
-  customerUnit: z.string().max(300),
 });
 const orderCursorSchema = z.strictObject({
   version: z.literal(2),
@@ -72,10 +54,9 @@ const orderCursorSchema = z.strictObject({
   filterDigest: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
   userId: postgresBigintIdSchema,
 });
-type OrderCursorFilters = z.infer<typeof orderCursorFiltersSchema>;
 type OrderCursor = z.infer<typeof orderCursorSchema>;
 
-function orderFilterDigest(filters: OrderCursorFilters): string {
+function orderFilterDigest(filters: OrderFilters): string {
   return createHash("sha256").update(JSON.stringify(filters), "utf8").digest("base64url");
 }
 
@@ -997,21 +978,11 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
     if (!canReadPerformance(access)) return reply.code(403).send({ message: "当前角色没有业务查看权限" });
     const query = orderListQuerySchema.safeParse(request.query);
     if (!query.success) return reply.code(400).send({ message: "查询条件无效" });
-    const filters: OrderCursorFilters = {
-      search: query.data.search ?? "",
-      month: query.data.month ?? "",
-      status: query.data.status ?? "",
-      salesperson: query.data.salesperson ?? "",
-      department: query.data.department ?? "",
-      group: query.data.group ?? "",
-      region: query.data.region ?? "",
-      customerUnit: query.data.customerUnit ?? "",
-    };
+    const filters = normalizeOrderFilters(query.data);
     const cursor = query.data.cursor ? decodeOrderCursor(query.data.cursor) : null;
     if (query.data.cursor && (!cursor || cursor.filterDigest !== orderFilterDigest(filters) || cursor.userId !== request.currentUser.id)) {
       return reply.code(400).send({ code: "ORDER_CURSOR_INVALID", message: "分页游标无效或已不适用于当前查询" });
     }
-    const term = filters.search ? `%${filters.search}%` : null;
     const direction = cursor?.direction ?? "next";
     type OrderListRow = Record<string, unknown> & { id: string; __cursorCreatedAt: Date };
     const result = await db.query<OrderListRow>(
@@ -1023,35 +994,17 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
               latest.department_name as "departmentName", latest.group_name as "groupName",
               latest.leader_name as "leaderName", latest.supervisor_name as "supervisorName"
        from performance_orders
-       left join (
-         select distinct on (order_id) order_id,salesperson_person_id,department_unit_id,group_unit_id,
-                salesperson_name,department_name,group_name,leader_name,supervisor_name
-         from performance_events order by order_id,occurred_on desc,id desc
-       ) latest on latest.order_id=performance_orders.id
-       where ($1::text is null or performance_orders.qingflow_order_no ilike $1 or performance_orders.salesperson_name ilike $1 or performance_orders.customer_name ilike $1 or performance_orders.customer_unit ilike $1)
-         and ${performanceScopeSql("latest", 3)}
-         and ($7::date is null or (performance_orders.source_received_on >= $7::date and performance_orders.source_received_on < $7::date + interval '1 month'))
-         and ($8::text is null or performance_orders.lifecycle_state=$8)
-         and ($9::text is null or performance_orders.salesperson_name=$9)
-         and ($10::text is null or latest.department_name=$10)
-         and ($11::text is null or latest.group_name=$11)
-         and ($12::text is null or performance_orders.business_region_code=$12)
-         and ($13::text is null or performance_orders.customer_unit=$13)
+       ${latestOrderEventJoinSql("performance_orders", "latest")}
+       where ${performanceScopeSql("latest", 2)}
+         and ${orderFilterSql("performance_orders", "latest", 6)}
          ${cursor ? `and (performance_orders.created_at,performance_orders.id)<=($14::timestamptz,$15::bigint)
          and (performance_orders.created_at,performance_orders.id)${direction === "next" ? "<" : ">"}($16::timestamptz,$17::bigint)` : ""}
        order by performance_orders.created_at ${direction === "previous" ? "asc" : "desc"},performance_orders.id ${direction === "previous" ? "asc" : "desc"}
-       limit $2`,
+       limit $1`,
       [
-        term,
         ORDER_PAGE_SIZE + 1,
         ...performanceScopeValues(access),
-        filters.month ? `${filters.month}-01` : null,
-        filters.status || null,
-        filters.salesperson || null,
-        filters.department || null,
-        filters.group || null,
-        filters.region || null,
-        filters.customerUnit || null,
+        ...orderFilterValues(filters),
         ...(cursor ? [cursor.cutoffCreatedAt, cursor.cutoffId, cursor.anchorCreatedAt, cursor.anchorId] : []),
       ],
     );
