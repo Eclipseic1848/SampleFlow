@@ -24,6 +24,9 @@ import {
 
 const moneySchema = z.number().finite().min(0).max(99_999_999_999.99);
 const dateSchema = z.iso.date();
+const dashboardQuerySchema = z.object({
+  month: z.string().regex(/^[1-9]\d{3}-(0[1-9]|1[0-2])$/).optional(),
+});
 
 const createOrderSchema = z.strictObject({
   orderNo: z.string().min(1).max(100).refine(
@@ -71,6 +74,146 @@ function businessDate(now:Date):string {
   const parts=new Intl.DateTimeFormat("zh-CN",{timeZone:"Asia/Shanghai",year:"numeric",month:"2-digit",day:"2-digit"}).formatToParts(now);
   const value=(type:Intl.DateTimeFormatPartTypes)=>parts.find((part)=>part.type===type)?.value??"";
   return `${value("year")}-${value("month")}-${value("day")}`;
+}
+
+type PersonalAchievementEvent = Readonly<{
+  id: string;
+  orderId: string;
+  orderNo: string;
+  customerName: string;
+  eventType: string;
+  deltaAmount: string;
+  accountingMonth: string;
+  occurredOn: string;
+  sequence: number;
+  reason: string | null;
+  resultingCountedAmount: string;
+  resultingLifecycleState: "active" | "paused" | "zero" | null;
+  departmentName: string | null;
+  groupName: string | null;
+}>;
+
+type PersonalAchievementRow = Readonly<{
+  goal_id: string | null;
+  target_amount: string | null;
+  actual_amount: string;
+  gap_amount: string | null;
+  achievement_rate: string | null;
+  event_count: string;
+}>;
+
+function timeProgressRate(periodMonth: string, today: string): string | null {
+  const currentMonth = today.slice(0, 7);
+  if (periodMonth > currentMonth) return null;
+  if (periodMonth < currentMonth) return "100.00";
+  const [year, month] = periodMonth.split("-").map(Number);
+  const daysInMonth = new Date(Date.UTC(year!, month!, 0)).getUTCDate();
+  return (Number(today.slice(8, 10)) * 100 / daysInMonth).toFixed(2);
+}
+
+async function loadPersonalAchievement(database: Database, personId: string, periodMonth: string, today: string) {
+  const result = await database.query<PersonalAchievementRow>(
+    `with active_goal as (
+       select g.id::text as goal_id,version.amount::numeric(14,2) as target_amount
+       from goals g
+       join goal_versions version on version.goal_id=g.id and version.status='active'
+       where g.period_month=$1::date and g.goal_level='personal' and g.owner_person_id=$2
+     )
+     select (select goal_id from active_goal) as goal_id,
+            (select target_amount::text from active_goal) as target_amount,
+            coalesce(sum(event.delta_amount),0)::numeric(14,2)::text as actual_amount,
+            case when (select target_amount from active_goal)>0
+                 then ((select target_amount from active_goal)-coalesce(sum(event.delta_amount),0))::numeric(14,2)::text
+                 else null end as gap_amount,
+            case when (select target_amount from active_goal)>0
+                 then round(coalesce(sum(event.delta_amount),0)*100/(select target_amount from active_goal),2)::text
+                 else null end as achievement_rate,
+            count(event.id)::text as event_count
+     from performance_events event
+     where event.accounting_month=$1::date and event.salesperson_person_id=$2`,
+    [`${periodMonth}-01`, personId],
+  );
+  return formatPersonalAchievement(result.rows[0]!, periodMonth, today);
+}
+
+function formatPersonalAchievement(row: PersonalAchievementRow, periodMonth: string, today: string) {
+  const currentMonth = today.slice(0, 7);
+  const calculationReason = periodMonth > currentMonth
+    ? "PERIOD_IN_FUTURE"
+    : row.target_amount === null
+      ? "TARGET_NOT_ACTIVE"
+      : Number(row.target_amount) <= 0
+        ? "TARGET_AMOUNT_NOT_POSITIVE"
+        : null;
+  const timeProgress = timeProgressRate(periodMonth, today);
+  const achievementRate = calculationReason === null ? row.achievement_rate : null;
+  return {
+    goalId: row.goal_id,
+    periodMonth,
+    targetAmount: row.target_amount,
+    actualAmount: row.actual_amount,
+    gapAmount: calculationReason === null ? row.gap_amount : null,
+    achievementRate,
+    timeProgressRate: calculationReason === null ? timeProgress : null,
+    progressVariance: achievementRate !== null && timeProgress !== null
+      ? (Number(achievementRate) - Number(timeProgress)).toFixed(2)
+      : null,
+    calculationReason,
+    eventCount: Number(row.event_count),
+  };
+}
+
+async function loadPersonalAchievementEvents(database: Database, personId: string, periodMonth: string, today: string) {
+  const result = await database.query<PersonalAchievementRow & { events: PersonalAchievementEvent[] }>(
+    `with active_goal as (
+       select g.id::text as goal_id,version.amount::numeric(14,2) as target_amount
+       from goals g
+       join goal_versions version on version.goal_id=g.id and version.status='active'
+       where g.period_month=$1::date and g.goal_level='personal' and g.owner_person_id=$2
+     ),personal_events as (
+       select event.id,event.order_id,orders.qingflow_order_no,orders.customer_name,
+              event.event_type,event.delta_amount,event.resulting_current_revenue,event.resulting_counted_amount,
+              event.accounting_month,event.occurred_on,event.order_sequence,event.reason,
+              event.department_name,event.group_name
+       from performance_events event
+       join performance_orders orders on orders.id=event.order_id
+       where event.accounting_month=$1::date and event.salesperson_person_id=$2
+     )
+     select (select goal_id from active_goal) as goal_id,
+            (select target_amount::text from active_goal) as target_amount,
+            coalesce(sum(event.delta_amount),0)::numeric(14,2)::text as actual_amount,
+            case when (select target_amount from active_goal)>0
+                 then ((select target_amount from active_goal)-coalesce(sum(event.delta_amount),0))::numeric(14,2)::text
+                 else null end as gap_amount,
+            case when (select target_amount from active_goal)>0
+                 then round(coalesce(sum(event.delta_amount),0)*100/(select target_amount from active_goal),2)::text
+                 else null end as achievement_rate,
+            count(event.id)::text as event_count,
+            coalesce(jsonb_agg(jsonb_build_object(
+              'id',event.id::text,
+              'orderId',event.order_id::text,
+              'orderNo',event.qingflow_order_no,
+              'customerName',event.customer_name,
+              'eventType',event.event_type,
+              'deltaAmount',event.delta_amount::numeric(14,2)::text,
+              'accountingMonth',to_char(event.accounting_month,'YYYY-MM'),
+              'occurredOn',event.occurred_on::text,
+              'sequence',event.order_sequence,
+              'reason',event.reason,
+              'resultingCountedAmount',event.resulting_counted_amount::numeric(14,2)::text,
+              'resultingLifecycleState',case when event.event_type='legacy_adjustment' then null
+                when event.event_type='pause' then 'paused'
+                when event.event_type in ('restart','first_include') then 'active'
+                when event.resulting_current_revenue>0 then 'active' else 'zero' end,
+              'departmentName',event.department_name,
+              'groupName',event.group_name
+            ) order by event.occurred_on desc,event.order_sequence desc,event.id desc)
+              filter(where event.id is not null),'[]'::jsonb) as events
+     from personal_events event`,
+    [`${periodMonth}-01`, personId],
+  );
+  const row = result.rows[0]!;
+  return { ...formatPersonalAchievement(row, periodMonth, today), events: row.events };
 }
 
 function eventFingerprint(body:z.infer<typeof eventSchema>):string {
@@ -125,46 +268,61 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
     if (!request.currentUser) return reply.code(401).send({ message: "尚未登录" });
     const access = await resolvePerformanceAccess(db, request.currentUser);
     if (!canReadPerformance(access)) return reply.code(403).send({ message: "当前角色没有业务查看权限" });
+    const parsed = dashboardQuerySchema.safeParse(request.query);
+    if (!parsed.success) return reply.code(400).send({ code: "MONTH_INVALID", message: "月份格式无效" });
+    const today = businessDate(clock());
+    const month = parsed.data.month ?? today.slice(0, 7);
     const scopeValues = performanceScopeValues(access);
-    const latest = await db.query<{ month: string | null }>(
-      `select max(accounting_month)::text as month from performance_events e where ${performanceScopeSql("e", 1)}`,
-      scopeValues,
-    );
-    const month = latest.rows[0]?.month ?? new Date().toISOString().slice(0, 7) + "-01";
-    const [metrics, monthly, groups, recent, pending] = await Promise.all([
+    const [metrics, monthly, groups, recent, pending, personalAchievement] = await Promise.all([
       db.query<{ total: string; event_count: string; negative_total: string }>(
         `select coalesce(sum(delta_amount),0)::text as total, count(*)::text as event_count,
                 coalesce(sum(delta_amount) filter (where delta_amount < 0),0)::text as negative_total
-         from performance_events e where accounting_month = $1 and ${performanceScopeSql("e", 2)}`, [month, ...scopeValues]),
+         from performance_events e where accounting_month = $1 and ${performanceScopeSql("e", 2)}`, [`${month}-01`, ...scopeValues]),
       db.query<{ month: string; total: string }>(
         `select to_char(accounting_month, 'YYYY-MM') as month, sum(delta_amount)::text as total
          from performance_events e where extract(year from accounting_month) = extract(year from $1::date)
            and ${performanceScopeSql("e", 2)}
-         group by accounting_month order by accounting_month`, [month, ...scopeValues]),
+         group by accounting_month order by accounting_month`, [`${month}-01`, ...scopeValues]),
       db.query<{ name: string; total: string }>(
         `select group_name as name, sum(delta_amount)::text as total
          from performance_events e where accounting_month = $1 and ${performanceScopeSql("e", 2)} group by group_name
-         order by sum(delta_amount) desc limit 5`, [month, ...scopeValues]),
+         order by sum(delta_amount) desc limit 5`, [`${month}-01`, ...scopeValues]),
       db.query(
         `select o.qingflow_order_no as "orderNo", e.salesperson_name as "salespersonName",
                 e.event_type as "eventType", to_char(e.accounting_month, 'YYYY-MM') as month,
                 e.delta_amount::text as amount, e.group_name as "groupName"
          from performance_events e join performance_orders o on o.id = e.order_id
-         where ${performanceScopeSql("e", 1)}
-         order by e.created_at desc, e.id desc limit 8`, scopeValues),
+         where e.accounting_month=$1 and ${performanceScopeSql("e", 2)}
+         order by e.created_at desc, e.id desc limit 8`, [`${month}-01`, ...scopeValues]),
       db.query<{ count: string }>(
         `select count(*)::text as count from goal_versions v join goals g on g.id=v.goal_id
          where ${pendingGoalSql("g", "v", 1)}`,
         pendingGoalValues(request.currentUser),
       ),
+      request.currentUser.roles.includes("salesperson")
+        ? loadPersonalAchievement(db, request.currentUser.personId, month, today)
+        : Promise.resolve(null),
     ]);
     return {
-      month: month.slice(0, 7),
+      month,
       metrics: { total: metrics.rows[0]!.total, eventCount: Number(metrics.rows[0]!.event_count), negativeTotal: metrics.rows[0]!.negative_total, pendingApprovals: Number(pending.rows[0]!.count) },
       monthly: monthly.rows,
       groups: groups.rows,
       recent: recent.rows,
+      personalAchievement,
     };
+  });
+
+  app.get("/api/performance/personal-achievement/events", async (request, reply) => {
+    if (!request.currentUser) return reply.code(401).send({ message: "尚未登录" });
+    if (!request.currentUser.roles.includes("salesperson")) {
+      return reply.code(403).send({ message: "当前角色没有个人目标达成查看权限" });
+    }
+    const parsed = dashboardQuerySchema.safeParse(request.query);
+    if (!parsed.success) return reply.code(400).send({ code: "MONTH_INVALID", message: "月份格式无效" });
+    const today = businessDate(clock());
+    const periodMonth = parsed.data.month ?? today.slice(0, 7);
+    return loadPersonalAchievementEvents(db, request.currentUser.personId, periodMonth, today);
   });
 
   app.get("/api/performance/orders", async (request, reply) => {

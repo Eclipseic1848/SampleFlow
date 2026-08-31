@@ -293,6 +293,133 @@ test("业务日期固定使用 Asia/Shanghai，不受数据库会话时区影响
   });
 });
 
+test("个人目标首页使用上海当前月并让汇总与正负事件按分对平", async () => {
+  await withMigratedTestDatabase(async (database) => {
+    const scenario = await seedAuthorizationScenario(database.url);
+    const client = new Client({ connectionString: database.url });
+    await client.connect();
+    try {
+      await client.query(
+        `insert into performance_events
+          (order_id,event_type,delta_amount,resulting_current_revenue,resulting_counted_amount,
+           accounting_month,occurred_on,reason,salesperson_person_id,salesperson_name,
+           department_unit_id,department_name,group_unit_id,group_name,
+           leader_person_id,leader_name,supervisor_person_id,supervisor_name)
+         select source.order_id,added.event_type,added.delta_amount,added.current_amount,added.current_amount,
+                added.accounting_month::date,added.occurred_on::date,added.reason,
+                source.salesperson_person_id,source.salesperson_name,
+                source.department_unit_id,source.department_name,source.group_unit_id,source.group_name,
+                source.leader_person_id,source.leader_name,source.supervisor_person_id,source.supervisor_name
+         from performance_events source
+         cross join (values
+           ('revenue_change',-25::numeric,75::numeric,'2026-08-01','2026-08-15','负向调整'),
+           ('revenue_change',999::numeric,1074::numeric,'2026-09-01','2026-09-01','未来月事件')
+         ) added(event_type,delta_amount,current_amount,accounting_month,occurred_on,reason)
+         where source.order_id=$1 and source.order_sequence=1`,
+        [scenario.orderIds[0]],
+      );
+      for (const [periodMonth, amount, status] of [
+        ["2026-07-01", 800, "active"],
+        ["2026-06-01", 700, "pending_hr"],
+        ["2026-05-01", 0, "active"],
+        ["2026-09-01", 2000, "active"],
+      ] as const) {
+        const goal = await client.query<{ id: string }>(
+          `insert into goals(period_month,goal_level,owner_user_id,owner_person_id)
+           values($1,'personal',$2,$3) returning id::text`,
+          [periodMonth, scenario.users.alice, scenario.people[scenario.users.alice]],
+        );
+        await client.query(
+          `insert into goal_versions(goal_id,version_no,amount,status,created_by,created_by_person_id,change_reason)
+           values($1,1,$2,$3,$4,$5,'个人首页测试')`,
+          [goal.rows[0]!.id, amount, status, scenario.users.admin, scenario.people[scenario.users.admin]],
+        );
+      }
+    } finally {
+      await client.end();
+    }
+
+    await withTestApi(database.url, async (app) => {
+      const cookie = await loginCookie(app, "scope_alice");
+      const sessionClient = new Client({ connectionString: database.url });
+      await sessionClient.connect();
+      try {
+        await sessionClient.query("update sessions set expires_at=now()+interval '1 day',last_seen_at=now()");
+      } finally {
+        await sessionClient.end();
+      }
+      const current = await app.inject({ method: "GET", url: "/api/performance/dashboard", headers: { cookie } });
+      assert.equal(current.statusCode, 200, current.body);
+      assert.equal(current.json().month, "2026-08");
+      assert.deepEqual(
+        current.json().personalAchievement,
+        {
+          goalId: scenario.goalIds[0],
+          periodMonth: "2026-08",
+          targetAmount: "1000.00",
+          actualAmount: "75.00",
+          gapAmount: "925.00",
+          achievementRate: "7.50",
+          timeProgressRate: "48.39",
+          progressVariance: "-40.89",
+          calculationReason: null,
+          eventCount: 2,
+        },
+      );
+      const drilldown = await app.inject({
+        method: "GET",
+        url: "/api/performance/personal-achievement/events?month=2026-08",
+        headers: { cookie },
+      });
+      assert.equal(drilldown.statusCode, 200, drilldown.body);
+      assert.equal(drilldown.json().actualAmount, current.json().personalAchievement.actualAmount);
+      const { events: drilldownEvents, ...drilldownSummary } = drilldown.json();
+      assert.deepEqual(drilldownSummary, current.json().personalAchievement);
+      const events = drilldownEvents as Array<{ deltaAmount: string; accountingMonth: string }>;
+      assert.deepEqual(events.map((event) => event.deltaAmount).sort(), ["-25.00", "100.00"]);
+      const cents = (value: string) => {
+        const sign = value.startsWith("-") ? -1n : 1n;
+        const [whole, fraction = ""] = value.replace("-", "").split(".");
+        return sign * (BigInt(whole!) * 100n + BigInt(fraction.padEnd(2, "0").slice(0, 2)));
+      };
+      assert.equal(events.reduce((sum, event) => sum + cents(event.deltaAmount), 0n), cents(drilldown.json().actualAmount));
+
+      const history = await app.inject({ method: "GET", url: "/api/performance/dashboard?month=2026-07", headers: { cookie } });
+      assert.equal(history.statusCode, 200, history.body);
+      assert.deepEqual(
+        {
+          timeProgressRate: history.json().personalAchievement.timeProgressRate,
+          achievementRate: history.json().personalAchievement.achievementRate,
+          progressVariance: history.json().personalAchievement.progressVariance,
+          calculationReason: history.json().personalAchievement.calculationReason,
+        },
+        { timeProgressRate: "100.00", achievementRate: "0.00", progressVariance: "-100.00", calculationReason: null },
+      );
+
+      for (const [month, reason] of [
+        ["2026-09", "PERIOD_IN_FUTURE"],
+        ["2026-06", "TARGET_NOT_ACTIVE"],
+        ["2026-05", "TARGET_AMOUNT_NOT_POSITIVE"],
+      ] as const) {
+        const response = await app.inject({ method: "GET", url: `/api/performance/dashboard?month=${month}`, headers: { cookie } });
+        assert.equal(response.statusCode, 200, response.body);
+        assert.equal(response.json().personalAchievement.calculationReason, reason);
+        assert.equal(response.json().personalAchievement.achievementRate, null);
+        assert.equal(response.json().personalAchievement.gapAmount, null);
+        assert.equal(response.json().personalAchievement.timeProgressRate, null);
+        assert.equal(response.json().personalAchievement.progressVariance, null);
+      }
+      const future = await app.inject({ method: "GET", url: "/api/performance/dashboard?month=2026-09", headers: { cookie } });
+      assert.equal(future.json().personalAchievement.timeProgressRate, null);
+      assert.equal(future.json().personalAchievement.actualAmount, "999.00");
+
+      const invalid = await app.inject({ method: "GET", url: "/api/performance/dashboard?month=2026-13", headers: { cookie } });
+      assert.equal(invalid.statusCode, 400, invalid.body);
+      assert.equal(invalid.json().code, "MONTH_INVALID");
+    }, { clock: () => new Date("2026-08-14T16:30:00.000Z") });
+  });
+});
+
 test("多角色账号按稳定组织责任范围取并集且不扩大到无关组织", async () => {
   await withMigratedTestDatabase(async (database) => {
     const scenario=await seedAuthorizationScenario(database.url);
@@ -383,7 +510,7 @@ test("业务员、组长和主管只能读取本人、本组和本部门业绩",
         assert.equal(response.statusCode, 200, response.body);
         const names = (response.json().orders as Array<{ salespersonName: string }>).map((order) => order.salespersonName).sort();
         assert.deepEqual(names, [...expectedNames].sort());
-        const dashboard = await app.inject({ method: "GET", url: "/api/performance/dashboard", headers: { cookie } });
+        const dashboard = await app.inject({ method: "GET", url: "/api/performance/dashboard?month=2026-08", headers: { cookie } });
         assert.equal(dashboard.statusCode, 200, dashboard.body);
         assert.equal(Number(dashboard.json().metrics.total), expectedNames.length * 100);
         assert.equal(dashboard.json().metrics.pendingApprovals, 0);
