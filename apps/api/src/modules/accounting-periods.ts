@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import type { PoolClient } from "pg";
 import { z } from "zod";
 import type { Database } from "../db.js";
+import { businessDate } from "../domain/business-time.js";
 import { hasAnyRole, type CurrentUser } from "./auth.js";
 import { OrganizationResolutionError, resolveOrganization } from "./organization.js";
 
@@ -51,12 +52,6 @@ type PeriodRow = {
   needs_reclose: boolean;
 };
 type QueryClient = Pick<PoolClient, "query">;
-
-function businessDate(now: Date): string {
-  const parts = new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(now);
-  const value = (type: Intl.DateTimeFormatPartTypes) => parts.find((part) => part.type === type)?.value ?? "";
-  return `${value("year")}-${value("month")}-${value("day")}`;
-}
 
 export function accountingMonth(date: string): string { return `${date.slice(0, 7)}-01`; }
 function normalizeMonth(month: string): string { return `${month}-01`; }

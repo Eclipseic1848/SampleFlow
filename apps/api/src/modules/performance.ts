@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { Database } from "../db.js";
+import { businessDate } from "../domain/business-time.js";
 import {
   decidePerformanceEvent,
   PerformanceRuleError,
@@ -11,7 +12,7 @@ import {
 import { standardBusinessRegionName } from "../domain/business-regions.js";
 import { hasAnyRole, PERFORMANCE_EDITOR_ROLES } from "./auth.js";
 import { canReadPerformance, pendingGoalSql, pendingGoalValues, performanceScopeSql, performanceScopeValues, resolvePerformanceAccess } from "./authorization.js";
-import { loadFormalReport } from "./formal-reports.js";
+import { achievementCalculationReason, loadFormalReport } from "./formal-reports.js";
 import { OrganizationResolutionError, resolveOrganization } from "./organization.js";
 import {
   accountingMonth,
@@ -81,12 +82,6 @@ type OrderRow = {
   lifecycle_state: PerformanceState["lifecycle"]|"historical_review_required";
 };
 
-function businessDate(now:Date):string {
-  const parts=new Intl.DateTimeFormat("zh-CN",{timeZone:"Asia/Shanghai",year:"numeric",month:"2-digit",day:"2-digit"}).formatToParts(now);
-  const value=(type:Intl.DateTimeFormatPartTypes)=>parts.find((part)=>part.type===type)?.value??"";
-  return `${value("year")}-${value("month")}-${value("day")}`;
-}
-
 type PersonalAchievementEvent = Readonly<{
   id: string;
   orderId: string;
@@ -149,16 +144,7 @@ async function loadPersonalAchievement(database: QueryDatabase, personId: string
 }
 
 function formatAchievement(row: AchievementRow, periodMonth: string, today: string) {
-  const currentMonth = today.slice(0, 7);
-  const calculationReason = row.target_ambiguous
-    ? "TARGET_SCOPE_AMBIGUOUS"
-    : periodMonth > currentMonth
-    ? "PERIOD_IN_FUTURE"
-    : row.target_amount === null
-      ? "TARGET_NOT_ACTIVE"
-      : Number(row.target_amount) <= 0
-        ? "TARGET_AMOUNT_NOT_POSITIVE"
-        : null;
+  const calculationReason = achievementCalculationReason(periodMonth, today, row.target_amount, row.target_ambiguous);
   const timeProgress = timeProgressRate(periodMonth, today);
   const achievementRate = calculationReason === null ? row.achievement_rate : null;
   return {
@@ -797,7 +783,7 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
     if (!request.currentUser) return reply.code(401).send({ message: "尚未登录" });
     const params = z.object({ goalId: z.coerce.number().int().positive() }).safeParse(request.params);
     if (!params.success) return reply.code(400).send({ message: "目标标识无效" });
-    const result = await loadFormalReport(db, request.currentUser, params.data.goalId);
+    const result = await loadFormalReport(db, request.currentUser, params.data.goalId, businessDate(clock()));
     if (!result.ok) return reply.code(result.statusCode).send(result.body);
     return result.report;
   });
