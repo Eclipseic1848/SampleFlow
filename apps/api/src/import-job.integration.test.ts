@@ -60,6 +60,22 @@ function row(overrides: Partial<Omit<ImportSourceRow, "sourceRecordId">> & { sou
   return sourceRecordId === undefined ? required : { ...required, sourceRecordId };
 }
 
+function trackReadQueries(pool: pg.Pool) {
+  let count = 0;
+  const patched = new WeakSet<pg.PoolClient>();
+  pool.on("acquire", (client) => {
+    if (patched.has(client)) return;
+    patched.add(client);
+    const originalQuery = client.query.bind(client);
+    client.query = ((...args: unknown[]) => {
+      const statement = typeof args[0] === "string" ? args[0] : String((args[0] as { text?: string })?.text ?? "");
+      if (/^\s*(select|with)\b/i.test(statement)) count += 1;
+      return originalQuery(...args as [string, unknown[]]);
+    }) as typeof client.query;
+  });
+  return { count: () => count, reset: () => { count = 0; } };
+}
+
 async function legacyConfig(pool: pg.Pool): Promise<string> {
   const config = await pool.query<{ id: string }>(
     `insert into import_configs(config_key,version,name,status,sheet_name,expected_headers,column_mapping,
@@ -176,6 +192,72 @@ test("历史导入整体和逐月对账一致且重复执行不增加数据", as
         "select (select count(*) from performance_events)::int events,(select count(*) from performance_orders)::int orders,coalesce(sum(delta_amount),0)::text total from performance_events",
       );
       assert.deepEqual(totals.rows[0], { events: 2, orders: 2, total: "150.00" });
+    } finally {
+      await context.pool.end();
+    }
+  });
+});
+
+test("真实规模等价合成数据的预检读取查询次数保持固定", async () => {
+  await withMigratedTestDatabase(async (database) => {
+    const context = await fixture(database.url);
+    try {
+      const configId = await legacyConfig(context.pool);
+      const queries = trackReadQueries(context.pool);
+
+      const rows = Array.from({ length: 4_701 }, (_, index) => row({
+        sheet: "分子",
+        rowNumber: index + 2,
+        sourceRecordId: undefined,
+        orderNo: `SYN-${String(index % 2_850).padStart(4, "0")}`,
+        occurredOn: `2026-${String(index % 8 + 1).padStart(2, "0")}-15`,
+        eventType: "legacy_adjustment",
+        amount: 1,
+      }));
+      const preflight = await preflightImportRows(context.pool, {
+        actorUserId: context.actorUserId,
+        configId,
+        sourceFileName: "synthetic-4701.xlsx",
+        sourceBytes: Buffer.from("synthetic-4701"),
+        rows,
+      });
+
+      assert.equal(preflight.status, "preflight_ready", JSON.stringify(preflight.issues.slice(0, 5)));
+      assert.equal(preflight.summary.events, 4_701);
+      assert.ok(queries.count() <= 12, `预检读取查询不应随行数增长，实际 ${queries.count()} 次`);
+    } finally {
+      await context.pool.end();
+    }
+  });
+});
+
+test("确认路径批量复用组织、订单、事件序列和记账期间读取", async () => {
+  await withMigratedTestDatabase(async (database) => {
+    const context = await fixture(database.url);
+    try {
+      const configId = await legacyConfig(context.pool);
+      const queries = trackReadQueries(context.pool);
+      const rows = Array.from({ length: 40 }, (_, index) => row({
+        sheet: "分子",
+        rowNumber: index + 2,
+        sourceRecordId: undefined,
+        orderNo: `CONFIRM-${String(index % 25).padStart(2, "0")}`,
+        eventType: "legacy_adjustment",
+        amount: 1,
+      }));
+      const preflight = await preflightImportRows(context.pool, {
+        actorUserId: context.actorUserId,
+        configId,
+        sourceFileName: "synthetic-confirm.xlsx",
+        sourceBytes: Buffer.from("synthetic-confirm"),
+        rows,
+      });
+
+      queries.reset();
+      const confirmed = await confirmImportBatch(context.pool, preflight.batchId, context.actorUserId, []);
+
+      assert.equal(confirmed.events, 40);
+      assert.ok(queries.count() <= 10, `确认读取查询不应随行数或订单数增长，实际 ${queries.count()} 次`);
     } finally {
       await context.pool.end();
     }

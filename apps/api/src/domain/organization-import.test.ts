@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { strToU8, zipSync } from "fflate";
 import { ledgerUnitEvidenceKey, preflightOrganizationImport, type LeadershipMapping } from "./organization-import.js";
-import { assertFixedValueXlsxArchive } from "./xlsx-safety.js";
+import { assertFixedValueXlsxArchive, unzipFixedValueXlsxArchive } from "./xlsx-safety.js";
 
 const organizationRows = [
   { personName:"甲", departmentName:"一部", groupName:"一组" },
@@ -86,4 +87,30 @@ test("工作簿安全门禁拒绝公式、外部链接和外部数据连接",()=
     {"xl/queryTables/queryTable1.xml":bytes("<queryTable/>")},
     {"xl/worksheets/_rels/sheet1.xml.rels":bytes('<Relationship TargetMode="External"/>')},
   ])assert.throws(()=>assertFixedValueXlsxArchive(archive),/拒绝包含/);
+});
+
+test("工作簿安全门禁在解压前限制单文件、总尺寸和条目数", () => {
+  assert.throws(
+    () => unzipFixedValueXlsxArchive(new Uint8Array(20 * 1024 * 1024 + 1)),
+    /压缩文件超过 20 MiB/,
+  );
+
+  const largeEntry = new Uint8Array(32 * 1024 * 1024 + 1);
+  assert.throws(
+    () => unzipFixedValueXlsxArchive(zipSync({ "xl/worksheets/sheet1.xml": largeEntry }, { level: 9 })),
+    /单个文件解压后超过 32 MiB/,
+  );
+
+  const repeatedEntry = new Uint8Array(22 * 1024 * 1024);
+  assert.throws(
+    () => unzipFixedValueXlsxArchive(zipSync({
+      "xl/worksheets/sheet1.xml": repeatedEntry,
+      "xl/worksheets/sheet2.xml": repeatedEntry,
+      "xl/worksheets/sheet3.xml": repeatedEntry,
+    }, { level: 9 })),
+    /解压后总大小超过 64 MiB/,
+  );
+
+  const entries = Object.fromEntries(Array.from({ length: 257 }, (_, index) => [`xl/item-${index}.xml`, strToU8("<x/>")]));
+  assert.throws(() => unzipFixedValueXlsxArchive(zipSync(entries)), /文件数超过 256/);
 });

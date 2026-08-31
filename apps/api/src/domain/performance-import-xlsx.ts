@@ -1,7 +1,6 @@
 import path from "node:path";
-import { unzipSync } from "fflate";
 import readXlsxFile from "read-excel-file/node";
-import { assertFixedValueXlsxArchive } from "./xlsx-safety.js";
+import { unzipFixedValueXlsxArchive } from "./xlsx-safety.js";
 import type { ImportEventType, ImportSourceRow } from "../services/import-job.js";
 
 export type ImportColumn = keyof Omit<ImportSourceRow, "sheet" | "rowNumber">;
@@ -77,7 +76,7 @@ export async function parseImportWorkbook(
 ): Promise<ImportSourceRow[]> {
   if (path.extname(sourceFileName).toLowerCase() !== ".xlsx") throw new ImportWorkbookError("只接受 .xlsx 工作簿");
   try {
-    assertFixedValueXlsxArchive(unzipSync(sourceBytes));
+    unzipFixedValueXlsxArchive(sourceBytes);
   } catch (error) {
     throw new ImportWorkbookError(error instanceof Error ? error.message : "工作簿安全检查失败");
   }

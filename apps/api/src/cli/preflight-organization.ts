@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import readXlsxFile from "read-excel-file/node";
-import { unzipSync } from "fflate";
 import {
   HISTORICAL_ORGANIZATION_BASELINE,
   ledgerUnitEvidenceKey,
@@ -11,7 +10,7 @@ import {
   type OrganizationSourceRow,
 } from "../domain/organization-import.js";
 import { db } from "../db.js";
-import { assertFixedValueXlsxArchive } from "../domain/xlsx-safety.js";
+import { unzipFixedValueXlsxArchive } from "../domain/xlsx-safety.js";
 import { applyOrganizationImport, type LedgerOrganizationRow } from "../services/organization-import.js";
 
 function argument(name:string):string|undefined {
@@ -34,9 +33,8 @@ if (path.extname(sourceFile).toLowerCase() !== ".xlsx") throw new Error("组织�
 
 const sourceBytes = await readFile(sourceFile);
 const sourceSha256 = createHash("sha256").update(sourceBytes).digest("hex");
-const archive=unzipSync(sourceBytes);
-assertFixedValueXlsxArchive(archive);
-const sheets = await readXlsxFile(sourceFile);
+unzipFixedValueXlsxArchive(sourceBytes);
+const sheets = await readXlsxFile(Buffer.from(sourceBytes));
 const organizationSheet = sheets.find((sheet) => sheet.sheet === "组别");
 const ledgerSheet = sheets.find((sheet) => sheet.sheet === "分子");
 if (!organizationSheet || !ledgerSheet) throw new Error("工作簿必须同时包含“组别”和“分子”工作表");

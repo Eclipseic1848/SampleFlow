@@ -375,6 +375,49 @@ test("连续登录失败会触发账号级递增限速和暂停", async () => {
   });
 });
 
+test("并发登录失败不会丢失账号级限速计数", async () => {
+  await withMigratedTestDatabase(async (database) => {
+    await seedTestUser(database.url, {
+      username: "concurrent_rate_limit_user",
+      displayName: "并发登录限速用户",
+      password: "Correct@123",
+      roleCode: "salesperson",
+      roleName: "业务员",
+    });
+
+    await withTestApi(database.url, async (app) => {
+      const failures = await Promise.all(Array.from({ length: 10 }, () => app.inject({
+        method: "POST",
+        url: "/api/auth/login",
+        headers: { origin: TEST_ORIGIN },
+        payload: { username: "concurrent_rate_limit_user", password: "Wrong@123" },
+      })));
+      assert.ok(failures.every((response) => response.statusCode === 401));
+
+      const client = new Client({ connectionString: database.url });
+      await client.connect();
+      try {
+        const throttle = await client.query<{ failure_count: number }>(
+          "select failure_count from auth_login_throttles where scope='account' and throttle_key=$1",
+          ["concurrent_rate_limit_user"],
+        );
+        assert.equal(throttle.rows[0]?.failure_count, 10);
+      } finally {
+        await client.end();
+      }
+
+      const suspended = await app.inject({
+        method: "POST",
+        url: "/api/auth/login",
+        headers: { origin: TEST_ORIGIN },
+        payload: { username: "concurrent_rate_limit_user", password: "Correct@123" },
+      });
+      assert.equal(suspended.statusCode, 429);
+      assert.equal(suspended.headers["retry-after"], "1800");
+    });
+  });
+});
+
 test("Cookie 会话写请求必须同时通过 Origin 和 CSRF 校验", async () => {
   await withMigratedTestDatabase(async (database) => {
     await seedTestUser(database.url, {

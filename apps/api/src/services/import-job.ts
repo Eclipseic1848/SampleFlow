@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import type { PoolClient } from "pg";
 import type { Database } from "../db.js";
-import { AccountingPeriodError, accountingMonth, assertAccountingPeriodOpen, consumeApprovedCorrection, lockApprovedCorrection } from "../modules/accounting-periods.js";
-import { resolveOrganization, type OrganizationSnapshot } from "../modules/organization.js";
+import { AccountingPeriodError, accountingMonth, consumeApprovedCorrection, lockApprovedCorrection } from "../modules/accounting-periods.js";
+import type { OrganizationSnapshot } from "../modules/organization.js";
 import { decidePerformanceEvent, PerformanceRuleError, type PerformanceCommand, type PerformanceState } from "../domain/performance.js";
 
 export type ImportEventType = "initial" | "revenue_change" | "pause" | "restart" | "first_include" | "legacy_adjustment";
@@ -100,6 +100,64 @@ function sameOrganizationSnapshot(left: OrganizationSnapshot, right: Organizatio
     && left.supervisorName === right.supervisorName;
 }
 
+function organizationKey(personId: string, occurredOn: string): string {
+  return `${personId}:${occurredOn}`;
+}
+
+async function loadOrganizationSnapshots(
+  database: Pick<PoolClient, "query">,
+  pairs: readonly Readonly<{ personId: string; occurredOn: string }>[],
+): Promise<ReadonlyMap<string, OrganizationSnapshot>> {
+  const uniquePairs = new Map(pairs.map((pair) => [organizationKey(pair.personId, pair.occurredOn), pair]));
+  if (!uniquePairs.size) return new Map();
+  const values = [...uniquePairs.values()];
+  const result = await database.query<{
+    occurred_on: string;
+    person_id: string;
+    salesperson_name: string;
+    department_id: string;
+    department_name: string;
+    group_id: string;
+    group_name: string;
+    leader_person_id: string;
+    leader_name: string;
+    supervisor_person_id: string;
+    supervisor_name: string;
+  }>(
+    `with requested as (
+       select * from unnest($1::bigint[],$2::date[]) as input(person_id,occurred_on)
+     )
+     select requested.occurred_on::text,p.id::text person_id,p.display_name salesperson_name,
+            d.id::text department_id,d.name department_name,g.id::text group_id,g.name group_name,
+            leader.id::text leader_person_id,leader.display_name leader_name,
+            supervisor.id::text supervisor_person_id,supervisor.display_name supervisor_name
+     from requested join people p on p.id=requested.person_id
+     join org_memberships membership on membership.person_id=p.id
+       and membership.effective_from<=requested.occurred_on and (membership.effective_to is null or membership.effective_to>=requested.occurred_on)
+     join org_units d on d.id=membership.department_id and d.unit_type='department'
+     join org_units g on g.id=membership.group_id and g.unit_type='group' and g.parent_id=d.id
+     join org_responsibilities leader_role on leader_role.org_unit_id=g.id and leader_role.responsibility_type='leader'
+       and leader_role.effective_from<=requested.occurred_on and (leader_role.effective_to is null or leader_role.effective_to>=requested.occurred_on)
+     join people leader on leader.id=leader_role.person_id
+     join org_responsibilities supervisor_role on supervisor_role.org_unit_id=d.id and supervisor_role.responsibility_type='supervisor'
+       and supervisor_role.effective_from<=requested.occurred_on and (supervisor_role.effective_to is null or supervisor_role.effective_to>=requested.occurred_on)
+     join people supervisor on supervisor.id=supervisor_role.person_id`,
+    [values.map((pair) => pair.personId), values.map((pair) => pair.occurredOn)],
+  );
+  return new Map(result.rows.map((row) => [organizationKey(row.person_id, String(row.occurred_on).slice(0, 10)), {
+    personId: row.person_id,
+    salespersonName: row.salesperson_name,
+    departmentId: row.department_id,
+    departmentName: row.department_name,
+    groupId: row.group_id,
+    groupName: row.group_name,
+    leaderPersonId: row.leader_person_id,
+    leaderName: row.leader_name,
+    supervisorPersonId: row.supervisor_person_id,
+    supervisorName: row.supervisor_name,
+  }]));
+}
+
 async function loadExistingImportRecords(database: Pick<PoolClient, "query">, rows: readonly NormalizedRow[]): Promise<ExistingImportRecord[]> {
   if (!rows.length) return [];
   const sourceKeys = rows.map((row) => row.sourceKey);
@@ -192,7 +250,11 @@ function compareLegacyProjectionRows(left: NormalizedRow, right: NormalizedRow):
 
 function validateBusinessSequences(rows: readonly NormalizedRow[], issues: ImportIssue[], existingByDate: ReadonlyMap<string, readonly (number | null)[]> = new Map()): void {
   const byDate = new Map<string, NormalizedRow[]>();
-  for (const row of rows) byDate.set(row.occurredOn, [...(byDate.get(row.occurredOn) ?? []), row]);
+  for (const row of rows) {
+    const sameDayRows = byDate.get(row.occurredOn);
+    if (sameDayRows) sameDayRows.push(row);
+    else byDate.set(row.occurredOn, [row]);
+  }
   for (const sameDayRows of byDate.values()) {
     const existingSequences = existingByDate.get(sameDayRows[0]!.occurredOn) ?? [];
     const supplied = sameDayRows.some((row) => row.businessSequence !== undefined);
@@ -203,25 +265,43 @@ function validateBusinessSequences(rows: readonly NormalizedRow[], issues: Impor
   }
 }
 
-async function validateOrderSequenceAgainstLedger(
+type OrderSequenceEvent = Readonly<{ occurred_on: string; source_business_sequence: number | null }>;
+
+async function loadOrderSequenceHistory(
   database: Pick<PoolClient, "query">,
-  orderNo: string,
+  orderNos: readonly string[],
+): Promise<ReadonlyMap<string, readonly OrderSequenceEvent[]>> {
+  if (!orderNos.length) return new Map();
+  const history = await database.query<OrderSequenceEvent & { order_no: string }>(
+    `select performance_order.qingflow_order_no order_no,event.occurred_on::text,event.source_business_sequence
+     from performance_events event join performance_orders performance_order on performance_order.id=event.order_id
+     where performance_order.qingflow_order_no=any($1::text[]) and event.event_type<>'legacy_adjustment'
+     order by performance_order.qingflow_order_no,event.occurred_on,event.order_sequence`,
+    [[...new Set(orderNos)]],
+  );
+  const byOrder = new Map<string, OrderSequenceEvent[]>();
+  for (const event of history.rows) {
+    const events = byOrder.get(event.order_no);
+    if (events) events.push(event);
+    else byOrder.set(event.order_no, [event]);
+  }
+  return byOrder;
+}
+
+function validateOrderSequenceAgainstLedger(
+  history: readonly OrderSequenceEvent[],
   rows: readonly NormalizedRow[],
   issues: ImportIssue[],
-): Promise<void> {
-  const history = await database.query<{ occurred_on: string; source_business_sequence: number | null }>(
-    `select event.occurred_on::text,event.source_business_sequence
-     from performance_events event join performance_orders performance_order on performance_order.id=event.order_id
-     where performance_order.qingflow_order_no=$1 and event.event_type<>'legacy_adjustment' order by event.occurred_on,event.order_sequence`,
-    [orderNo],
-  );
+): void {
   const existingByDate = new Map<string, (number | null)[]>();
-  for (const event of history.rows) {
+  for (const event of history) {
     const date = String(event.occurred_on).slice(0, 10);
-    existingByDate.set(date, [...(existingByDate.get(date) ?? []), event.source_business_sequence]);
+    const sequences = existingByDate.get(date);
+    if (sequences) sequences.push(event.source_business_sequence);
+    else existingByDate.set(date, [event.source_business_sequence]);
   }
   validateBusinessSequences(rows, issues, existingByDate);
-  const latestExistingDate = history.rows.at(-1)?.occurred_on;
+  const latestExistingDate = history.at(-1)?.occurred_on;
   if (latestExistingDate) {
     for (const row of rows) if (row.occurredOn < String(latestExistingDate).slice(0, 10)) {
       addIssue(issues, row, "EVENT_CHAIN_OUT_OF_ORDER", "不可在已有业务事件之前插入历史事件");
@@ -305,13 +385,15 @@ function sameReconciliation(left: ImportReconciliationSummary, right: ImportReco
     });
 }
 
-async function normalizeRow(
-  database: Database,
+function normalizeRow(
   config: ImportConfigRow,
   sourceHash: string,
   row: ImportSourceRow,
   issues: ImportIssue[],
-): Promise<NormalizedRow | null> {
+  peopleBySourceKey: ReadonlyMap<string, string>,
+  organizations: ReadonlyMap<string, OrganizationSnapshot>,
+  today: string,
+): NormalizedRow | null {
   for (const field of config.required_columns) {
     const value = row[field as keyof ImportSourceRow];
     if (value === undefined || value === null || value === "" || (typeof value === "number" && Number.isNaN(value))) {
@@ -340,7 +422,7 @@ async function normalizeRow(
   if (!row.salespersonSourceKey || row.salespersonSourceKey.length > 200) addIssue(issues, row, "PERSON_SOURCE_KEY_INVALID", "业务员来源标识必须是 1 至 200 个字符");
   if (row.serviceType.length > 200) addIssue(issues, row, "SERVICE_TYPE_INVALID", "服务类型不能超过 200 个字符");
   if (row.reason.length > 500) addIssue(issues, row, "REASON_INVALID", "原因不能超过 500 个字符");
-  if (!validDate(row.occurredOn) || row.occurredOn > businessDate()) {
+  if (!validDate(row.occurredOn) || row.occurredOn > today) {
     addIssue(issues, row, "OCCURRED_ON_INVALID", "发生日期无效或晚于当前业务日");
   }
   const centValue = row.amount * 100;
@@ -361,21 +443,13 @@ async function normalizeRow(
     addIssue(issues, row, "SOURCE_RECORD_ID_REQUIRED", "当前导入配置要求稳定来源记录标识");
   }
 
-  const person = await database.query<{ id: string }>(
-    "select id::text from people where source_key=$1",
-    [row.salespersonSourceKey],
-  );
-  if (person.rowCount !== 1) addIssue(issues, row, "PERSON_NOT_FOUND", "业务员来源标识无法唯一解析");
-
-  let organization: OrganizationSnapshot | null = null;
-  if (person.rows[0] && validDate(row.occurredOn)) {
-    try {
-      organization = await resolveOrganization(database, person.rows[0].id, row.occurredOn);
-    } catch {
-      addIssue(issues, row, "ORGANIZATION_NOT_RESOLVED", "发生日期找不到唯一有效组织任职及负责人");
-    }
+  const personId = peopleBySourceKey.get(row.salespersonSourceKey);
+  if (!personId) addIssue(issues, row, "PERSON_NOT_FOUND", "业务员来源标识无法唯一解析");
+  const organization = personId && validDate(row.occurredOn) ? organizations.get(organizationKey(personId, row.occurredOn)) : undefined;
+  if (personId && validDate(row.occurredOn) && !organization) {
+    addIssue(issues, row, "ORGANIZATION_NOT_RESOLVED", "发生日期找不到唯一有效组织任职及负责人");
   }
-  if (!businessRegionCode || !person.rows[0] || !organization || !eventType) return null;
+  if (!businessRegionCode || !personId || !organization || !eventType) return null;
 
   const sourceKey = row.sourceRecordId
     ? `${config.config_key}:${row.sourceRecordId}`
@@ -387,7 +461,7 @@ async function normalizeRow(
     row.amount,
     row.reason,
   ]));
-  return { ...row, eventType, sourceKey, duplicateFingerprint, businessRegionCode, personId: person.rows[0].id, organization };
+  return { ...row, eventType, sourceKey, duplicateFingerprint, businessRegionCode, personId, organization };
 }
 
 export async function preflightImportRows(database: Database, input: Readonly<{
@@ -411,10 +485,21 @@ export async function preflightImportRows(database: Database, input: Readonly<{
   const orderNumberForms = new Map<string, string>();
   const initialOrderNos = new Set<string>();
   const reconciliationSourceKeys = new Set<string>();
+  const sourceKeys = [...new Set(input.rows.map((row) => row.salespersonSourceKey))];
+  const people = sourceKeys.length
+    ? await database.query<{ id: string; source_key: string }>("select id::text,source_key from people where source_key=any($1::text[])", [sourceKeys])
+    : { rows: [] };
+  const peopleBySourceKey = new Map(people.rows.map((person) => [person.source_key, person.id]));
+  const organizationPairs = input.rows.flatMap((row) => {
+    const personId = peopleBySourceKey.get(row.salespersonSourceKey);
+    return personId && validDate(row.occurredOn) ? [{ personId, occurredOn: row.occurredOn }] : [];
+  });
+  const organizations = await loadOrganizationSnapshots(database, organizationPairs);
+  const today = businessDate();
 
   for (const row of input.rows) {
     const rowIssuesBefore = issues.length;
-    const value = await normalizeRow(database, config, sourceHash, row, issues);
+    const value = normalizeRow(config, sourceHash, row, issues, peopleBySourceKey, organizations, today);
     if (!value || issues.length !== rowIssuesBefore) continue;
     if (seenSourceKeys.has(value.sourceKey)) addIssue(issues, row, "SOURCE_KEY_DUPLICATE", "批次内来源记录标识重复");
     seenSourceKeys.add(value.sourceKey);
@@ -451,9 +536,11 @@ export async function preflightImportRows(database: Database, input: Readonly<{
 
   if (normalized.length) {
     const existing = await loadExistingImportRecords(database, normalized);
+    const existingBySourceKey = new Map(existing.flatMap((item) => item.sourceKey ? [[item.sourceKey, item] as const] : []));
+    const existingFingerprints = new Set(existing.flatMap((item) => item.duplicateFingerprint ? [item.duplicateFingerprint] : []));
     const exactDuplicates = new Set<string>();
     for (const row of normalized) {
-      const sameSource = existing.find((duplicate) => duplicate.sourceKey === row.sourceKey);
+      const sameSource = existingBySourceKey.get(row.sourceKey);
       if (sameSource) {
         const samePayload = sameSource.sourcePayloadFingerprint
           ? sameSource.sourcePayloadFingerprint === sourcePayloadFingerprint(row)
@@ -468,7 +555,7 @@ export async function preflightImportRows(database: Database, input: Readonly<{
         }
         continue;
       }
-      if (existing.some((duplicate) => duplicate.duplicateFingerprint === row.duplicateFingerprint)) {
+      if (existingFingerprints.has(row.duplicateFingerprint)) {
         addIssue(issues, row, "CROSS_FILE_DUPLICATE_CANDIDATE", "发现跨文件疑似重复记录，必须回到权威来源核实");
       }
     }
@@ -506,10 +593,20 @@ export async function preflightImportRows(database: Database, input: Readonly<{
        where regexp_replace(lower(normalize(qingflow_order_no,NFKC)),'[[:space:]]+','','g')=any($1::text[])`,
       [[...new Set(initialRows.map((row) => comparableOrderNo(row.orderNo)))]],
     );
+    const variantsByComparable = new Map<string, Set<string>>();
+    for (const order of existingVariants.rows) {
+      const comparable = comparableOrderNo(order.qingflow_order_no);
+      const forms = variantsByComparable.get(comparable) ?? new Set<string>();
+      forms.add(order.qingflow_order_no);
+      variantsByComparable.set(comparable, forms);
+    }
     for (const row of initialRows) {
-      const variant = existingVariants.rows.find((order) => comparableOrderNo(order.qingflow_order_no) === comparableOrderNo(row.orderNo)
-        && order.qingflow_order_no !== row.orderNo);
-      if (variant) addIssue(issues, row, "ORDER_NO_VARIANT", `订单编号与已有订单“${variant.qingflow_order_no}”仅大小写、空格或全半角不同`);
+      const forms = variantsByComparable.get(comparableOrderNo(row.orderNo));
+      if (!forms) continue;
+      for (const variant of forms) if (variant !== row.orderNo) {
+        addIssue(issues, row, "ORDER_NO_VARIANT", `订单编号与已有订单“${variant}”仅大小写、空格或全半角不同`);
+        break;
+      }
     }
     const existingOrders = await database.query<{ qingflow_order_no: string }>(
       "select qingflow_order_no from performance_orders where qingflow_order_no=any($1::text[])",
@@ -523,10 +620,14 @@ export async function preflightImportRows(database: Database, input: Readonly<{
 
   const normalGroups = new Map<string, NormalizedRow[]>();
   for (const row of normalized) {
-    if (row.eventType !== "legacy_adjustment") normalGroups.set(row.orderNo, [...(normalGroups.get(row.orderNo) ?? []), row]);
+    if (row.eventType === "legacy_adjustment") continue;
+    const rows = normalGroups.get(row.orderNo);
+    if (rows) rows.push(row);
+    else normalGroups.set(row.orderNo, [row]);
   }
+  const sequenceHistory = await loadOrderSequenceHistory(database, [...normalGroups.keys()]);
   for (const [orderNo, rows] of normalGroups) {
-    await validateOrderSequenceAgainstLedger(database, orderNo, rows, issues);
+    validateOrderSequenceAgainstLedger(sequenceHistory.get(orderNo) ?? [], rows, issues);
     const existing = existingOrderFacts.get(orderNo);
     if (existing?.lifecycle_state === "historical_review_required") {
       addIssue(issues, rows[0]!, "EVENT_CHAIN_INVALID", "历史待核订单完成核对前不能导入新的业务事件");
@@ -538,10 +639,32 @@ export async function preflightImportRows(database: Database, input: Readonly<{
     simulateOrderRows(initialState, rows, issues);
   }
 
-  for (const row of normalized) {
-    if (reconciliationSourceKeys.has(row.sourceKey)) continue;
-    const period = await database.query<{ status: string }>("select status from accounting_periods where period_month=$1", [accountingMonth(row.occurredOn)]);
-    const closed = period.rows[0]?.status === "closed";
+  const rowsRequiringPeriodCheck = normalized.filter((row) => !reconciliationSourceKeys.has(row.sourceKey));
+  const months = [...new Set(rowsRequiringPeriodCheck.map((row) => accountingMonth(row.occurredOn)))];
+  const periods = months.length
+    ? await database.query<{ period_month: string; status: string }>(
+      "select period_month::text,status from accounting_periods where period_month=any($1::date[])",
+      [months],
+    )
+    : { rows: [] };
+  const closedMonths = new Set(periods.rows.filter((period) => period.status === "closed").map((period) => String(period.period_month).slice(0, 10)));
+  const correctionIds = [...new Set(rowsRequiringPeriodCheck.flatMap((row) => row.correctionRequestId === undefined ? [] : [row.correctionRequestId]))];
+  const corrections = correctionIds.length
+    ? await database.query<{ id: string; order_no: string; event_type: string; occurred_on: string; period_month: string }>(
+      `select request_row.id::text,performance_order.qingflow_order_no order_no,request_row.event_type,
+              request_row.occurred_on::text,request_row.period_month::text
+       from accounting_correction_requests request_row
+       join performance_orders performance_order on performance_order.id=request_row.order_id
+       join people actor on actor.user_id=$2
+       where request_row.id=any($1::bigint[]) and request_row.status='approved' and request_row.expires_at>now()
+         and request_row.reviewed_by_person_id is distinct from actor.id`,
+      [correctionIds, input.actorUserId],
+    )
+    : { rows: [] };
+  const correctionsById = new Map(corrections.rows.map((correction) => [Number(correction.id), correction]));
+  for (const row of rowsRequiringPeriodCheck) {
+    const month = accountingMonth(row.occurredOn);
+    const closed = closedMonths.has(month);
     if (!closed) {
       if (row.correctionRequestId !== undefined) addIssue(issues, row, "CORRECTION_REQUEST_NOT_NEEDED", "开放期间不能使用历史更正授权");
       continue;
@@ -550,22 +673,19 @@ export async function preflightImportRows(database: Database, input: Readonly<{
       addIssue(issues, row, "CLOSED_PERIOD_AUTHORIZATION_REQUIRED", "关闭期间导入必须提供匹配的一次性历史更正授权");
       continue;
     }
-    const correction = await database.query(
-      `select 1 from accounting_correction_requests request_row
-       join performance_orders performance_order on performance_order.id=request_row.order_id
-       join people actor on actor.user_id=$2
-       where request_row.id=$1 and performance_order.qingflow_order_no=$3 and request_row.event_type=$4
-         and request_row.occurred_on=$5 and request_row.period_month=$6 and request_row.status='approved'
-         and request_row.expires_at>now() and request_row.reviewed_by_person_id is distinct from actor.id`,
-      [row.correctionRequestId, input.actorUserId, row.orderNo, row.eventType, row.occurredOn, accountingMonth(row.occurredOn)],
-    );
-    if (!correction.rowCount) addIssue(issues, row, "CLOSED_PERIOD_AUTHORIZATION_INVALID", "历史更正授权不存在、已失效或与订单事件日期不匹配");
+    const correction = correctionsById.get(row.correctionRequestId);
+    if (!correction || correction.order_no !== row.orderNo || correction.event_type !== row.eventType
+      || String(correction.occurred_on).slice(0, 10) !== row.occurredOn || String(correction.period_month).slice(0, 10) !== month) {
+      addIssue(issues, row, "CLOSED_PERIOD_AUTHORIZATION_INVALID", "历史更正授权不存在、已失效或与订单事件日期不匹配");
+    }
   }
 
   const legacyGroups = new Map<string, NormalizedRow[]>();
   for (const row of normalized) {
     if (row.eventType === "legacy_adjustment" && !reconciliationSourceKeys.has(row.sourceKey)) {
-      legacyGroups.set(row.orderNo, [...(legacyGroups.get(row.orderNo) ?? []), row]);
+      const rows = legacyGroups.get(row.orderNo);
+      if (rows) rows.push(row);
+      else legacyGroups.set(row.orderNo, [row]);
     }
   }
   if (legacyGroups.size) {
@@ -587,8 +707,16 @@ export async function preflightImportRows(database: Database, input: Readonly<{
     }
   }
 
-  const blocking = issues.filter((issue) => issue.severity === "blocking").length;
-  const warnings = issues.filter((issue) => issue.severity === "warning").length;
+  let blocking = 0;
+  let warnings = 0;
+  const issuesByRow = new Map<number, ImportIssue[]>();
+  for (const issue of issues) {
+    if (issue.severity === "blocking") blocking += 1;
+    if (issue.severity === "warning") warnings += 1;
+    const rowIssues = issuesByRow.get(issue.rowNumber);
+    if (rowIssues) rowIssues.push(issue);
+    else issuesByRow.set(issue.rowNumber, [issue]);
+  }
   const rowsToImport = normalized.filter((row) => !reconciliationSourceKeys.has(row.sourceKey));
   const orders = new Set(rowsToImport.map((row) => row.orderNo)).size;
   const totalAmount = Math.round(rowsToImport.reduce((sum, row) => sum + row.amount, 0) * 100) / 100;
@@ -606,12 +734,20 @@ export async function preflightImportRows(database: Database, input: Readonly<{
        JSON.stringify({ actual: actualReconciliation, expected: expectedReconciliation, matched: reconciliationMatched })],
     );
     batchId = batch.rows[0]!.id;
-    for (const row of normalized) {
-      const rowIssues = issues.filter((issue) => issue.rowNumber === row.rowNumber);
+    if (normalized.length) {
       await client.query(
         `insert into import_batch_rows(batch_id,source_sheet,source_row_number,source_key,duplicate_fingerprint,normalized_data,issues)
-         values($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb)`,
-        [batchId, row.sheet, row.rowNumber, row.sourceKey, row.duplicateFingerprint, JSON.stringify(row), JSON.stringify(rowIssues)],
+         select $1,item->>'sourceSheet',(item->>'sourceRowNumber')::int,item->>'sourceKey',item->>'duplicateFingerprint',
+                item->'normalizedData',item->'issues'
+         from jsonb_array_elements($2::jsonb) item`,
+        [batchId, JSON.stringify(normalized.map((row) => ({
+          sourceSheet: row.sheet,
+          sourceRowNumber: row.rowNumber,
+          sourceKey: row.sourceKey,
+          duplicateFingerprint: row.duplicateFingerprint,
+          normalizedData: row,
+          issues: issuesByRow.get(row.rowNumber) ?? [],
+        })))],
       );
     }
     await client.query(
@@ -719,6 +855,21 @@ async function updateLegacyOrderProjection(client: PoolClient, orderId: string, 
   );
 }
 
+async function assertAccountingPeriodsOpen(client: PoolClient, months: readonly string[]): Promise<void> {
+  const uniqueMonths = [...new Set(months)].sort();
+  if (!uniqueMonths.length) return;
+  await client.query(
+    "insert into accounting_periods(period_month) select unnest($1::date[]) on conflict do nothing",
+    [uniqueMonths],
+  );
+  const periods = await client.query<{ period_month: string; status: string }>(
+    "select period_month::text,status from accounting_periods where period_month=any($1::date[]) order by period_month for update",
+    [uniqueMonths],
+  );
+  const closed = periods.rows.find((period) => period.status === "closed");
+  if (closed) throw new AccountingPeriodError(`记账期间已关闭：${String(closed.period_month).slice(0, 7)}`);
+}
+
 export async function confirmImportBatch(database: Database, batchId: string, actorUserId: string, confirmedWarnings: readonly string[], ipAddress = "127.0.0.1") {
   const client = await database.connect();
   let ledgerAttempted = false;
@@ -748,26 +899,22 @@ export async function confirmImportBatch(database: Database, batchId: string, ac
     }
     if (batch.status === "blocked") throw new ImportJobError("导入批次存在阻断错误，不能确认");
     if (batch.status !== "preflight_ready") throw new ImportJobError("导入批次当前状态不能确认");
-    const warningKeys = batch.anomalies.filter((issue) => issue.severity === "warning").map(warningConfirmationKey);
-    if (warningKeys.some((key) => !confirmedWarnings.includes(key))) throw new ImportJobError("必须逐项确认全部预检警告");
+    const confirmedWarningKeys = new Set(confirmedWarnings);
+    if (batch.anomalies.some((issue) => issue.severity === "warning" && !confirmedWarningKeys.has(warningConfirmationKey(issue)))) {
+      throw new ImportJobError("必须逐项确认全部预检警告");
+    }
 
     const loaded = await client.query<{ id: string; normalized_data: NormalizedRow }>(
       "select id::text,normalized_data from import_batch_rows where batch_id=$1 order by source_sheet,source_row_number",
       [batchId],
     );
     const preflightRows = loaded.rows.map((item) => item.normalized_data);
+    const batchRowIdsBySourceKey = new Map(loaded.rows.map((item) => [item.normalized_data.sourceKey, item.id]));
     ledgerAttempted = true;
-    const currentOrganizations = new Map<string, Promise<OrganizationSnapshot>>();
+    const currentOrganizations = await loadOrganizationSnapshots(client, preflightRows.map((row) => ({ personId: row.personId, occurredOn: row.occurredOn })));
     for (const row of preflightRows) {
-      const key = `${row.personId}:${row.occurredOn}`;
-      const current = currentOrganizations.get(key) ?? resolveOrganization(client, row.personId, row.occurredOn);
-      currentOrganizations.set(key, current);
-      try {
-        if (!sameOrganizationSnapshot(await current, row.organization)) {
-          throw new ImportJobError(`第 ${row.rowNumber} 行预检后的组织关系已变化，请重新预检`);
-        }
-      } catch (error) {
-        if (error instanceof ImportJobError) throw error;
+      const current = currentOrganizations.get(organizationKey(row.personId, row.occurredOn));
+      if (!current || !sameOrganizationSnapshot(current, row.organization)) {
         throw new ImportJobError(`第 ${row.rowNumber} 行预检后的组织关系已变化，请重新预检`);
       }
     }
@@ -785,7 +932,7 @@ export async function confirmImportBatch(database: Database, batchId: string, ac
           throw new ImportJobError(`确认时发现稳定来源记录载荷不一致：第 ${row.rowNumber} 行`);
         }
         if (row.eventType === "legacy_adjustment" && !existingRecord.importBatchId && !existingRecord.reconciliationId) {
-          const batchRowId = loaded.rows.find((item) => item.normalized_data.sourceKey === row.sourceKey)?.id;
+          const batchRowId = batchRowIdsBySourceKey.get(row.sourceKey);
           if (!batchRowId) throw new ImportJobError(`第 ${row.rowNumber} 行缺少核对来源证据`);
           reconciliationRows.push({ row, eventId: existingRecord.eventId, batchRowId });
         }
@@ -795,14 +942,21 @@ export async function confirmImportBatch(database: Database, batchId: string, ac
       return true;
     });
     const groups = new Map<string, NormalizedRow[]>();
-    for (const row of rows) groups.set(row.orderNo, [...(groups.get(row.orderNo) ?? []), row]);
+    const normalOrderNos = new Set<string>();
+    for (const row of rows) {
+      const orderRows = groups.get(row.orderNo);
+      if (orderRows) orderRows.push(row);
+      else groups.set(row.orderNo, [row]);
+      if (row.eventType !== "legacy_adjustment") normalOrderNos.add(row.orderNo);
+    }
     let importedOrders = 0;
     let importedEvents = 0;
     let reconciledEvents = 0;
-
-    for (const reconciliation of reconciliationRows.sort((left,right)=>compareImportRows(left.row,right.row))) {
-      const existing = await client.query<Record<string, unknown>>(
-        `select event.id::text,event.event_type,event.import_batch_id::text,event.order_id::text,
+    const reconciliationEventIds = reconciliationRows.map((item) => item.eventId);
+    const reconciliationEvents = reconciliationEventIds.length
+      ? await client.query<Record<string, unknown> & { event_id: string }>(
+        `select event.id::text event_id,coalesce(event.source_key,source_evidence.source_key) source_key,
+                event.event_type,event.import_batch_id::text,event.order_id::text,
                 performance_order.customer_name,performance_order.customer_unit,
                 performance_order.business_region_source_text,performance_order.business_region_code,
                 performance_order.salesperson_person_id::text,performance_order.service_type,
@@ -810,11 +964,15 @@ export async function confirmImportBatch(database: Database, batchId: string, ac
                 (select count(*)::int from performance_events where order_id=performance_order.id and event_type<>'legacy_adjustment') non_legacy_event_count
          from performance_events event join performance_orders performance_order on performance_order.id=event.order_id
          left join legacy_event_source_evidence source_evidence on source_evidence.event_id=event.id
-         where event.id=$1 and coalesce(event.source_key,source_evidence.source_key)=$2 for update of performance_order`,
-        [reconciliation.eventId, reconciliation.row.sourceKey],
-      );
-      const event = existing.rows[0];
-      if (!event || event.event_type !== "legacy_adjustment" || event.import_batch_id) {
+         where event.id=any($1::bigint[]) for update of performance_order`,
+        [reconciliationEventIds],
+      )
+      : { rows: [] };
+    const reconciliationEventsById = new Map(reconciliationEvents.rows.map((event) => [event.event_id, event]));
+
+    for (const reconciliation of reconciliationRows.sort((left,right)=>compareImportRows(left.row,right.row))) {
+      const event = reconciliationEventsById.get(reconciliation.eventId);
+      if (!event || event.source_key !== reconciliation.row.sourceKey || event.event_type !== "legacy_adjustment" || event.import_batch_id) {
         throw new ImportJobError(`第 ${reconciliation.row.rowNumber} 行既有历史事件状态已变化，请重新预检`);
       }
       const differences = orderFactDifferences(event, reconciliation.row);
@@ -828,40 +986,48 @@ export async function confirmImportBatch(database: Database, batchId: string, ac
       reconciledEvents += 1;
     }
 
+    const orderNos = [...groups.keys()];
+    const existingOrders = orderNos.length
+      ? await client.query<Record<string, unknown>>(
+        `select id::text,qingflow_order_no,customer_name,customer_unit,business_region_source_text,business_region_code,
+                salesperson_person_id::text,service_type,source_received_on::text,original_amount::text,
+                current_revenue::text,counted_amount::text,lifecycle_state,
+                (select count(*)::int from performance_events where order_id=performance_orders.id) as event_count,
+                (select count(*)::int from performance_events where order_id=performance_orders.id and event_type<>'legacy_adjustment') non_legacy_event_count
+         from performance_orders where qingflow_order_no=any($1::text[]) for update`,
+        [orderNos],
+      )
+      : { rows: [] };
+    const existingOrdersByOrderNo = new Map(existingOrders.rows.map((order) => [String(order.qingflow_order_no), order]));
+    const sequenceHistory = await loadOrderSequenceHistory(client, [...normalOrderNos]);
+    await assertAccountingPeriodsOpen(client, rows.flatMap((row) => row.correctionRequestId === undefined ? [accountingMonth(row.occurredOn)] : []));
+
     for (const [orderNo, orderRows] of groups) {
       orderRows.sort(compareImportRows);
       const first = orderRows[0]!;
       const allLegacy = orderRows.every((row) => row.eventType === "legacy_adjustment");
-      const existing = await client.query<Record<string, unknown>>(
-        `select id::text,customer_name,customer_unit,business_region_source_text,business_region_code,salesperson_person_id::text,service_type,
-                source_received_on::text,original_amount::text,
-                current_revenue::text,counted_amount::text,lifecycle_state,
-                (select count(*)::int from performance_events where order_id=performance_orders.id) as event_count,
-                (select count(*)::int from performance_events where order_id=performance_orders.id and event_type<>'legacy_adjustment') non_legacy_event_count
-         from performance_orders where qingflow_order_no=$1 for update`,
-        [orderNo],
-      );
+      const existing = existingOrdersByOrderNo.get(orderNo);
       let orderId: string;
       let counted = 0;
       let state: PerformanceState = { currentRevenue: 0, countedAmount: 0, lifecycle: "draft" };
       let priorEventCount = 0;
       let preserveHistoricalReview = false;
       let latestLegacyProjection: { row: NormalizedRow; eventId: string } | undefined;
-      if (existing.rows[0]) {
-        const differences = orderFactDifferences(existing.rows[0], first);
+      if (existing) {
+        const differences = orderFactDifferences(existing, first);
         if (differences.length) throw new ImportJobError(`订单基础事实冲突：${orderNo}；字段差异：${differences.join("、")}`);
-        orderId = String(existing.rows[0].id);
-        counted = Number(existing.rows[0].counted_amount);
+        orderId = String(existing.id);
+        counted = Number(existing.counted_amount);
         if (!allLegacy) {
-          if (existing.rows[0].lifecycle_state === "historical_review_required") throw new ImportJobError(`历史待核订单不能导入新的业务事件：${orderNo}`);
+          if (existing.lifecycle_state === "historical_review_required") throw new ImportJobError(`历史待核订单不能导入新的业务事件：${orderNo}`);
           state = {
-            currentRevenue: Number(existing.rows[0].current_revenue),
-            countedAmount: Number(existing.rows[0].counted_amount),
-            lifecycle: existing.rows[0].lifecycle_state as PerformanceState["lifecycle"],
+            currentRevenue: Number(existing.current_revenue),
+            countedAmount: Number(existing.counted_amount),
+            lifecycle: existing.lifecycle_state as PerformanceState["lifecycle"],
           };
         }
-        priorEventCount = Number(existing.rows[0].event_count);
-        preserveHistoricalReview = existing.rows[0].lifecycle_state === "historical_review_required";
+        priorEventCount = Number(existing.event_count);
+        preserveHistoricalReview = existing.lifecycle_state === "historical_review_required";
       } else {
         const total = Math.round(orderRows.reduce((sum, row) => sum + row.amount, 0) * 100) / 100;
         const lifecycle = allLegacy
@@ -881,7 +1047,7 @@ export async function confirmImportBatch(database: Database, batchId: string, ac
       }
       if (!allLegacy) {
         const sequenceIssues: ImportIssue[] = [];
-        await validateOrderSequenceAgainstLedger(client, orderNo, orderRows, sequenceIssues);
+        validateOrderSequenceAgainstLedger(sequenceHistory.get(orderNo) ?? [], orderRows, sequenceIssues);
         if (sequenceIssues.length) throw new ImportJobError(`确认时事件顺序已变化，请重新预检：${sequenceIssues[0]!.message}`);
       }
       for (const row of orderRows) {
@@ -891,8 +1057,6 @@ export async function confirmImportBatch(database: Database, batchId: string, ac
           if (correction.periodMonth !== accountingMonth(row.occurredOn) || String(correction.occurredOn).slice(0, 10) !== row.occurredOn) {
             throw new ImportJobError(`第 ${row.rowNumber} 行更正授权与发生日期不匹配`);
           }
-        } else {
-          await assertAccountingPeriodOpen(client, accountingMonth(row.occurredOn));
         }
         let eventId: string;
         if (row.eventType === "legacy_adjustment") {

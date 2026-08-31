@@ -17,9 +17,33 @@ type BuildAppOptions = {
   trustProxy?: boolean | string | string[];
 };
 
+const SAFE_FASTIFY_CLIENT_ERRORS = new Set([
+  "FST_ERR_CTP_BODY_TOO_LARGE",
+  "FST_ERR_CTP_EMPTY_JSON_BODY",
+  "FST_ERR_CTP_INVALID_JSON_BODY",
+  "FST_ERR_CTP_INVALID_MEDIA_TYPE",
+  "FST_ERR_VALIDATION",
+]);
+
 export async function buildApp(options: BuildAppOptions = {}) {
   const database = options.database ?? db;
   const app = Fastify({ logger: options.logger ?? true, trustProxy: options.trustProxy ?? config.trustProxy });
+
+  app.setErrorHandler((error, request, reply) => {
+    const statusCode = typeof error === "object" && error !== null && "statusCode" in error && typeof error.statusCode === "number"
+      ? error.statusCode
+      : null;
+    const errorCode = typeof error === "object" && error !== null && "code" in error && typeof error.code === "string"
+      ? error.code
+      : null;
+    if (statusCode && statusCode < 500 && errorCode && SAFE_FASTIFY_CLIENT_ERRORS.has(errorCode)) return reply.send(error);
+    request.log.error({ err: error, requestId: request.id }, "API 未知异常");
+    return reply.code(500).send({
+      code: "INTERNAL_ERROR",
+      message: "服务暂时不可用，请稍后重试",
+      requestId: request.id,
+    });
+  });
 
   await app.register(cookie);
   await registerAuth(app, database, options.clock);
