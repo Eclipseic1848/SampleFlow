@@ -75,6 +75,7 @@ test("干净隔离数据库可应用全部现有迁移", async () => {
         "016_goal_governance.sql",
         "017_controlled_performance_import.sql",
         "018_add_import_reconciliation.sql",
+        "019_performance_order_cursor.sql",
       ]);
     } finally {
       await client.end();

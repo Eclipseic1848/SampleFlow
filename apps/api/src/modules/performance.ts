@@ -36,6 +36,39 @@ const groupAchievementQuerySchema = dashboardQuerySchema.extend({
 const departmentAchievementQuerySchema = dashboardQuerySchema.extend({
   departmentId: z.coerce.number().int().positive(),
 });
+const ORDER_PAGE_SIZE = 50;
+const orderListQuerySchema = z.object({
+  search: z.string().trim().max(100).optional(),
+  cursor: z.string().min(1).max(2048).optional(),
+});
+const postgresBigintIdSchema = z.string().refine(
+  (value) => /^[1-9]\d*$/.test(value) && BigInt(value) <= 9_223_372_036_854_775_807n,
+);
+const orderCursorSchema = z.strictObject({
+  version: z.literal(1),
+  direction: z.enum(["next", "previous"]),
+  anchorCreatedAt: z.iso.datetime(),
+  anchorId: postgresBigintIdSchema,
+  cutoffCreatedAt: z.iso.datetime(),
+  cutoffId: postgresBigintIdSchema,
+  search: z.string().max(100),
+  userId: postgresBigintIdSchema,
+});
+type OrderCursor = z.infer<typeof orderCursorSchema>;
+
+function encodeOrderCursor(cursor: OrderCursor): string {
+  return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
+}
+
+function decodeOrderCursor(value: string): OrderCursor | null {
+  if (!/^[A-Za-z0-9_-]+$/.test(value)) return null;
+  try {
+    const parsed = orderCursorSchema.safeParse(JSON.parse(Buffer.from(value, "base64url").toString("utf8")));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+}
 
 const DEPARTMENT_ACHIEVEMENT_ROLES = ["sales_supervisor", "sales_manager", "hr", "general_manager"] as const;
 const SALES_ACHIEVEMENT_ROLES = ["sales_manager", "hr", "general_manager"] as const;
@@ -939,11 +972,18 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
     if (!request.currentUser) return reply.code(401).send({ message: "尚未登录" });
     const access = await resolvePerformanceAccess(db, request.currentUser);
     if (!canReadPerformance(access)) return reply.code(403).send({ message: "当前角色没有业务查看权限" });
-    const query = z.object({ search: z.string().trim().max(100).optional(), limit: z.coerce.number().int().min(1).max(100).default(30) }).safeParse(request.query);
+    const query = orderListQuerySchema.safeParse(request.query);
     if (!query.success) return reply.code(400).send({ message: "查询条件无效" });
-    const term = query.data.search ? `%${query.data.search}%` : null;
-    const result = await db.query(
-      `select id::text, qingflow_order_no as "orderNo", customer_name as "customerName",
+    const search = query.data.search ?? "";
+    const cursor = query.data.cursor ? decodeOrderCursor(query.data.cursor) : null;
+    if (query.data.cursor && (!cursor || cursor.search !== search || cursor.userId !== request.currentUser.id)) {
+      return reply.code(400).send({ code: "ORDER_CURSOR_INVALID", message: "分页游标无效或已不适用于当前查询" });
+    }
+    const term = search ? `%${search}%` : null;
+    const direction = cursor?.direction ?? "next";
+    type OrderListRow = Record<string, unknown> & { id: string; __cursorCreatedAt: Date };
+    const result = await db.query<OrderListRow>(
+      `select id::text, created_at as "__cursorCreatedAt", qingflow_order_no as "orderNo", customer_name as "customerName",
               customer_unit as "customerUnit", performance_orders.salesperson_name as "salespersonName", service_type as "serviceType",
               source_received_on as "sourceReceivedOn", original_amount::text as "originalAmount",
               current_revenue::text as "currentRevenue", counted_amount::text as "countedAmount",
@@ -951,13 +991,51 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
               latest.department_name as "departmentName", latest.group_name as "groupName",
               latest.leader_name as "leaderName", latest.supervisor_name as "supervisorName"
        from performance_orders
-       left join lateral (select salesperson_person_id,department_unit_id,group_unit_id,salesperson_name,department_name,group_name,leader_name,supervisor_name from performance_events where order_id=performance_orders.id order by occurred_on desc,id desc limit 1) latest on true
-       where ($1::text is null or performance_orders.qingflow_order_no ilike $1 or performance_orders.salesperson_name ilike $1 or performance_orders.customer_name ilike $1)
+       left join (
+         select distinct on (order_id) order_id,salesperson_person_id,department_unit_id,group_unit_id,
+                salesperson_name,department_name,group_name,leader_name,supervisor_name
+         from performance_events order by order_id,occurred_on desc,id desc
+       ) latest on latest.order_id=performance_orders.id
+       where ($1::text is null or performance_orders.qingflow_order_no ilike $1 or performance_orders.salesperson_name ilike $1 or performance_orders.customer_name ilike $1 or performance_orders.customer_unit ilike $1)
          and ${performanceScopeSql("latest", 3)}
-       order by posted_at desc nulls last, id desc limit $2`,
-      [term, query.data.limit, ...performanceScopeValues(access)],
+         ${cursor ? `and (performance_orders.created_at,performance_orders.id)<=($7::timestamptz,$8::bigint)
+         and (performance_orders.created_at,performance_orders.id)${direction === "next" ? "<" : ">"}($9::timestamptz,$10::bigint)` : ""}
+       order by performance_orders.created_at ${direction === "previous" ? "asc" : "desc"},performance_orders.id ${direction === "previous" ? "asc" : "desc"}
+       limit $2`,
+      [
+        term,
+        ORDER_PAGE_SIZE + 1,
+        ...performanceScopeValues(access),
+        ...(cursor ? [cursor.cutoffCreatedAt, cursor.cutoffId, cursor.anchorCreatedAt, cursor.anchorId] : []),
+      ],
     );
-    return { orders: result.rows };
+    const hasExtra = result.rows.length > ORDER_PAGE_SIZE;
+    const pageRows = result.rows.slice(0, ORDER_PAGE_SIZE);
+    if (direction === "previous") pageRows.reverse();
+    const cutoff = cursor ?? (pageRows[0] ? {
+      cutoffCreatedAt: pageRows[0].__cursorCreatedAt.toISOString(),
+      cutoffId: pageRows[0].id,
+    } : null);
+    const makeCursor = (cursorDirection: OrderCursor["direction"], anchor: OrderListRow): string => encodeOrderCursor({
+      version: 1,
+      direction: cursorDirection,
+      anchorCreatedAt: anchor.__cursorCreatedAt.toISOString(),
+      anchorId: anchor.id,
+      cutoffCreatedAt: cutoff!.cutoffCreatedAt,
+      cutoffId: cutoff!.cutoffId,
+      search,
+      userId: request.currentUser!.id,
+    });
+    const first = pageRows[0];
+    const last = pageRows.at(-1);
+    const previousCursor = first && cursor && (cursor.direction === "next" || hasExtra) ? makeCursor("previous", first) : null;
+    const nextCursor = last && (cursor?.direction === "previous" || hasExtra) ? makeCursor("next", last) : null;
+    return {
+      orders: pageRows.map(({ __cursorCreatedAt: _createdAt, ...order }) => order),
+      previousCursor,
+      nextCursor,
+      pageSize: ORDER_PAGE_SIZE,
+    };
   });
 
   app.get("/api/performance/orders/:id/events", async (request, reply) => {

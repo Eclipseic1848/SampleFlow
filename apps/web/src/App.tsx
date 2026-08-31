@@ -300,6 +300,9 @@ function OrdersPage({ user }: { user: User }) {
   const [isComposing, setIsComposing] = useState(false);
   const [loading, setLoading] = useState(true);
   const [refreshVersion, setRefreshVersion] = useState(0);
+  const [pageCursor, setPageCursor] = useState<string | null>(null);
+  const [previousCursor, setPreviousCursor] = useState<string | null>(null);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const commitSearch = useCallback((value:string, historyMode:"push"|"replace"="push") => {
     const normalized=value.trim();
@@ -307,10 +310,11 @@ function OrdersPage({ user }: { user: User }) {
     if(normalized)params.set("orderSearch",normalized);else params.delete("orderSearch");
     const next=`${window.location.pathname}${params.size?`?${params.toString()}`:""}${window.location.hash}`;
     window.history[historyMode==="push"?"pushState":"replaceState"]({},"",next);
+    setPageCursor(null);
     setCommittedSearch(normalized);
   },[]);
   useEffect(()=>{
-    const restore=()=>{const value=new URLSearchParams(window.location.search).get("orderSearch")??"";setSearch(value);setCommittedSearch(value);};
+    const restore=()=>{const value=new URLSearchParams(window.location.search).get("orderSearch")??"";setSearch(value);setPageCursor(null);setCommittedSearch(value);};
     window.addEventListener("popstate",restore);return()=>window.removeEventListener("popstate",restore);
   },[]);
   useEffect(()=>{
@@ -320,24 +324,27 @@ function OrdersPage({ user }: { user: User }) {
   },[search,isComposing,committedSearch,commitSearch]);
   useEffect(() => {
     const controller=new AbortController();setLoading(true);setMessage("");
-    const params=new URLSearchParams({limit:"100"});if(committedSearch)params.set("search",committedSearch);
+    const params=new URLSearchParams();if(committedSearch)params.set("search",committedSearch);if(pageCursor)params.set("cursor",pageCursor);
     fetch(`/api/performance/orders?${params.toString()}`,{signal:controller.signal}).then(async(response)=>{
-      const data=await response.json() as {orders?:Order[];message?:string};
+      const data=await response.json() as {orders?:Order[];previousCursor?:string|null;nextCursor?:string|null;message?:string};
       if(!response.ok)throw new Error(data.message??"订单加载失败");
       setOrders(data.orders??[]);
+      setPreviousCursor(data.previousCursor??null);setNextCursor(data.nextCursor??null);
     }).catch((error)=>{if(error instanceof DOMException&&error.name==="AbortError")return;setMessage(error instanceof Error?error.message:"订单加载失败");})
       .finally(()=>{if(!controller.signal.aborted)setLoading(false);});
     return()=>controller.abort();
-  }, [committedSearch,refreshVersion]);
-  async function refresh() { setRefreshVersion((value)=>value+1); }
+  }, [committedSearch,pageCursor,refreshVersion]);
+  async function refresh() { setPageCursor(null);setRefreshVersion((value)=>value+1); }
+  function movePage(cursor:string|null){if(!cursor)return;if(cursor===pageCursor)setRefreshVersion((value)=>value+1);else setPageCursor(cursor);}
   function clearSearch(){setSearch("");commitSearch("");window.requestAnimationFrame(()=>searchRef.current?.focus());}
   return <main className="dashboard orders-page"><header><div><h1>订单业绩</h1><p>按订单编号维护不可变业绩事件；已入账记录不能覆盖或删除</p></div>{canEdit ? <div className="header-actions"><button className="secondary-action" onClick={() => setShowImport(true)}><FileUp size={16}/>Excel 导入</button><button className="primary-action" onClick={() => setShowCreate(true)}><Plus size={16}/>录入新订单</button></div> : null}</header>
     {message ? <p className="page-message" role="status">{message}</p> : null}
     {!canEdit ? <div className="permission-note"><ShieldCheck size={18}/>当前角色仅可查看。只有销售助理及销售助理组长可以录入或调整业绩。</div> : null}
     <LedgerGovernancePanel user={user} orders={orders} onChanged={refresh}/>
-    <section className="orders-card" aria-labelledby="orders-table-title"><div className="orders-toolbar"><div><h2 id="orders-table-title">订单台账</h2><span role="status">{loading?"正在查询…":`${orders.length} 笔订单`}</span></div><button className="icon-action" onClick={() => refresh()} aria-label="刷新订单"><RefreshCw size={17}/></button></div>
-      <form className="order-search" role="search" noValidate onSubmit={(event)=>{event.preventDefault();if(!isComposing)commitSearch(search);}}><label htmlFor="order-search-input">定位订单</label><div><Search size={17} aria-hidden="true"/><input ref={searchRef} id="order-search-input" type="search" value={search} placeholder="输入订单编号、客户或业务员" onChange={(event)=>setSearch(event.target.value)} onCompositionStart={()=>setIsComposing(true)} onCompositionEnd={(event)=>{setIsComposing(false);setSearch(event.currentTarget.value);}}/>{search?<button type="button" onClick={clearSearch} aria-label="清除订单搜索"><X size={16}/></button>:null}</div><button type="submit">搜索</button></form>
+    <section className="orders-card" aria-labelledby="orders-table-title"><div className="orders-toolbar"><div><h2 id="orders-table-title">订单台账</h2><span role="status">{loading?"正在查询…":`本页 ${orders.length} 笔订单`}</span></div><button className="icon-action" onClick={() => refresh()} aria-label="刷新订单"><RefreshCw size={17}/></button></div>
+      <form className="order-search" role="search" noValidate onSubmit={(event)=>{event.preventDefault();if(!isComposing)commitSearch(search);}}><label htmlFor="order-search-input">定位订单</label><div><Search size={17} aria-hidden="true"/><input ref={searchRef} id="order-search-input" type="search" value={search} placeholder="输入订单编号、客户名称、客户单位或业务员" onChange={(event)=>setSearch(event.target.value)} onCompositionStart={()=>setIsComposing(true)} onCompositionEnd={(event)=>{setIsComposing(false);setSearch(event.currentTarget.value);}}/>{search?<button type="button" onClick={clearSearch} aria-label="清除订单搜索"><X size={16}/></button>:null}</div><button type="submit">搜索</button></form>
       <div className="orders-table-wrap"><table><thead><tr><th scope="col">订单编号</th><th scope="col">客户</th><th scope="col">业务员</th><th scope="col">当前营业额</th><th scope="col">计入业绩</th><th scope="col">状态</th><th scope="col">操作</th></tr></thead><tbody>{!loading&&orders.length === 0 ? <tr><td colSpan={7} className="empty-cell">{committedSearch?`没有找到与“${committedSearch}”匹配的订单。`:"暂无订单，请录入第一笔业绩。"}</td></tr> : orders.map((order) => <tr key={order.id}><td>{order.orderNo}</td><td>{order.customerName}</td><td>{order.salespersonName}</td><td>{formatMoney(order.currentRevenue)}</td><td>{formatMoney(order.countedAmount)}</td><td><Status state={order.lifecycleState}/></td><td><button className="table-action" onClick={() => setSelected(order)}>查看 / 调整</button></td></tr>)}</tbody></table></div>
+      <nav className="table-pagination" aria-label="订单分页"><button type="button" disabled={loading||!previousCursor} onClick={()=>movePage(previousCursor)}>上一页</button><button type="button" disabled={loading||!nextCursor} onClick={()=>movePage(nextCursor)}>下一页</button></nav>
     </section>
     {showCreate ? <CreateOrder onClose={() => setShowCreate(false)} onSaved={async () => { setShowCreate(false); await refresh(); }} /> : null}
     {showImport ? <ExcelImportDialog user={user} onClose={() => setShowImport(false)} onImported={async () => { setShowImport(false); await refresh(); }} /> : null}

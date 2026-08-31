@@ -88,6 +88,83 @@ test("销售助理组长可用标准模板预检并确认整批入账", async ({
       await expect(page.getByRole("heading",{name:"Excel 批量导入"})).toBeHidden();await expect(page.getByText("001-A",{exact:true})).toBeVisible();
 });
 
+test("订单台账以前后游标稳定浏览并在刷新后开启新快照", async ({ database, page }) => {
+  const userId = await seedTestUser(database.url, {
+    username: "e2e_cursor_assistant",
+    displayName: "E2E 游标销售助理",
+    password: "Cursor@123",
+    roleCode: "sales_assistant",
+    roleName: "销售助理",
+  });
+  const setup = new Client({ connectionString: database.url });
+  await setup.connect();
+  const person = await setup.query<{ id: string }>("select id::text from people where user_id=$1", [userId]);
+  async function insertRows(prefix: string, count: number) {
+    await setup.query(
+      `with orders as (
+         insert into performance_orders
+           (qingflow_order_no,customer_name,customer_unit,salesperson_person_id,salesperson_name,
+            source_received_on,original_amount,current_revenue,counted_amount,lifecycle_state,created_at,posted_at)
+         select $1||lpad(series::text,4,'0'),'E2E游标客户'||lpad(series::text,4,'0'),
+                'E2E游标单位'||lpad(series::text,4,'0'),$3,'E2E 游标业务员','2026-08-31',1,1,1,'active',$4,$4
+         from generate_series(1,$2::integer) series returning id
+       )
+       insert into performance_events
+         (order_id,event_type,delta_amount,resulting_current_revenue,resulting_counted_amount,
+          accounting_month,occurred_on,reason,salesperson_person_id,salesperson_name,department_name,group_name)
+       select id,'initial',1,1,1,'2026-08-01','2026-08-31','浏览器游标回归',$3,'E2E 游标业务员','E2E 部门','E2E 小组'
+       from orders`,
+      [prefix, count, person.rows[0]!.id, "2026-08-31T12:00:00.000Z"],
+    );
+  }
+  await insertRows("E2E-CURSOR-", 101);
+
+  try {
+    await page.goto("/");
+    await page.getByLabel("账号").fill("e2e_cursor_assistant");
+    await page.getByLabel("密码", { exact: true }).fill("Cursor@123");
+    await page.getByRole("button", { name: "进入 SampleFlow" }).click();
+    await page.getByRole("button", { name: "订单业绩", exact: true }).click();
+    const ledger = page.locator("section.orders-card").filter({ has: page.getByRole("heading", { name: "订单台账" }) });
+    await expect(ledger.getByText("本页 50 笔订单", { exact: true })).toBeVisible();
+    await expect(ledger.getByText("E2E-CURSOR-0101", { exact: true })).toBeVisible();
+    await expect(ledger.getByRole("button", { name: "上一页" })).toBeDisabled();
+    await expect(ledger.getByRole("button", { name: "下一页" })).toBeEnabled();
+
+    await insertRows("E2E-CURSOR-NEW-", 1);
+    let failNextPage = true;
+    await page.route("**/api/performance/orders?cursor=*", async (route) => {
+      if (failNextPage) {
+        failNextPage = false;
+        await route.fulfill({ status: 503, contentType: "application/json", body: '{"message":"分页暂时失败"}' });
+        return;
+      }
+      await route.continue();
+    });
+    await ledger.getByRole("button", { name: "下一页" }).click();
+    await expect(page.getByText("分页暂时失败", { exact: true })).toBeVisible();
+    await ledger.getByRole("button", { name: "下一页" }).click();
+    await expect(ledger.getByText("E2E-CURSOR-0051", { exact: true })).toBeVisible();
+    await ledger.getByRole("button", { name: "下一页" }).click();
+    await expect(ledger.getByText("E2E-CURSOR-0001", { exact: true })).toBeVisible();
+    await expect(ledger.getByText("本页 1 笔订单", { exact: true })).toBeVisible();
+    await expect(ledger.getByRole("button", { name: "下一页" })).toBeDisabled();
+    await ledger.getByRole("button", { name: "上一页" }).click();
+    await expect(ledger.getByText("E2E-CURSOR-0051", { exact: true })).toBeVisible();
+    await ledger.getByRole("button", { name: "上一页" }).click();
+    await expect(ledger.getByText("E2E-CURSOR-0101", { exact: true })).toBeVisible();
+    await expect(ledger.getByText("E2E-CURSOR-NEW-0001", { exact: true })).toHaveCount(0);
+
+    await ledger.getByRole("button", { name: "刷新订单" }).click();
+    await expect(ledger.getByText("E2E-CURSOR-NEW-0001", { exact: true })).toBeVisible();
+    await page.getByLabel("定位订单").fill("E2E游标单位0042");
+    await expect(ledger.getByText("E2E-CURSOR-0042", { exact: true })).toBeVisible();
+    await expect(ledger.getByText("本页 1 笔订单", { exact: true })).toBeVisible();
+  } finally {
+    await setup.end();
+  }
+});
+
 test("首次登录用户看到密码强度并完成改密", async ({ database, page }) => {
     await seedTestUser(database.url, {
       username: "e2e_password_change",
