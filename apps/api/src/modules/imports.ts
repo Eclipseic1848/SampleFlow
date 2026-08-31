@@ -3,7 +3,7 @@ import { z } from "zod";
 import type { Database } from "../db.js";
 import { standardBusinessRegionName } from "../domain/business-regions.js";
 import { ImportWorkbookError, parseImportWorkbook, type ImportColumn, type ImportLayout } from "../domain/performance-import-xlsx.js";
-import { confirmImportBatch, ImportJobError, preflightImportRows, type ImportEventType } from "../services/import-job.js";
+import { confirmDimensionBackfillBatch, confirmImportBatch, ImportJobError, preflightDimensionBackfillRows, preflightImportRows, type ImportEventType } from "../services/import-job.js";
 import { hasAnyRole, PERFORMANCE_EDITOR_ROLES } from "./auth.js";
 
 const columnNames = [
@@ -108,7 +108,8 @@ export async function registerImports(app: FastifyInstance, database: Database) 
     const result = await database.query(
       `select id::text,config_key as "configKey",version,name,status,sheet_name as "sheetName",
               column_mapping as "columnMapping",required_columns as "requiredColumns",allowed_event_types as "allowedEventTypes",business_region_mapping as "businessRegionMapping",
-              expected_reconciliation as "expectedReconciliation",allow_legacy_source_key as "allowLegacySourceKey",created_at as "createdAt",approved_at as "approvedAt"
+              expected_reconciliation as "expectedReconciliation",allow_legacy_source_key as "allowLegacySourceKey",fixed_event_type as "fixedEventType",
+              created_at as "createdAt",approved_at as "approvedAt"
        from import_configs where status='approved' or $1::boolean order by config_key,version desc`,
       [includeDrafts],
     );
@@ -239,6 +240,38 @@ export async function registerImports(app: FastifyInstance, database: Database) 
     }
   });
 
+  app.post("/api/imports/dimension-backfills/preflight", { bodyLimit: 30_000_000 }, async (request, reply) => {
+    const denied = denyPerformanceEditor(request, reply);
+    if (denied) return denied;
+    const parsed = preflightSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ message: "上传参数无效" });
+    try {
+      const config = await database.query<{ sheet_name:string; expected_headers:unknown[]; column_mapping:ImportLayout["columnMapping"]; person_mapping:Record<string,string>; fixed_event_type:"legacy_adjustment"|null }>(
+        "select sheet_name,expected_headers,column_mapping,person_mapping,fixed_event_type from import_configs where id=$1 and status='approved'",
+        [parsed.data.configId],
+      );
+      if (!config.rows[0]) return reply.code(409).send({ message: "只能使用已批准的导入配置" });
+      const bytes = decodeBase64(parsed.data.contentBase64);
+      const rows = await parseImportWorkbook(parsed.data.fileName, bytes, {
+        sheetName:config.rows[0].sheet_name,
+        expectedHeaders:config.rows[0].expected_headers,
+        columnMapping:config.rows[0].column_mapping,
+        personMapping:config.rows[0].person_mapping,
+        ...(config.rows[0].fixed_event_type ? { fixedEventType:config.rows[0].fixed_event_type } : {}),
+      });
+      return await preflightDimensionBackfillRows(database, {
+        actorUserId:request.currentUser!.id,
+        configId:String(parsed.data.configId),
+        sourceFileName:parsed.data.fileName,
+        sourceBytes:bytes,
+        rows,
+      });
+    } catch (error) {
+      if (error instanceof ImportJobError || error instanceof ImportWorkbookError) return reply.code(409).send({ message:error.message });
+      throw error;
+    }
+  });
+
   app.post("/api/imports/batches/:id/confirm", async (request, reply) => {
     if (!request.currentUser) return reply.code(401).send({ message: "尚未登录" });
     if (!hasAnyRole(request.currentUser, ["sales_assistant_leader"])) return reply.code(403).send({ message: "仅销售助理组长可以确认导入批次" });
@@ -249,6 +282,19 @@ export async function registerImports(app: FastifyInstance, database: Database) 
       return await confirmImportBatch(database, String(params.data.id), request.currentUser.id, body.data.confirmedWarnings, request.ip);
     } catch (error) {
       if (error instanceof ImportJobError) return reply.code(409).send({ message: error.message });
+      throw error;
+    }
+  });
+
+  app.post("/api/imports/dimension-backfills/:id/confirm", async (request, reply) => {
+    if (!request.currentUser) return reply.code(401).send({ message:"尚未登录" });
+    if (!hasAnyRole(request.currentUser, ["sales_assistant_leader"])) return reply.code(403).send({ message:"仅销售助理组长可以确认历史维度补齐批次" });
+    const params = z.object({ id:z.coerce.number().int().positive() }).safeParse(request.params);
+    if (!params.success) return reply.code(400).send({ message:"确认参数无效" });
+    try {
+      return await confirmDimensionBackfillBatch(database, String(params.data.id), request.currentUser.id, request.ip);
+    } catch (error) {
+      if (error instanceof ImportJobError) return reply.code(409).send({ message:error.message });
       throw error;
     }
   });

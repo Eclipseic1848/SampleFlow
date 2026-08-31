@@ -79,6 +79,7 @@ test("干净隔离数据库可应用全部现有迁移", async () => {
         "018_add_import_reconciliation.sql",
         "019_performance_order_cursor.sql",
         "020_event_analysis_dimensions.sql",
+        "021_controlled_dimension_backfill.sql",
       ]);
     } finally {
       await client.end();
@@ -169,11 +170,12 @@ test("已有导入批次升级到逐月对账结构时保留旧证据标记", as
     const verify = new Client({ connectionString: database.url });
     await verify.connect();
     try {
-      const result = await verify.query<{ expected: unknown; summary: { legacyBackfill: boolean; actual: { monthly: unknown[] } } }>(
-        `select config.expected_reconciliation expected,batch.reconciliation_summary summary
+      const result = await verify.query<{ expected: unknown; purpose:string; summary: { legacyBackfill: boolean; actual: { monthly: unknown[] } } }>(
+        `select config.expected_reconciliation expected,batch.purpose,batch.reconciliation_summary summary
          from import_batches batch join import_configs config on config.id=batch.config_id`,
       );
       assert.equal(result.rows[0]!.expected, null);
+      assert.equal(result.rows[0]!.purpose, "ledger_import");
       assert.equal(result.rows[0]!.summary.legacyBackfill, true);
       assert.deepEqual(result.rows[0]!.summary.actual.monthly, []);
     } finally {
