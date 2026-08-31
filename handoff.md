@@ -2,9 +2,18 @@
 
 > 更新时间：2026-08-30（America/Los_Angeles）
 >
-> 当前阶段：**GitHub P0 工程与功能验收已闭环；尚未进入 P1、生产数据落库或生产发布**
+> 当前阶段：**原 P0 #1—#9 已闭环；全仓复审后的加固 #30—#34 已在本地分支实现并通过门禁；尚未进入 P1、生产数据落库或生产发布**
 >
-> 当前结论：P0 代码、自动化门禁和隔离数据验收已完成；这仍是内部验收基线，不是生产上线证明。
+> 当前结论：加固代码位于 `codex/audit-hardening`，尚未推送、创建 PR 或关闭 Issue；这仍是内部验收基线，不是生产上线证明。
+
+## 0A. 2026-08-30 全仓复审后加固暂停点
+
+- 用户授权实现非 P1 的复审修复，并授权创建相关 GitHub Issue；P1 是否启动仍由用户另行决定。
+- 已创建并保持打开：#30 登录限流并发、#31 Excel 解压资源、#32 未知异常脱敏、#33 导入查询性能、#34 生产前端默认凭据；#35 记录为 P2 CI 加固，不在本轮实现。
+- 本地 `codex/audit-hardening` 已实现 #30—#34；全量 `npm.cmd run verify` 通过：API 122/122、Playwright 10/10、类型检查、构建、生产依赖审计和 Compose 配置均通过。
+- 4,701 行等价合成数据的导入预检读取查询保持不超过 12 次，确认读取查询不超过 10 次；测试只使用合成数据，没有输出真实业务明细。
+- 本地 diff 已完成主会话验收和独立只读审查；审查提出的异常状态码伪装、组织工作簿二次读取和生产 Bundle 持久门禁缺口均已修复并复验。
+- 没有授权推送分支、创建/合并 PR、评论或关闭 Issue。若用户批准，再单独发布加固 PR；不要自动开始 #10—#15。
 
 ## 0. 新会话先做什么
 
@@ -29,8 +38,8 @@
    Get-NetTCPConnection -State Listen -LocalPort 3000,5173,5174,55432 -ErrorAction SilentlyContinue
    ```
 
-5. 不要继续处理 P0。GitHub 已验证 open P0 为 0。下一阶段必须先让用户选择：进入 P1、准备业务 UAT，还是制定真实数据/生产迁移方案。
-6. 若用户选择 P1，建议先读取 Roadmap #18 和 Issue #10，冻结范围与验收标准；不要自动实现 #11—#15。
+5. 原 P0 #1—#9 不再继续；复审新增 #30—#34 仍为打开状态，本地实现尚未发布。先核对本文件 0A、GitHub 和 `codex/audit-hardening`。
+6. 只有在用户明确批准并完成加固发布后，才让用户选择进入 P1、准备业务 UAT或制定真实数据/生产迁移方案。若用户选择 P1，先读取 Roadmap #18 和 Issue #10，冻结范围与验收标准；不要自动实现 #11—#15。
 
 ### 权威来源顺序
 
@@ -48,12 +57,12 @@
 本轮目标是完成仓库所有 `priority:P0` GitHub Issues。结果：
 
 - Issue #1—#9 已全部关闭。
-- 2026-08-30 通过 GitHub 公开 Issue 查询验证：`is:issue state:open label:priority:P0` 为 **Open (0)**。
+- 原 P0 收口时 `priority:P0` 为 Open (0)；本次复审后新增 #30—#34，当前为打开状态，详见 0A。
 - 最后一个实现 PR 是 [#27](https://github.com/Eclipseic1848/SampleFlow/pull/27)，已合并。
 - P0 代码基线 merge SHA：`5f7523ac34699bb0c32a4015da4a5f46f8874655`。本交接文档的合并会继续推进 `main`，新会话必须实时查询当前 SHA。
 - PR #27 必需 CI [run 33353498614](https://github.com/Eclipseic1848/SampleFlow/actions/runs/33353498614) 完成且结论为 `success`。
 
-本轮授权已完成并耗尽。新会话不得把“此前允许完成 P0”解释为继续 P1、生产导入、发布、删除文件或修改仓库治理的长期授权。
+本轮授权仅覆盖本地实现 #30—#34 和创建 #30—#35，不包含推送、PR、关闭 Issue、P1、生产导入、发布、删除文件或修改仓库治理。
 
 ## 2. P0 交付结果
 
@@ -168,6 +177,12 @@
 - [#16](https://github.com/Eclipseic1848/SampleFlow/issues/16)：轻流只读自动同步评估。
 - [#17](https://github.com/Eclipseic1848/SampleFlow/issues/17)：2024—2025 历史明细迁移评估。
 - [#18](https://github.com/Eclipseic1848/SampleFlow/issues/18)：v1.1 Roadmap。
+- [#30](https://github.com/Eclipseic1848/SampleFlow/issues/30)：登录限流并发计数原子性。
+- [#31](https://github.com/Eclipseic1848/SampleFlow/issues/31)：Excel 解压资源边界。
+- [#32](https://github.com/Eclipseic1848/SampleFlow/issues/32)：未知 API 异常响应脱敏。
+- [#33](https://github.com/Eclipseic1848/SampleFlow/issues/33)：Excel 导入查询与扫描性能。
+- [#34](https://github.com/Eclipseic1848/SampleFlow/issues/34)：生产前端移除默认开发凭据。
+- [#35](https://github.com/Eclipseic1848/SampleFlow/issues/35)：P2 CI 供应链、覆盖率和浏览器矩阵加固。
 
 ## 6. 建议下一步与版本计划
 
@@ -204,7 +219,7 @@
 
 ### 已验证事实
 
-- GitHub open P0 为 0；#3/#9 于 PR #27 合并后关闭。
+- 原 P0 #1—#9 已关闭；复审新增 P0 #30—#34 当前保持打开，本地实现尚未发布。
 - `origin/main` 的 P0 代码基线为 `5f7523ac...`；PR #27 必需 CI success。
 - 本地 API 117/117、Web E2E 10/10、类型检查、构建和 Compose 配置通过。
 - 真实工作簿在隔离库中精确导入、逐月匹配且重放幂等。

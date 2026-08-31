@@ -62,6 +62,12 @@ async function recordThrottleFailure(
   throttleKey: string,
   now: Date,
 ): Promise<Date | null> {
+  await client.query(
+    `insert into auth_login_throttles(scope,throttle_key,window_started_at,failure_count,blocked_until,updated_at)
+     values($1,$2,$3,0,null,$3)
+     on conflict(scope,throttle_key) do nothing`,
+    [scope, throttleKey, now],
+  );
   const existing = await client.query<{
     blocked_until: Date | null;
     failure_count: number;
@@ -70,8 +76,8 @@ async function recordThrottleFailure(
     "select window_started_at,failure_count,blocked_until from auth_login_throttles where scope=$1 and throttle_key=$2 for update",
     [scope, throttleKey],
   );
-  const prior = existing.rows[0];
-  const windowExpired = !prior || prior.window_started_at.getTime() <= now.getTime() - 15 * 60 * 1000;
+  const prior = existing.rows[0]!;
+  const windowExpired = prior.window_started_at.getTime() <= now.getTime() - 15 * 60 * 1000;
   const failureCount = windowExpired ? 1 : prior.failure_count + 1;
   const windowStartedAt = windowExpired ? now : prior.window_started_at;
   let retryAfterSeconds = 0;
