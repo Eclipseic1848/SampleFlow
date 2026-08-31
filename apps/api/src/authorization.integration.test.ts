@@ -2,13 +2,14 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
 import pg from "pg";
+import { buildApp } from "./app.js";
 import { seedTestUser } from "./test-support/fixtures.js";
 import { withTestApi } from "./test-support/test-api.js";
 import { withMigratedTestDatabase } from "./test-support/test-database.js";
 import { resolvePerformanceAccess } from "./modules/authorization.js";
 import { ORGANIZATION_ACHIEVEMENT_SQL } from "./modules/performance.js";
 
-const { Client } = pg;
+const { Client, Pool } = pg;
 const TEST_ORIGIN = "http://127.0.0.1:4174";
 
 function moneyCents(value: string): bigint {
@@ -1183,6 +1184,180 @@ test("账号管理接口返回与服务端授权同源的只读角色权限矩�
       assert.ok(matrix.find((role) => role.code === "sales_assistant_leader")?.businessOperations.includes("月度核对与关闭月更正"));
       assert.ok(matrix.find((role) => role.code === "hr")?.businessOperations.includes("记账期间关闭与更正审批"));
     });
+  });
+});
+
+test("订单台账用固定快照稳定遍历并保持有界查询次数", async () => {
+  await withMigratedTestDatabase(async (database) => {
+    const scenario = await seedAuthorizationScenario(database.url);
+    const setup = new Client({ connectionString: database.url });
+    await setup.connect();
+    const organization = await setup.query<{ department_id: string; group_id: string }>(
+      `select (select id::text from org_units where unit_type='department' and name='甲部') as department_id,
+              (select id::text from org_units where unit_type='group' and name='甲组') as group_id`,
+    );
+    const { department_id: departmentId, group_id: groupId } = organization.rows[0]!;
+    const fixedCreatedAt = "2026-08-31T12:00:00.000Z";
+    async function insertRows(prefix: string, count: number): Promise<string[]> {
+      const inserted = await setup.query<{ id: string }>(
+        `with orders as (
+           insert into performance_orders
+             (qingflow_order_no,customer_name,customer_unit,salesperson_person_id,salesperson_name,
+              source_received_on,original_amount,current_revenue,counted_amount,lifecycle_state,created_at,posted_at)
+           select $1||lpad(series::text,4,'0'),'游标客户'||lpad(series::text,4,'0'),
+                  '游标单位'||lpad(series::text,4,'0'),$3,'游标业务员','2026-08-31',1,1,1,'active',$4,$4
+           from generate_series(1,$2::integer) series
+           returning id
+         )
+         insert into performance_events
+           (order_id,event_type,delta_amount,resulting_current_revenue,resulting_counted_amount,
+            accounting_month,occurred_on,reason,salesperson_person_id,salesperson_name,
+            department_unit_id,department_name,group_unit_id,group_name,leader_person_id,leader_name,
+            supervisor_person_id,supervisor_name)
+         select id,'initial',1,1,1,'2026-08-01','2026-08-31','稳定游标回归',$3,'游标业务员',
+                $5,'甲部',$6,'甲组',$7,'甲组组长',$8,'甲部主管'
+         from orders returning order_id::text as id`,
+        [
+          prefix,
+          count,
+          scenario.people[scenario.users.alice],
+          fixedCreatedAt,
+          departmentId,
+          groupId,
+          scenario.people[scenario.users.leader],
+          scenario.people[scenario.users.supervisor],
+        ],
+      );
+      return inserted.rows.map((row) => row.id);
+    }
+
+    const expectedIds = await insertRows("CURSOR-FIX-", 101);
+    const pool = new Pool({ connectionString: database.url });
+    let listReadCount = 0;
+    let orderListQuery: { statement: string; values: unknown[] } | null = null;
+    const patched = new WeakSet<pg.PoolClient>();
+    pool.on("acquire", (client) => {
+      if (patched.has(client)) return;
+      patched.add(client);
+      const originalQuery = client.query.bind(client);
+      client.query = ((...args: unknown[]) => {
+        const statement = typeof args[0] === "string" ? args[0] : String((args[0] as { text?: string })?.text ?? "");
+        if (/^\s*(select|with)\b/i.test(statement) && !/\bfrom sessions\b/i.test(statement)) listReadCount += 1;
+        if (/select id::text, created_at as "__cursorCreatedAt"/i.test(statement)) {
+          const values = typeof args[0] === "string" ? args[1] : (args[0] as { values?: unknown[] }).values;
+          orderListQuery = { statement, values: Array.isArray(values) ? [...values] : [] };
+        }
+        return originalQuery(...args as [string, unknown[]]);
+      }) as typeof client.query;
+    });
+    const app = await buildApp({ database: pool, logger: false });
+    try {
+      const leaderCookie = await loginCookie(app, "scope_leader");
+      type OrderPage = {
+        orders: Array<{ id: string; orderNo: string; customerName: string; customerUnit: string; salespersonName: string }>;
+        previousCursor: string | null;
+        nextCursor: string | null;
+        pageSize: number;
+      };
+      async function readPage(search: string, cursor?: string, cookie = leaderCookie): Promise<{ body: OrderPage; reads: number }> {
+        const query = new URLSearchParams({ search });
+        if (cursor) query.set("cursor", cursor);
+        listReadCount = 0;
+        const response = await app.inject({ method: "GET", url: `/api/performance/orders?${query}`, headers: { cookie } });
+        assert.equal(response.statusCode, 200, response.body);
+        assert.ok(listReadCount <= 2, `排除会话认证后，订单列表权限与数据读取应不超过 2 次，实际 ${listReadCount} 次`);
+        return { body: response.json() as OrderPage, reads: listReadCount };
+      }
+      async function assertListPlanHasNoPerRowEventScan() {
+        assert.ok(orderListQuery);
+        type PlanNode = { "Parent Relationship"?: string; "Relation Name"?: string; "Actual Loops"?: number; Plans?: PlanNode[] };
+        const explained = await setup.query<{ "QUERY PLAN": Array<{ Plan: PlanNode }> }>(
+          `explain (analyze,format json) ${orderListQuery.statement}`,
+          orderListQuery.values,
+        );
+        const repeatedNodes: PlanNode[] = [];
+        const visit = (node: PlanNode) => {
+          if ((node["Actual Loops"] ?? 0) > 1
+            && (node["Parent Relationship"] === "SubPlan" || node["Relation Name"] === "performance_events")) repeatedNodes.push(node);
+          node.Plans?.forEach(visit);
+        };
+        const plan = explained.rows[0]!["QUERY PLAN"][0]!.Plan;
+        visit(plan);
+        assert.deepEqual(repeatedNodes, [], JSON.stringify(plan));
+      }
+
+      const first = await readPage("CURSOR-FIX-");
+      await assertListPlanHasNoPerRowEventScan();
+      assert.equal(first.body.pageSize, 50);
+      assert.equal(first.body.orders.length, 50);
+      assert.equal(first.body.previousCursor, null);
+      assert.ok(first.body.nextCursor);
+
+      const [newOrderId] = await insertRows("CURSOR-FIX-NEW-", 1);
+      const pages = [first.body];
+      let nextCursor: string | null = first.body.nextCursor;
+      while (nextCursor) {
+        const currentPage: OrderPage = (await readPage("CURSOR-FIX-", nextCursor)).body;
+        pages.push(currentPage);
+        nextCursor = currentPage.nextCursor;
+      }
+      assert.deepEqual(pages.map((page) => page.orders.length), [50, 50, 1]);
+      const traversedIds = pages.flatMap((page) => page.orders.map((order) => order.id));
+      assert.equal(new Set(traversedIds).size, 101);
+      assert.deepEqual(new Set(traversedIds), new Set(expectedIds));
+      assert.ok(!traversedIds.includes(newOrderId!));
+
+      const previous = await readPage("CURSOR-FIX-", pages[1]!.previousCursor!);
+      assert.deepEqual(previous.body.orders.map((order) => order.id), pages[0]!.orders.map((order) => order.id));
+      assert.equal(previous.body.previousCursor, null);
+      assert.ok(previous.body.nextCursor);
+      const refreshed = await readPage("CURSOR-FIX-");
+      assert.equal(refreshed.body.orders[0]!.id, newOrderId);
+
+      for (const [search, field, expected] of [
+        ["CURSOR-FIX-0001", "orderNo", "CURSOR-FIX-0001"],
+        ["游标客户0002", "customerName", "游标客户0002"],
+        ["游标单位0003", "customerUnit", "游标单位0003"],
+        ["游标业务员", "salespersonName", "游标业务员"],
+      ] as const) {
+        const page = await readPage(search);
+        assert.ok(page.body.orders.length > 0, search);
+        assert.ok(page.body.orders.every((order) => order[field].includes(expected)), search);
+      }
+
+      const mismatch = await app.inject({
+        method: "GET",
+        url: `/api/performance/orders?search=OTHER&cursor=${encodeURIComponent(first.body.nextCursor!)}`,
+        headers: { cookie: leaderCookie },
+      });
+      assert.equal(mismatch.statusCode, 400, mismatch.body);
+      const bobCookie = await loginCookie(app, "scope_bob");
+      const otherUser = await app.inject({
+        method: "GET",
+        url: `/api/performance/orders?search=CURSOR-FIX-&cursor=${encodeURIComponent(first.body.nextCursor!)}`,
+        headers: { cookie: bobCookie },
+      });
+      assert.equal(otherUser.statusCode, 400, otherUser.body);
+      const oversizedPayload = JSON.parse(Buffer.from(first.body.nextCursor!, "base64url").toString("utf8")) as Record<string, unknown>;
+      oversizedPayload.anchorId = "9223372036854775808";
+      const oversizedCursor = Buffer.from(JSON.stringify(oversizedPayload), "utf8").toString("base64url");
+      const oversized = await app.inject({
+        method: "GET",
+        url: `/api/performance/orders?search=CURSOR-FIX-&cursor=${encodeURIComponent(oversizedCursor)}`,
+        headers: { cookie: leaderCookie },
+      });
+      assert.equal(oversized.statusCode, 400, oversized.body);
+      assert.equal(oversized.json().code, "ORDER_CURSOR_INVALID");
+
+      await insertRows("CURSOR-BUDGET-", 2_749);
+      const large = await readPage("CURSOR-BUDGET-");
+      assert.ok(Math.abs(large.reads - first.reads) <= 1, `规模增长前后读取次数差应不超过 1：${first.reads} -> ${large.reads}`);
+      await assertListPlanHasNoPerRowEventScan();
+    } finally {
+      await app.close();
+      await pool.end();
+      await setup.end();
+    }
   });
 });
 

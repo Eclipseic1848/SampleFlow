@@ -363,6 +363,9 @@ th { color: #68778a; background: #fafbfc; font-weight: 600; }
 .order-search input::-webkit-search-cancel-button { appearance: none; }
 .order-search > div > button { position: absolute; top: 4px; right: 4px; width: 32px; height: 32px; margin: 0; padding: 0; border: 0; color: #64758a; background: transparent; display: grid; place-items: center; }
 .order-search > button { width: auto; height: 40px; margin: 0; padding: 0 17px; border: 1px solid var(--blue); color: #fff; background: var(--blue); }
+.table-pagination { padding: 14px 20px; border-top: 1px solid var(--line); display: flex; justify-content: flex-end; gap: 8px; }
+.table-pagination button { width: auto; height: 36px; margin: 0; padding: 0 14px; border: 1px solid var(--line); border-radius: 6px; color: #39495d; background: #fff; }
+.table-pagination button:disabled { color: #9aa6b5; background: #f4f5f7; cursor: not-allowed; }
 .event-ledger { padding: 20px 24px 4px; }
 .event-ledger-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .event-ledger-heading h3 { margin: 0; color: var(--navy); font-size: 15px; }
