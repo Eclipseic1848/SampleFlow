@@ -5,6 +5,7 @@ import { seedTestUser } from "./test-support/fixtures.js";
 import { withTestApi } from "./test-support/test-api.js";
 import { withMigratedTestDatabase } from "./test-support/test-database.js";
 import { resolvePerformanceAccess } from "./modules/authorization.js";
+import { ORGANIZATION_ACHIEVEMENT_SQL } from "./modules/performance.js";
 
 const { Client } = pg;
 const TEST_ORIGIN = "http://127.0.0.1:4174";
@@ -577,6 +578,368 @@ test("组长个人与小组业绩分离且成员订单事件逐级按分对平",
       assert.equal(transferredDetails.statusCode, 200, transferredDetails.body);
       assert.equal(transferredDetails.json().targetAmount, "1000.00");
     }, { clock: () => new Date("2026-08-14T16:30:00.000Z") });
+  });
+});
+
+test("主管与全域角色按部门和销售组织逐级穿透且每层按分对平", async () => {
+  await withMigratedTestDatabase(async (database) => {
+    const scenario = await seedAuthorizationScenario(database.url);
+    const client = new Client({ connectionString: database.url });
+    await client.connect();
+    const units = await client.query<{ department_a_id:string;department_b_id:string;group_a_id:string;group_b_id:string }>(
+      `select (select id::text from org_units where name='甲部' and unit_type='department') as department_a_id,
+              (select id::text from org_units where name='乙部' and unit_type='department') as department_b_id,
+              (select id::text from org_units where name='甲组' and unit_type='group') as group_a_id,
+              (select id::text from org_units where name='乙组' and unit_type='group') as group_b_id`,
+    );
+    const { department_a_id: departmentAId, department_b_id: departmentBId, group_a_id: groupAId } = units.rows[0]!;
+    try {
+      const supervisorOrder = await client.query<{ id:string }>(
+        `insert into performance_orders
+          (qingflow_order_no,customer_name,customer_unit,salesperson_person_id,salesperson_name,
+           source_received_on,original_amount,current_revenue,counted_amount,lifecycle_state,posted_at)
+         values('DEPARTMENT-SUPERVISOR-1','主管本人客户','测试单位',$1,'甲部主管',
+                '2026-08-10',40,40,40,'active',now()) returning id::text`,
+        [scenario.people[scenario.users.supervisor]],
+      );
+      await client.query(
+        `insert into performance_events
+          (order_id,event_type,delta_amount,resulting_current_revenue,resulting_counted_amount,
+           accounting_month,occurred_on,reason,salesperson_person_id,salesperson_name,
+           department_unit_id,department_name,group_unit_id,group_name,
+           leader_person_id,leader_name,supervisor_person_id,supervisor_name)
+         values($1,'initial',40,40,40,'2026-08-01','2026-08-10','主管本人业绩',$2,'甲部主管',
+                $3,'甲部',$4,'甲组',$5,'甲组组长',$2,'甲部主管')`,
+        [supervisorOrder.rows[0]!.id, scenario.people[scenario.users.supervisor], departmentAId, groupAId, scenario.people[scenario.users.leader]],
+      );
+      await client.query(
+        `insert into performance_events
+          (order_id,event_type,delta_amount,resulting_current_revenue,resulting_counted_amount,
+           accounting_month,occurred_on,reason,salesperson_person_id,salesperson_name,
+           department_unit_id,department_name,group_unit_id,group_name,
+           leader_person_id,leader_name,supervisor_person_id,supervisor_name)
+         select source.order_id,'revenue_change',-25,75,75,'2026-08-01','2026-08-15','部门负向调整',
+                source.salesperson_person_id,source.salesperson_name,source.department_unit_id,source.department_name,
+                source.group_unit_id,source.group_name,source.leader_person_id,source.leader_name,
+                source.supervisor_person_id,source.supervisor_name
+         from performance_events source where source.order_id=$1 and source.order_sequence=1`,
+        [scenario.orderIds[0]],
+      );
+      await client.query(
+        `insert into performance_events
+          (order_id,event_type,delta_amount,resulting_current_revenue,resulting_counted_amount,
+           accounting_month,occurred_on,reason,salesperson_person_id,salesperson_name,
+           department_unit_id,department_name,group_unit_id,group_name,
+           leader_person_id,leader_name,supervisor_person_id,supervisor_name)
+         select source.order_id,'revenue_change',5,80,80,'2026-08-01','2026-08-18','组织改名前事件快照',
+                source.salesperson_person_id,source.salesperson_name,source.department_unit_id,'甲部历史新名',
+                source.group_unit_id,'甲组历史新名',source.leader_person_id,source.leader_name,
+                source.supervisor_person_id,source.supervisor_name
+         from performance_events source where source.order_id=$1 and source.order_sequence=1`,
+        [scenario.orderIds[0]],
+      );
+      await client.query(
+        `insert into performance_events
+          (order_id,event_type,delta_amount,resulting_current_revenue,resulting_counted_amount,
+           accounting_month,occurred_on,reason,salesperson_person_id,salesperson_name,
+           department_name,group_name,leader_name,supervisor_name)
+         values($1,'legacy_adjustment',10,110,110,'2026-08-01','2026-08-20','遗留组织待补齐',
+                $2,'业务员丙','遗留部门','遗留小组','遗留组长','遗留主管')`,
+        [scenario.orderIds[2], scenario.people[scenario.users.carol]],
+      );
+      const legacyOrders = await client.query<{ id:string; salesperson_name:string }>(
+        `insert into performance_orders
+          (qingflow_order_no,customer_name,customer_unit,salesperson_name,source_received_on,
+           original_amount,current_revenue,counted_amount,lifecycle_state,posted_at)
+         values('LEGACY-NULL-1','遗留客户甲','测试单位','遗留人员甲','2026-08-21',3,3,3,'active',now()),
+               ('LEGACY-NULL-2','遗留客户乙','测试单位','遗留人员乙','2026-08-22',4,4,4,'active',now()),
+               ('LEGACY-NULL-3','遗留客户丙','测试单位','遗留人员丙','2026-08-23',6,6,6,'active',now())
+         returning id::text,salesperson_name`,
+      );
+      for (const [index, order] of legacyOrders.rows.entries()) {
+        await client.query(
+          `insert into performance_events
+            (order_id,event_type,delta_amount,resulting_current_revenue,resulting_counted_amount,
+             accounting_month,occurred_on,reason,salesperson_name,department_name,group_name,leader_name,supervisor_name)
+           values($1,'legacy_adjustment',$2,$2,$2,'2026-08-01',$3::date,'遗留身份待补齐',$4,$5,$6,'遗留组长','遗留主管')`,
+          [
+            order.id,
+            index === 0 ? 3 : index === 1 ? 4 : 6,
+            `2026-08-${String(21 + index).padStart(2, "0")}`,
+            order.salesperson_name,
+            index < 2 ? "遗留部门" : "另一遗留部门",
+            index < 2 ? "遗留小组" : "另一遗留小组",
+          ],
+        );
+      }
+      const root = await client.query<{ id:string }>(
+        `insert into goals(period_month,goal_level,owner_user_id,owner_person_id)
+         values('2026-08-01','sales_manager',$1,$2) returning id::text`,
+        [scenario.users.manager, scenario.people[scenario.users.manager]],
+      );
+      const departmentA = await client.query<{ id:string }>(
+        `insert into goals(period_month,goal_level,owner_user_id,owner_person_id,parent_goal_id,org_unit_id)
+         values('2026-08-01','department',$1,$2,$3,$4) returning id::text`,
+        [scenario.users.supervisor, scenario.people[scenario.users.supervisor], root.rows[0]!.id, departmentAId],
+      );
+      const departmentB = await client.query<{ id:string }>(
+        `insert into goals(period_month,goal_level,owner_user_id,owner_person_id,parent_goal_id,org_unit_id)
+         values('2026-08-01','department',$1,$2,$3,$4) returning id::text`,
+        [scenario.users.carol, scenario.people[scenario.users.carol], root.rows[0]!.id, departmentBId],
+      );
+      const groupA = await client.query<{ id:string }>(
+        `insert into goals(period_month,goal_level,owner_user_id,owner_person_id,parent_goal_id,org_unit_id)
+         values('2026-08-01','group',$1,$2,$3,$4) returning id::text`,
+        [scenario.users.leader, scenario.people[scenario.users.leader], departmentA.rows[0]!.id, groupAId],
+      );
+      const personal = await client.query<{ id:string }>(
+        `insert into goals(period_month,goal_level,owner_user_id,owner_person_id)
+         values('2026-08-01','personal',$1,$2) returning id::text`,
+        [scenario.users.supervisor, scenario.people[scenario.users.supervisor]],
+      );
+      for (const [goalId, amount, status] of [
+        [root.rows[0]!.id, 500, "active"],
+        [departmentA.rows[0]!.id, 250, "active"],
+        [departmentB.rows[0]!.id, 200, "pending_hr"],
+        [groupA.rows[0]!.id, 200, "active"],
+        [personal.rows[0]!.id, 500, "active"],
+      ] as const) {
+        await client.query(
+          `insert into goal_versions(goal_id,version_no,amount,status,created_by,created_by_person_id,change_reason)
+           values($1,1,$2,$3,$4,$5,'部门看板测试')`,
+          [goalId, amount, status, scenario.users.manager, scenario.people[scenario.users.manager]],
+        );
+      }
+      await client.query("insert into user_roles(user_id,role_code) values($1,'system_admin')", [scenario.users.manager]);
+      await client.query("insert into user_roles(user_id,role_code) values($1,'sales_leader')", [scenario.users.supervisor]);
+      await client.query(
+        "update org_responsibilities set person_id=$1 where org_unit_id=$2 and responsibility_type='leader'",
+        [scenario.people[scenario.users.supervisor], groupAId],
+      );
+      await client.query("update org_units set name='甲部当前档案' where id=$1", [departmentAId]);
+      await client.query("update org_units set name='甲组当前档案',parent_id=$2 where id=$1", [groupAId, departmentBId]);
+    } finally {
+      await client.end();
+    }
+
+    await withTestApi(database.url, async (app) => {
+      const login = async (username:string) => {
+        const cookie = await loginCookie(app, username);
+        const sessionClient = new Client({ connectionString: database.url });
+        await sessionClient.connect();
+        try { await sessionClient.query("update sessions set expires_at=now()+interval '1 day',last_seen_at=now()"); }
+        finally { await sessionClient.end(); }
+        return cookie;
+      };
+      const supervisorCookie = await login("scope_supervisor");
+      const supervisorDashboard = await app.inject({ method:"GET",url:"/api/performance/dashboard?month=2026-08",headers:{cookie:supervisorCookie} });
+      assert.equal(supervisorDashboard.statusCode, 200, supervisorDashboard.body);
+      assert.equal(supervisorDashboard.json().personalAchievement.actualAmount, "40.00");
+      assert.equal(supervisorDashboard.json().personalAchievement.targetAmount, "500.00");
+      assert.equal(supervisorDashboard.json().salesAchievement, null);
+      assert.equal(supervisorDashboard.json().groupAchievements[0].groupName, "甲组历史新名");
+      assert.equal(supervisorDashboard.json().groupAchievements[0].actualAmount, "220.00");
+      assert.equal(supervisorDashboard.json().departmentAchievements.length, 1);
+      assert.deepEqual(
+        {
+          name: supervisorDashboard.json().departmentAchievements[0].departmentName,
+          actual: supervisorDashboard.json().departmentAchievements[0].actualAmount,
+          target: supervisorDashboard.json().departmentAchievements[0].targetAmount,
+          gap: supervisorDashboard.json().departmentAchievements[0].gapAmount,
+          rate: supervisorDashboard.json().departmentAchievements[0].achievementRate,
+        },
+        { name:"甲部历史新名",actual:"220.00",target:"250.00",gap:"30.00",rate:"88.00" },
+      );
+      assert.doesNotMatch(JSON.stringify(supervisorDashboard.json().departmentAchievements), /乙部/);
+
+      const departmentDetails = await app.inject({
+        method:"GET",
+        url:`/api/performance/department-achievement/events?month=2026-08&departmentId=${departmentAId}`,
+        headers:{cookie:supervisorCookie},
+      });
+      assert.equal(departmentDetails.statusCode, 200, departmentDetails.body);
+      assert.equal(departmentDetails.json().departmentName, "甲部历史新名");
+      assert.equal(departmentDetails.json().actualAmount, "220.00");
+      assert.equal(departmentDetails.json().groups.length, 1);
+      type EventRow={deltaAmount:string};
+      type OrderRow={actualAmount:string;events:EventRow[]};
+      type MemberRow={personId:string|null;personKey:string;name:string;actualAmount:string;orders:OrderRow[]};
+      type GroupRow={groupId:string|null;groupKey:string;actualAmount:string;members:MemberRow[]};
+      type DepartmentRow={departmentId:string|null;departmentKey:string;departmentName:string;actualAmount:string;groups:GroupRow[]};
+      const department = departmentDetails.json() as DepartmentRow;
+      const groups = department.groups;
+      const members = groups.flatMap((group) => group.members);
+      const orders = members.flatMap((member) => member.orders);
+      const events = orders.flatMap((order) => order.events);
+      assert.equal(groups.reduce((sum, group) => sum + moneyCents(group.actualAmount), 0n), moneyCents(department.actualAmount));
+      assert.equal(members.reduce((sum, member) => sum + moneyCents(member.actualAmount), 0n), moneyCents(department.actualAmount));
+      assert.equal(orders.reduce((sum, order) => sum + moneyCents(order.actualAmount), 0n), moneyCents(department.actualAmount));
+      assert.equal(events.reduce((sum, event) => sum + moneyCents(event.deltaAmount), 0n), moneyCents(department.actualAmount));
+      assert.deepEqual(events.map((event) => event.deltaAmount).sort(), ["-25.00", "100.00", "100.00", "40.00", "5.00"]);
+      assert.doesNotMatch(departmentDetails.body, /甲部当前档案|甲组当前档案/);
+      assert.doesNotMatch(departmentDetails.body, /业务员丙|SCOPE-3|乙部|乙组/);
+
+      const deniedDepartment = await app.inject({
+        method:"GET",
+        url:`/api/performance/department-achievement/events?month=2026-08&departmentId=${departmentBId}`,
+        headers:{cookie:supervisorCookie},
+      });
+      assert.equal(deniedDepartment.statusCode, 403, deniedDepartment.body);
+      assert.equal(deniedDepartment.json().code, "DEPARTMENT_SCOPE_FORBIDDEN");
+
+      const assistantCookie = await login("scope_assistant");
+      const assistantDashboard = await app.inject({ method:"GET",url:"/api/performance/dashboard?month=2026-08",headers:{cookie:assistantCookie} });
+      assert.equal(assistantDashboard.statusCode, 200, assistantDashboard.body);
+      assert.deepEqual(assistantDashboard.json().departmentAchievements, []);
+      assert.equal(assistantDashboard.json().salesAchievement, null);
+
+      for (const username of ["scope_manager", "scope_hr", "scope_general_manager"]) {
+        const cookie = await login(username);
+        const dashboard = await app.inject({ method:"GET",url:"/api/performance/dashboard?month=2026-08",headers:{cookie} });
+        assert.equal(dashboard.statusCode, 200, `${username}: ${dashboard.body}`);
+        assert.equal(dashboard.json().salesAchievement.actualAmount, "343.00", username);
+        assert.equal(dashboard.json().salesAchievement.targetAmount, "500.00", username);
+        assert.deepEqual(dashboard.json().departmentAchievements.map((item:{departmentName:string})=>item.departmentName).sort(), ["乙部", "甲部历史新名", "遗留部门（待补齐组织归属）", "另一遗留部门（待补齐组织归属）"].sort());
+        const inactive = dashboard.json().departmentAchievements.find((item:{departmentName:string})=>item.departmentName==="乙部");
+        assert.equal(inactive.actualAmount, "100.00");
+        assert.equal(inactive.targetAmount, null);
+        assert.equal(inactive.achievementRate, null);
+        assert.equal(inactive.calculationReason, "TARGET_NOT_ACTIVE");
+        const unassigned = dashboard.json().departmentAchievements.find((item:{departmentName:string})=>item.departmentName==="遗留部门（待补齐组织归属）");
+        assert.equal(unassigned.actualAmount, "17.00");
+        assert.equal(unassigned.calculationReason, "TARGET_NOT_ACTIVE");
+      }
+
+      const managerCookie = await login("scope_manager");
+      const salesDetails = await app.inject({ method:"GET",url:"/api/performance/sales-achievement/events?month=2026-08",headers:{cookie:managerCookie} });
+      assert.equal(salesDetails.statusCode, 200, salesDetails.body);
+      const salesDepartments = salesDetails.json().departments as DepartmentRow[];
+      assert.equal(salesDepartments.reduce((sum, item) => sum + moneyCents(item.actualAmount), 0n), moneyCents(salesDetails.json().actualAmount));
+      const salesEvents = salesDepartments.flatMap((item) => item.groups.flatMap((group) => group.members.flatMap((member) => member.orders.flatMap((order) => order.events))));
+      assert.equal(salesEvents.reduce((sum, event) => sum + moneyCents(event.deltaAmount), 0n), moneyCents(salesDetails.json().actualAmount));
+      const legacyDepartment = salesDepartments.find((item) => item.departmentName === "遗留部门（待补齐组织归属）")!;
+      assert.deepEqual(legacyDepartment.groups.flatMap((group) => group.members.map((member) => member.name)).sort(), ["业务员丙", "遗留人员乙", "遗留人员甲"].sort());
+      assert.equal(new Set(salesDepartments.filter((item) => item.departmentId === null).map((item) => item.departmentKey)).size, 2);
+      const departmentB = salesDepartments.find((item) => item.departmentId === departmentBId)!;
+      assert.ok(!departmentB.groups.some((group) => group.groupId === groupAId));
+
+      const adminCookie = await login("scope_admin");
+      for (const url of [
+        `/api/performance/department-achievement/events?month=2026-08&departmentId=${departmentAId}`,
+        "/api/performance/sales-achievement/events?month=2026-08",
+      ]) {
+        const denied = await app.inject({ method:"GET",url,headers:{cookie:adminCookie} });
+        assert.equal(denied.statusCode, 403, `${url}: ${denied.body}`);
+      }
+    }, { clock: () => new Date("2026-08-14T16:30:00.000Z") });
+  });
+});
+
+test("多个销售经理根目标不会被任意选为全公司正式目标", async () => {
+  await withMigratedTestDatabase(async (database) => {
+    const scenario = await seedAuthorizationScenario(database.url);
+    const secondManagerId = await seedTestUser(database.url, {
+      username:"scope_manager_second",displayName:"销售经理乙",password:"Role@123",roleCode:"sales_manager",roleName:"销售经理",
+    });
+    const client = new Client({ connectionString: database.url });
+    await client.connect();
+    try {
+      const secondManager = await client.query<{person_id:string}>("select id::text as person_id from people where user_id=$1", [secondManagerId]);
+      for (const [ownerUserId, ownerPersonId, amount] of [
+        [scenario.users.manager, scenario.people[scenario.users.manager], 500],
+        [secondManagerId, secondManager.rows[0]!.person_id, 800],
+      ] as const) {
+        const goal = await client.query<{id:string}>(
+          "insert into goals(period_month,goal_level,owner_user_id,owner_person_id) values('2026-08-01','sales_manager',$1,$2) returning id::text",
+          [ownerUserId, ownerPersonId],
+        );
+        await client.query(
+          `insert into goal_versions(goal_id,version_no,amount,status,created_by,created_by_person_id,change_reason)
+           values($1,1,$2,'active',$3,$4,'多根目标歧义回归')`,
+          [goal.rows[0]!.id, amount, ownerUserId, ownerPersonId],
+        );
+      }
+    } finally {
+      await client.end();
+    }
+    await withTestApi(database.url, async (app) => {
+      for (const username of ["scope_manager", "scope_manager_second", "scope_hr"]) {
+        const cookie = await loginCookie(app, username);
+        const dashboard = await app.inject({ method:"GET",url:"/api/performance/dashboard?month=2026-08",headers:{cookie} });
+        assert.equal(dashboard.statusCode, 200, `${username}: ${dashboard.body}`);
+        assert.equal(dashboard.json().salesAchievement.actualAmount, "300.00", username);
+        assert.equal(dashboard.json().salesAchievement.targetAmount, null, username);
+        assert.equal(dashboard.json().salesAchievement.achievementRate, null, username);
+        assert.equal(dashboard.json().salesAchievement.calculationReason, "TARGET_SCOPE_AMBIGUOUS", username);
+      }
+    });
+  });
+});
+
+test("组织业绩查询在小基线和 2850 订单 4701 事件基线保持单次读取且无逐行 SubPlan", async () => {
+  await withMigratedTestDatabase(async (database) => {
+    const scenario = await seedAuthorizationScenario(database.url);
+    const client = new Client({ connectionString: database.url });
+    await client.connect();
+    try {
+      type PlanNode = { "Parent Relationship"?:string;"Actual Loops"?:number;Plans?:PlanNode[] };
+      const explain = async () => {
+        const result = await client.query<{ "QUERY PLAN":Array<{Plan:PlanNode}> }>(
+          `explain (analyze,format json) ${ORGANIZATION_ACHIEVEMENT_SQL}`,
+          ["2026-08-01", [], true],
+        );
+        const repeatedSubplans: PlanNode[] = [];
+        const visit = (node:PlanNode) => {
+          if (node["Parent Relationship"] === "SubPlan" && (node["Actual Loops"] ?? 0) > 1) repeatedSubplans.push(node);
+          node.Plans?.forEach(visit);
+        };
+        visit(result.rows[0]!["QUERY PLAN"][0]!.Plan);
+        return repeatedSubplans;
+      };
+
+      assert.deepEqual(await explain(), []);
+      const organization = await client.query<{ department_id:string;group_id:string }>(
+        `select (select id::text from org_units where unit_type='department' and name='甲部') as department_id,
+                (select id::text from org_units where unit_type='group' and name='甲组') as group_id`,
+      );
+      const { department_id:departmentId, group_id:groupId } = organization.rows[0]!;
+      await client.query(
+        `insert into performance_orders
+          (qingflow_order_no,customer_name,customer_unit,salesperson_person_id,salesperson_name,
+           source_received_on,original_amount,current_revenue,counted_amount,lifecycle_state,posted_at)
+         select 'PLAN-'||lpad(series::text,4,'0'),'计划客户'||series,'测试单位',$1,'业务员甲',
+                '2026-08-01',1,1,1,'active',now()
+         from generate_series(4,2850) series`,
+        [scenario.people[scenario.users.alice]],
+      );
+      await client.query(
+        `insert into performance_events
+          (order_id,event_type,delta_amount,resulting_current_revenue,resulting_counted_amount,
+           accounting_month,occurred_on,reason,salesperson_person_id,salesperson_name,
+           department_unit_id,department_name,group_unit_id,group_name,leader_name,supervisor_name,order_sequence)
+         select id,'initial',1,1,1,'2026-08-01','2026-08-01','查询计划基线',$1,'业务员甲',
+                $2,'甲部',$3,'甲组','甲组组长','甲部主管',1
+         from performance_orders where qingflow_order_no like 'PLAN-%'`,
+        [scenario.people[scenario.users.alice], departmentId, groupId],
+      );
+      await client.query(
+        `insert into performance_events
+          (order_id,event_type,delta_amount,resulting_current_revenue,resulting_counted_amount,
+           accounting_month,occurred_on,reason,salesperson_person_id,salesperson_name,
+           department_unit_id,department_name,group_unit_id,group_name,leader_name,supervisor_name,order_sequence)
+         select id,'legacy_adjustment',1,2,2,'2026-08-01','2026-08-02','查询计划基线',$1,'业务员甲',
+                $2,'甲部',$3,'甲组','甲组组长','甲部主管',2
+         from performance_orders where qingflow_order_no between 'PLAN-0004' and 'PLAN-1854'`,
+        [scenario.people[scenario.users.alice], departmentId, groupId],
+      );
+      const counts = await client.query<{orders:string;events:string}>(
+        "select count(*)::text as orders,(select count(*)::text from performance_events) as events from performance_orders",
+      );
+      assert.deepEqual(counts.rows[0], { orders:"2850",events:"4701" });
+      assert.deepEqual(await explain(), []);
+    } finally {
+      await client.end();
+    }
   });
 });
 

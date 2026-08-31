@@ -22,6 +22,8 @@ import {
   type ApprovedCorrection,
 } from "./accounting-periods.js";
 
+type QueryDatabase = Pick<Database, "query">;
+
 const moneySchema = z.number().finite().min(0).max(99_999_999_999.99);
 const dateSchema = z.iso.date();
 const dashboardQuerySchema = z.object({
@@ -30,6 +32,12 @@ const dashboardQuerySchema = z.object({
 const groupAchievementQuerySchema = dashboardQuerySchema.extend({
   groupId: z.coerce.number().int().positive(),
 });
+const departmentAchievementQuerySchema = dashboardQuerySchema.extend({
+  departmentId: z.coerce.number().int().positive(),
+});
+
+const DEPARTMENT_ACHIEVEMENT_ROLES = ["sales_supervisor", "sales_manager", "hr", "general_manager"] as const;
+const SALES_ACHIEVEMENT_ROLES = ["sales_manager", "hr", "general_manager"] as const;
 
 const createOrderSchema = z.strictObject({
   orderNo: z.string().min(1).max(100).refine(
@@ -99,6 +107,7 @@ type PersonalAchievementEvent = Readonly<{
 type AchievementRow = Readonly<{
   goal_id: string | null;
   target_amount: string | null;
+  target_ambiguous?: boolean;
   actual_amount: string;
   gap_amount: string | null;
   achievement_rate: string | null;
@@ -114,7 +123,7 @@ function timeProgressRate(periodMonth: string, today: string): string | null {
   return (Number(today.slice(8, 10)) * 100 / daysInMonth).toFixed(2);
 }
 
-async function loadPersonalAchievement(database: Database, personId: string, periodMonth: string, today: string) {
+async function loadPersonalAchievement(database: QueryDatabase, personId: string, periodMonth: string, today: string) {
   const result = await database.query<AchievementRow>(
     `with active_goal as (
        select g.id::text as goal_id,version.amount::numeric(14,2) as target_amount
@@ -141,7 +150,9 @@ async function loadPersonalAchievement(database: Database, personId: string, per
 
 function formatAchievement(row: AchievementRow, periodMonth: string, today: string) {
   const currentMonth = today.slice(0, 7);
-  const calculationReason = periodMonth > currentMonth
+  const calculationReason = row.target_ambiguous
+    ? "TARGET_SCOPE_AMBIGUOUS"
+    : periodMonth > currentMonth
     ? "PERIOD_IN_FUTURE"
     : row.target_amount === null
       ? "TARGET_NOT_ACTIVE"
@@ -166,7 +177,7 @@ function formatAchievement(row: AchievementRow, periodMonth: string, today: stri
   };
 }
 
-async function loadPersonalAchievementEvents(database: Database, personId: string, periodMonth: string, today: string) {
+async function loadPersonalAchievementEvents(database: QueryDatabase, personId: string, periodMonth: string, today: string) {
   const result = await database.query<AchievementRow & { events: PersonalAchievementEvent[] }>(
     `with active_goal as (
        select g.id::text as goal_id,version.amount::numeric(14,2) as target_amount
@@ -220,13 +231,38 @@ async function loadPersonalAchievementEvents(database: Database, personId: strin
 }
 
 type GroupAchievementEventRow = PersonalAchievementEvent & Readonly<{
-  salespersonPersonId: string;
+  salespersonPersonId: string | null;
   salespersonName: string;
+  personKey: string;
   memberActualAmount: string;
   orderActualAmount: string;
 }>;
 
-async function loadLedGroupIds(database: Database, personId: string, today: string): Promise<string[]> {
+type DepartmentAchievementRow = AchievementRow & Readonly<{
+  department_key: string;
+  department_id: string | null;
+  department_name: string;
+  group_count: string;
+}>;
+
+type DepartmentGroupAchievementRow = AchievementRow & Readonly<{
+  department_key: string;
+  department_id: string | null;
+  department_name: string;
+  group_key: string;
+  group_id: string | null;
+  group_name: string;
+  member_count: string;
+}>;
+
+type OrganizationAchievementEventRow = GroupAchievementEventRow & Readonly<{
+  departmentKey: string;
+  departmentUnitId: string | null;
+  groupKey: string;
+  groupUnitId: string | null;
+}>;
+
+async function loadLedGroupIds(database: QueryDatabase, personId: string, today: string): Promise<string[]> {
   const result = await database.query<{ group_id: string }>(
     `select distinct responsibility.org_unit_id::text as group_id
      from org_responsibilities responsibility
@@ -240,15 +276,23 @@ async function loadLedGroupIds(database: Database, personId: string, today: stri
   return result.rows.map((row) => row.group_id);
 }
 
-async function loadGroupAchievements(database: Database, groupIds: string[], periodMonth: string, today: string) {
+async function loadGroupAchievements(database: QueryDatabase, groupIds: string[], periodMonth: string, today: string) {
   if (groupIds.length === 0) return [];
   const result = await database.query<AchievementRow & {
     group_id: string;
     group_name: string;
     member_count: string;
   }>(
-    `with selected_groups as (
-       select id,name from org_units where id=any($2::bigint[]) and unit_type='group'
+    `with event_group_names as (
+       select distinct on (event.group_unit_id) event.group_unit_id,event.group_name
+       from performance_events event
+       where event.accounting_month=$1::date and event.group_unit_id=any($2::bigint[])
+       order by event.group_unit_id,event.occurred_on desc,event.order_sequence desc,event.id desc
+     ),selected_groups as (
+       select unit.id,coalesce(snapshot.group_name,unit.name) as name
+       from org_units unit
+       left join event_group_names snapshot on snapshot.group_unit_id=unit.id
+       where unit.id=any($2::bigint[]) and unit.unit_type='group'
      ),active_goals as (
        select distinct on (goal.org_unit_id) goal.id::text as goal_id,goal.org_unit_id,version.amount::numeric(14,2) as target_amount
        from goals goal
@@ -267,7 +311,7 @@ async function loadGroupAchievements(database: Database, groupIds: string[], per
                  then round(coalesce(sum(event.delta_amount),0)*100/goal.target_amount,2)::text
                  else null end as achievement_rate,
             count(event.id)::text as event_count,
-            count(distinct event.salesperson_person_id)::text as member_count
+             count(distinct coalesce('id:'||event.salesperson_person_id::text,'legacy:'||event.salesperson_name))::text as member_count
      from selected_groups selected
      left join active_goals goal on goal.org_unit_id=selected.id
      left join performance_events event on event.group_unit_id=selected.id and event.accounting_month=$1::date
@@ -283,14 +327,21 @@ async function loadGroupAchievements(database: Database, groupIds: string[], per
   }));
 }
 
-async function loadGroupAchievementDetails(database: Database, groupId: string, periodMonth: string, today: string) {
+async function loadGroupAchievementDetails(database: QueryDatabase, groupId: string, periodMonth: string, today: string) {
   const result = await database.query<AchievementRow & {
     group_name: string;
     member_count: string;
     events: GroupAchievementEventRow[];
   }>(
-    `with selected_group as (
-       select id,name from org_units where id=$2 and unit_type='group'
+    `with event_group_name as (
+       select event.group_name
+       from performance_events event
+       where event.accounting_month=$1::date and event.group_unit_id=$2
+       order by event.occurred_on desc,event.order_sequence desc,event.id desc
+       limit 1
+     ),selected_group as (
+       select id,coalesce((select group_name from event_group_name),name) as name
+       from org_units where id=$2 and unit_type='group'
      ),active_goal as (
        select goal.id::text as goal_id,version.amount::numeric(14,2) as target_amount
        from goals goal
@@ -299,13 +350,18 @@ async function loadGroupAchievementDetails(database: Database, groupId: string, 
          and goal.org_unit_id=$2
        order by version.created_at desc,version.id desc
        limit 1
-     ),group_events as (
-       select event.id,event.order_id,orders.qingflow_order_no,orders.customer_name,
-              event.event_type,event.delta_amount,event.resulting_current_revenue,event.resulting_counted_amount,
-              event.accounting_month,event.occurred_on,event.order_sequence,event.reason,
-              event.department_name,event.group_name,event.salesperson_person_id,event.salesperson_name,
-              sum(event.delta_amount) over(partition by event.salesperson_person_id)::numeric(14,2)::text as member_actual_amount,
-              sum(event.delta_amount) over(partition by event.salesperson_person_id,event.order_id)::numeric(14,2)::text as order_actual_amount
+      ),group_events as (
+        select event.id,event.order_id,orders.qingflow_order_no,orders.customer_name,
+               event.event_type,event.delta_amount,event.resulting_current_revenue,event.resulting_counted_amount,
+               event.accounting_month,event.occurred_on,event.order_sequence,event.reason,
+               event.department_name,event.group_name,event.salesperson_person_id,event.salesperson_name,
+               coalesce('id:'||event.salesperson_person_id::text,'legacy:'||event.salesperson_name) as person_key,
+               sum(event.delta_amount) over(
+                 partition by coalesce('id:'||event.salesperson_person_id::text,'legacy:'||event.salesperson_name)
+               )::numeric(14,2)::text as member_actual_amount,
+               sum(event.delta_amount) over(
+                 partition by coalesce('id:'||event.salesperson_person_id::text,'legacy:'||event.salesperson_name),event.order_id
+               )::numeric(14,2)::text as order_actual_amount
        from performance_events event
        join performance_orders orders on orders.id=event.order_id
        where event.accounting_month=$1::date and event.group_unit_id=$2
@@ -321,7 +377,7 @@ async function loadGroupAchievementDetails(database: Database, groupId: string, 
                  then round(coalesce(sum(event.delta_amount),0)*100/(select target_amount from active_goal),2)::text
                  else null end as achievement_rate,
             count(event.id)::text as event_count,
-            count(distinct event.salesperson_person_id)::text as member_count,
+             count(distinct event.person_key)::text as member_count,
             coalesce(jsonb_agg(jsonb_build_object(
               'id',event.id::text,
               'orderId',event.order_id::text,
@@ -339,27 +395,30 @@ async function loadGroupAchievementDetails(database: Database, groupId: string, 
                 when event.event_type in ('restart','first_include') then 'active'
                 when event.resulting_current_revenue>0 then 'active' else 'zero' end,
               'departmentName',event.department_name,
-              'groupName',event.group_name,
-              'salespersonPersonId',event.salesperson_person_id::text,
-              'salespersonName',event.salesperson_name,
-              'memberActualAmount',event.member_actual_amount,
-              'orderActualAmount',event.order_actual_amount
-            ) order by event.salesperson_name,event.salesperson_person_id,event.qingflow_order_no,event.order_id,event.occurred_on,event.order_sequence,event.id)
+               'groupName',event.group_name,
+               'salespersonPersonId',event.salesperson_person_id::text,
+               'salespersonName',event.salesperson_name,
+               'personKey',event.person_key,
+               'memberActualAmount',event.member_actual_amount,
+               'orderActualAmount',event.order_actual_amount
+             ) order by event.person_key,event.qingflow_order_no,event.order_id,event.occurred_on,event.order_sequence,event.id)
               filter(where event.id is not null),'[]'::jsonb) as events
      from group_events event`,
     [`${periodMonth}-01`, groupId],
   );
   const row = result.rows[0]!;
   const members = new Map<string, {
-    personId: string;
+    personId: string | null;
+    personKey: string;
     name: string;
     actualAmount: string;
     eventCount: number;
     orders: Map<string, { orderId: string; orderNo: string; customerName: string; actualAmount: string; eventCount: number; events: PersonalAchievementEvent[] }>;
   }>();
   for (const event of row.events) {
-    const member = members.get(event.salespersonPersonId) ?? {
+    const member = members.get(event.personKey) ?? {
       personId: event.salespersonPersonId,
+      personKey: event.personKey,
       name: event.salespersonName,
       actualAmount: event.memberActualAmount,
       eventCount: 0,
@@ -373,12 +432,12 @@ async function loadGroupAchievementDetails(database: Database, groupId: string, 
       eventCount: 0,
       events: [],
     };
-    const { salespersonPersonId: _personId, salespersonName: _personName, memberActualAmount: _memberAmount, orderActualAmount: _orderAmount, ...detail } = event;
+    const { salespersonPersonId: _personId, salespersonName: _personName, personKey: _personKey, memberActualAmount: _memberAmount, orderActualAmount: _orderAmount, ...detail } = event;
     order.events.push(detail);
     order.eventCount += 1;
     member.orders.set(order.orderId, order);
     member.eventCount += 1;
-    members.set(member.personId, member);
+    members.set(member.personKey, member);
   }
   return {
     groupId,
@@ -388,6 +447,312 @@ async function loadGroupAchievementDetails(database: Database, groupId: string, 
     members: [...members.values()].map((member) => ({ ...member, orders: [...member.orders.values()] })),
   };
 }
+
+type OrganizationHierarchyQueryRow = AchievementRow & Readonly<{
+  departments: DepartmentAchievementRow[];
+  groups: DepartmentGroupAchievementRow[];
+  events: OrganizationAchievementEventRow[];
+}>;
+
+type HierarchyOrder = {
+  orderId: string;
+  orderNo: string;
+  customerName: string;
+  actualAmount: string;
+  eventCount: number;
+  events: PersonalAchievementEvent[];
+};
+
+type HierarchyMember = {
+  personId: string | null;
+  personKey: string;
+  name: string;
+  actualAmount: string;
+  eventCount: number;
+  orders: Map<string, HierarchyOrder>;
+};
+
+type HierarchyGroup = ReturnType<typeof formatAchievement> & {
+  groupId: string | null;
+  groupKey: string;
+  groupName: string;
+  memberCount: number;
+  members: Map<string, HierarchyMember>;
+};
+
+type HierarchyDepartment = ReturnType<typeof formatAchievement> & {
+  departmentId: string | null;
+  departmentKey: string;
+  departmentName: string;
+  groupCount: number;
+  groups: Map<string, HierarchyGroup>;
+};
+
+// ponytail: 当前 P1 数据量一次批量读取；事件量显著增长后再增加逐层分页。
+async function loadOrganizationAchievementHierarchy(
+  database: QueryDatabase,
+  departmentIds: string[],
+  includeAllDepartments: boolean,
+  periodMonth: string,
+  today: string,
+) {
+  const result = await database.query<OrganizationHierarchyQueryRow>(
+    ORGANIZATION_ACHIEVEMENT_SQL,
+    [`${periodMonth}-01`, departmentIds, includeAllDepartments],
+  );
+  const row = result.rows[0]!;
+  const departments = new Map<string, HierarchyDepartment>();
+  for (const department of row.departments) {
+    departments.set(department.department_key, {
+      departmentId: department.department_id,
+      departmentKey: department.department_key,
+      departmentName: department.department_name,
+      groupCount: Number(department.group_count),
+      ...formatAchievement(department, periodMonth, today),
+      groups: new Map(),
+    });
+  }
+  for (const group of row.groups) {
+    const department = departments.get(group.department_key);
+    if (!department) throw new Error("组织业绩部门层级缺失");
+    department.groups.set(group.group_key, {
+      groupId: group.group_id,
+      groupKey: group.group_key,
+      groupName: group.group_name,
+      memberCount: Number(group.member_count),
+      ...formatAchievement(group, periodMonth, today),
+      members: new Map(),
+    });
+  }
+  for (const event of row.events) {
+    const department = departments.get(event.departmentKey);
+    const group = department?.groups.get(event.groupKey);
+    if (!department || !group) throw new Error("组织业绩事件层级缺失");
+    const member = group.members.get(event.personKey) ?? {
+      personId: event.salespersonPersonId,
+      personKey: event.personKey,
+      name: event.salespersonName,
+      actualAmount: event.memberActualAmount,
+      eventCount: 0,
+      orders: new Map<string, HierarchyOrder>(),
+    };
+    const order = member.orders.get(event.orderId) ?? {
+      orderId: event.orderId,
+      orderNo: event.orderNo,
+      customerName: event.customerName,
+      actualAmount: event.orderActualAmount,
+      eventCount: 0,
+      events: [],
+    };
+    const {
+      departmentKey: _departmentKey,
+      departmentUnitId: _departmentUnitId,
+      groupKey: _groupKey,
+      groupUnitId: _groupUnitId,
+      salespersonPersonId: _salespersonPersonId,
+      salespersonName: _salespersonName,
+      personKey: _personKey,
+      memberActualAmount: _memberActualAmount,
+      orderActualAmount: _orderActualAmount,
+      ...detail
+    } = event;
+    order.events.push(detail);
+    order.eventCount += 1;
+    member.orders.set(order.orderId, order);
+    member.eventCount += 1;
+    group.members.set(member.personKey, member);
+  }
+  const departmentList = [...departments.values()].map((department) => ({
+    ...department,
+    groupCount: department.groups.size,
+    groups: [...department.groups.values()].map((group) => ({
+      ...group,
+      memberCount: group.members.size,
+      members: [...group.members.values()].map((member) => ({ ...member, orders: [...member.orders.values()] })),
+    })),
+  }));
+  return {
+    departments: departmentList,
+    salesAchievement: includeAllDepartments ? {
+      departmentCount: departmentList.length,
+      ...formatAchievement(row, periodMonth, today),
+    } : null,
+  };
+}
+
+export const ORGANIZATION_ACHIEVEMENT_SQL =
+    `with scope_events as (
+       select event.*,orders.qingflow_order_no,orders.customer_name,
+              coalesce('id:'||event.department_unit_id::text,'legacy:'||coalesce(event.department_name,'待补齐组织归属')) as department_key,
+              coalesce('id:'||event.group_unit_id::text,'legacy:'||coalesce(event.group_name,'待补齐小组')) as group_key,
+              coalesce('id:'||event.salesperson_person_id::text,'legacy:'||event.salesperson_name) as person_key
+       from performance_events event
+       join performance_orders orders on orders.id=event.order_id
+       where event.accounting_month=$1::date
+         and ($3::boolean or event.department_unit_id=any($2::bigint[]))
+     ),active_department_goals as (
+       select distinct on (goal.org_unit_id) goal.id::text as goal_id,goal.org_unit_id,
+              version.amount::numeric(14,2) as target_amount
+       from goals goal
+       join goal_versions version on version.goal_id=goal.id and version.status='active'
+       where goal.period_month=$1::date and goal.goal_level='department'
+         and ($3::boolean or goal.org_unit_id=any($2::bigint[]))
+       order by goal.org_unit_id,version.created_at desc,version.id desc
+     ),active_sales_goals as (
+       select goal.id::text as goal_id,version.amount::numeric(14,2) as target_amount
+       from goals goal
+       join goal_versions version on version.goal_id=goal.id and version.status='active'
+       where $3::boolean and goal.period_month=$1::date and goal.goal_level='sales_manager'
+     ),active_sales_goal as (
+       select min(goal_id) as goal_id,min(target_amount) as target_amount
+       from active_sales_goals
+       having count(*)=1
+     ),active_group_goals as (
+       select distinct on (goal.org_unit_id,parent.org_unit_id)
+              goal.id::text as goal_id,goal.org_unit_id,parent.org_unit_id as department_id,
+              version.amount::numeric(14,2) as target_amount
+       from goals goal
+       join goals parent on parent.id=goal.parent_goal_id and parent.goal_level='department'
+       join goal_versions version on version.goal_id=goal.id and version.status='active'
+       where goal.period_month=$1::date and goal.goal_level='group'
+         and ($3::boolean or parent.org_unit_id=any($2::bigint[]))
+       order by goal.org_unit_id,parent.org_unit_id,version.created_at desc,version.id desc
+     ),event_departments as (
+       select distinct on (event.department_key)
+              event.department_key,event.department_unit_id as id,
+              case when event.department_unit_id is null
+                   then coalesce(event.department_name,'未命名部门')||'（待补齐组织归属）'
+                   else event.department_name end as name
+       from scope_events event
+       order by event.department_key,event.occurred_on desc,event.order_sequence desc,event.id desc
+     ),department_candidates as (
+       select event.department_key,event.id,event.name,1 as priority from event_departments event
+       union all
+       select 'id:'||goal.org_unit_id::text,goal.org_unit_id,unit.name,0
+       from active_department_goals goal
+       join org_units unit on unit.id=goal.org_unit_id
+     ),selected_departments as (
+       select distinct on (department_key) department_key,id,name
+       from department_candidates
+       order by department_key,priority desc
+     ),event_groups as (
+       select distinct on (event.department_key,event.group_key)
+              event.department_key,event.department_unit_id as department_id,
+              event.group_key,event.group_unit_id as id,
+              case when event.group_unit_id is null
+                   then coalesce(event.group_name,'未命名小组')||'（待补齐组织归属）'
+                   else event.group_name end as name
+       from scope_events event
+       order by event.department_key,event.group_key,event.occurred_on desc,event.order_sequence desc,event.id desc
+     ),group_candidates as (
+       select event.department_key,event.department_id,event.group_key,event.id,event.name,1 as priority
+       from event_groups event
+       union all
+       select 'id:'||goal.department_id::text,goal.department_id,
+              'id:'||goal.org_unit_id::text,goal.org_unit_id,unit.name,0
+       from active_group_goals goal
+       join org_units unit on unit.id=goal.org_unit_id
+     ),selected_groups as (
+       select distinct on (department_key,group_key)
+              department_key,department_id,group_key,id,name
+       from group_candidates
+       order by department_key,group_key,priority desc
+     ),group_counts as (
+       select department_key,count(*)::text as group_count
+       from selected_groups
+       group by department_key
+     ),department_summaries as (
+       select department.department_key,department.id::text as department_id,department.name as department_name,
+              goal.goal_id,goal.target_amount::text,
+              coalesce(sum(event.delta_amount),0)::numeric(14,2)::text as actual_amount,
+              case when goal.target_amount>0
+                   then (goal.target_amount-coalesce(sum(event.delta_amount),0))::numeric(14,2)::text
+                   else null end as gap_amount,
+              case when goal.target_amount>0
+                   then round(coalesce(sum(event.delta_amount),0)*100/goal.target_amount,2)::text
+                   else null end as achievement_rate,
+              count(event.id)::text as event_count,
+              coalesce(group_counts.group_count,'0') as group_count
+       from selected_departments department
+       left join active_department_goals goal on goal.org_unit_id=department.id
+       left join group_counts on group_counts.department_key=department.department_key
+       left join scope_events event on event.department_key=department.department_key
+       group by department.department_key,department.id,department.name,goal.goal_id,goal.target_amount,group_counts.group_count
+     ),group_summaries as (
+       select selected.department_key,selected.department_id::text,department.name as department_name,
+              selected.group_key,selected.id::text as group_id,selected.name as group_name,
+              goal.goal_id,goal.target_amount::text,
+              coalesce(sum(event.delta_amount),0)::numeric(14,2)::text as actual_amount,
+              case when goal.target_amount>0
+                   then (goal.target_amount-coalesce(sum(event.delta_amount),0))::numeric(14,2)::text
+                   else null end as gap_amount,
+              case when goal.target_amount>0
+                   then round(coalesce(sum(event.delta_amount),0)*100/goal.target_amount,2)::text
+                   else null end as achievement_rate,
+              count(event.id)::text as event_count,
+              count(distinct event.person_key)::text as member_count
+       from selected_groups selected
+       join selected_departments department on department.department_key=selected.department_key
+       left join active_group_goals goal on goal.org_unit_id=selected.id
+          and goal.department_id is not distinct from selected.department_id
+       left join scope_events event on event.department_key=selected.department_key and event.group_key=selected.group_key
+       group by selected.department_key,selected.department_id,department.name,
+                selected.group_key,selected.id,selected.name,goal.goal_id,goal.target_amount
+     ),event_rows as (
+       select event.*,
+              sum(event.delta_amount) over(
+                partition by event.department_key,event.group_key,event.person_key
+              )::numeric(14,2)::text as member_actual_amount,
+              sum(event.delta_amount) over(
+                partition by event.department_key,event.group_key,event.person_key,event.order_id
+              )::numeric(14,2)::text as order_actual_amount
+       from scope_events event
+     )
+     select (select goal_id from active_sales_goal) as goal_id,
+             (select target_amount::text from active_sales_goal) as target_amount,
+             ((select count(*) from active_sales_goals)>1) as target_ambiguous,
+            coalesce((select sum(delta_amount) from scope_events),0)::numeric(14,2)::text as actual_amount,
+            case when (select target_amount from active_sales_goal)>0
+                 then ((select target_amount from active_sales_goal)-coalesce((select sum(delta_amount) from scope_events),0))::numeric(14,2)::text
+                 else null end as gap_amount,
+            case when (select target_amount from active_sales_goal)>0
+                 then round(coalesce((select sum(delta_amount) from scope_events),0)*100/(select target_amount from active_sales_goal),2)::text
+                 else null end as achievement_rate,
+            (select count(*)::text from scope_events) as event_count,
+            coalesce((select jsonb_agg(to_jsonb(summary) order by summary.department_name,summary.department_key)
+                      from department_summaries summary),'[]'::jsonb) as departments,
+            coalesce((select jsonb_agg(to_jsonb(summary) order by summary.department_name,summary.department_key,summary.group_name,summary.group_key)
+                      from group_summaries summary),'[]'::jsonb) as groups,
+            coalesce((select jsonb_agg(jsonb_build_object(
+                'id',event.id::text,
+                'orderId',event.order_id::text,
+                'orderNo',event.qingflow_order_no,
+                'customerName',event.customer_name,
+                'eventType',event.event_type,
+                'deltaAmount',event.delta_amount::numeric(14,2)::text,
+                'accountingMonth',to_char(event.accounting_month,'YYYY-MM'),
+                'occurredOn',event.occurred_on::text,
+                'sequence',event.order_sequence,
+                'reason',event.reason,
+                'resultingCountedAmount',event.resulting_counted_amount::numeric(14,2)::text,
+                'resultingLifecycleState',case when event.event_type='legacy_adjustment' then null
+                  when event.event_type='pause' then 'paused'
+                  when event.event_type in ('restart','first_include') then 'active'
+                  when event.resulting_current_revenue>0 then 'active' else 'zero' end,
+                'departmentName',event.department_name,
+                'groupName',event.group_name,
+                'departmentKey',event.department_key,
+                'departmentUnitId',event.department_unit_id::text,
+                'groupKey',event.group_key,
+                'groupUnitId',event.group_unit_id::text,
+                'salespersonPersonId',event.salesperson_person_id::text,
+                'salespersonName',event.salesperson_name,
+                'personKey',event.person_key,
+                'memberActualAmount',event.member_actual_amount,
+                'orderActualAmount',event.order_actual_amount
+              ) order by event.department_key,event.group_key,event.person_key,event.qingflow_order_no,event.order_id,
+                         event.occurred_on,event.order_sequence,event.id)
+              from event_rows event),'[]'::jsonb) as events`;
 
 function eventFingerprint(body:z.infer<typeof eventSchema>):string {
   return createHash("sha256").update(JSON.stringify({
@@ -439,61 +804,89 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
 
   app.get("/api/performance/dashboard", async (request, reply) => {
     if (!request.currentUser) return reply.code(401).send({ message: "尚未登录" });
-    const access = await resolvePerformanceAccess(db, request.currentUser);
-    if (!canReadPerformance(access)) return reply.code(403).send({ message: "当前角色没有业务查看权限" });
     const parsed = dashboardQuerySchema.safeParse(request.query);
     if (!parsed.success) return reply.code(400).send({ code: "MONTH_INVALID", message: "月份格式无效" });
+    const currentUser = request.currentUser;
     const today = businessDate(clock());
     const month = parsed.data.month ?? today.slice(0, 7);
-    const scopeValues = performanceScopeValues(access);
-    const ledGroupIds = request.currentUser.roles.includes("sales_leader")
-      ? await loadLedGroupIds(db, request.currentUser.personId, today)
-      : [];
-    const [metrics, monthly, groups, recent, pending, personalAchievement, groupAchievements] = await Promise.all([
-      db.query<{ total: string; event_count: string; negative_total: string }>(
+    const client = await db.connect();
+    try {
+      await client.query("begin transaction isolation level repeatable read read only");
+      const access = await resolvePerformanceAccess(client, currentUser);
+      if (!canReadPerformance(access)) {
+        await client.query("rollback");
+        return reply.code(403).send({ message: "当前角色没有业务查看权限" });
+      }
+      const scopeValues = performanceScopeValues(access);
+      const ledGroupIds = currentUser.roles.includes("sales_leader")
+        ? await loadLedGroupIds(client, currentUser.personId, today)
+        : [];
+      const canViewSalesAchievement = hasAnyRole(currentUser, SALES_ACHIEVEMENT_ROLES);
+      const canViewDepartmentAchievement = hasAnyRole(currentUser, DEPARTMENT_ACHIEVEMENT_ROLES);
+      const metrics = await client.query<{ total: string; event_count: string; negative_total: string }>(
         `select coalesce(sum(delta_amount),0)::text as total, count(*)::text as event_count,
                 coalesce(sum(delta_amount) filter (where delta_amount < 0),0)::text as negative_total
-         from performance_events e where accounting_month = $1 and ${performanceScopeSql("e", 2)}`, [`${month}-01`, ...scopeValues]),
-      db.query<{ month: string; total: string }>(
+         from performance_events e where accounting_month = $1 and ${performanceScopeSql("e", 2)}`, [`${month}-01`, ...scopeValues]);
+      const monthly = await client.query<{ month: string; total: string }>(
         `select to_char(accounting_month, 'YYYY-MM') as month, sum(delta_amount)::text as total
          from performance_events e where extract(year from accounting_month) = extract(year from $1::date)
            and ${performanceScopeSql("e", 2)}
-         group by accounting_month order by accounting_month`, [`${month}-01`, ...scopeValues]),
-      db.query<{ name: string; total: string }>(
-        `select group_name as name, sum(delta_amount)::text as total
-         from performance_events e where accounting_month = $1 and ${performanceScopeSql("e", 2)} group by group_name
-         order by sum(delta_amount) desc limit 5`, [`${month}-01`, ...scopeValues]),
-      db.query(
+         group by accounting_month order by accounting_month`, [`${month}-01`, ...scopeValues]);
+      const groups = await client.query<{ id: string; name: string; total: string }>(
+        `select coalesce(e.group_unit_id::text,'legacy:'||e.group_name) as id,
+                string_agg(distinct e.group_name,' / ' order by e.group_name) as name,
+                sum(e.delta_amount)::text as total
+         from performance_events e where e.accounting_month = $1 and ${performanceScopeSql("e", 2)}
+         group by coalesce(e.group_unit_id::text,'legacy:'||e.group_name)
+         order by sum(e.delta_amount) desc limit 5`, [`${month}-01`, ...scopeValues]);
+      const recent = await client.query(
         `select o.qingflow_order_no as "orderNo", e.salesperson_name as "salespersonName",
                 e.event_type as "eventType", to_char(e.accounting_month, 'YYYY-MM') as month,
                 e.delta_amount::text as amount, e.group_name as "groupName"
          from performance_events e join performance_orders o on o.id = e.order_id
          where e.accounting_month=$1 and ${performanceScopeSql("e", 2)}
-         order by e.created_at desc, e.id desc limit 8`, [`${month}-01`, ...scopeValues]),
-      db.query<{ count: string }>(
+         order by e.created_at desc, e.id desc limit 8`, [`${month}-01`, ...scopeValues]);
+      const pending = await client.query<{ count: string }>(
         `select count(*)::text as count from goal_versions v join goals g on g.id=v.goal_id
          where ${pendingGoalSql("g", "v", 1)}`,
-        pendingGoalValues(request.currentUser),
-      ),
-      request.currentUser.roles.some((role) => role === "salesperson" || role === "sales_leader")
-        ? loadPersonalAchievement(db, request.currentUser.personId, month, today)
-        : Promise.resolve(null),
-      loadGroupAchievements(db, ledGroupIds, month, today),
-    ]);
-    return {
-      month,
-      metrics: { total: metrics.rows[0]!.total, eventCount: Number(metrics.rows[0]!.event_count), negativeTotal: metrics.rows[0]!.negative_total, pendingApprovals: Number(pending.rows[0]!.count) },
-      monthly: monthly.rows,
-      groups: groups.rows,
-      recent: recent.rows,
-      personalAchievement,
-      groupAchievements,
-    };
+        pendingGoalValues(currentUser),
+      );
+      const personalAchievement = currentUser.roles.some((role) => role === "salesperson" || role === "sales_leader" || role === "sales_supervisor")
+        ? await loadPersonalAchievement(client, currentUser.personId, month, today)
+        : null;
+      const groupAchievements = await loadGroupAchievements(client, ledGroupIds, month, today);
+      const organizationHierarchy = canViewDepartmentAchievement
+        ? await loadOrganizationAchievementHierarchy(
+          client,
+          canViewSalesAchievement ? [] : access.departmentIds,
+          canViewSalesAchievement,
+          month,
+          today,
+        )
+        : null;
+      await client.query("commit");
+      return {
+        month,
+        metrics: { total: metrics.rows[0]!.total, eventCount: Number(metrics.rows[0]!.event_count), negativeTotal: metrics.rows[0]!.negative_total, pendingApprovals: Number(pending.rows[0]!.count) },
+        monthly: monthly.rows,
+        groups: groups.rows,
+        recent: recent.rows,
+        personalAchievement,
+        groupAchievements,
+        departmentAchievements: organizationHierarchy?.departments.map(({ groups: _groups, ...department }) => department) ?? [],
+        salesAchievement: organizationHierarchy?.salesAchievement ?? null,
+      };
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
   });
 
   app.get("/api/performance/personal-achievement/events", async (request, reply) => {
     if (!request.currentUser) return reply.code(401).send({ message: "尚未登录" });
-    if (!request.currentUser.roles.some((role) => role === "salesperson" || role === "sales_leader")) {
+    if (!request.currentUser.roles.some((role) => role === "salesperson" || role === "sales_leader" || role === "sales_supervisor")) {
       return reply.code(403).send({ message: "当前角色没有个人目标达成查看权限" });
     }
     const parsed = dashboardQuerySchema.safeParse(request.query);
@@ -518,6 +911,42 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
     }
     const periodMonth = parsed.data.month ?? today.slice(0, 7);
     return loadGroupAchievementDetails(db, groupId, periodMonth, today);
+  });
+
+  app.get("/api/performance/department-achievement/events", async (request, reply) => {
+    if (!request.currentUser) return reply.code(401).send({ message: "尚未登录" });
+    if (!hasAnyRole(request.currentUser, DEPARTMENT_ACHIEVEMENT_ROLES)) {
+      return reply.code(403).send({ code: "DEPARTMENT_SCOPE_FORBIDDEN", message: "当前角色没有部门目标达成查看权限" });
+    }
+    const parsed = departmentAchievementQuerySchema.safeParse(request.query);
+    if (!parsed.success) return reply.code(400).send({ code: "DEPARTMENT_QUERY_INVALID", message: "部门或月份格式无效" });
+    const today = businessDate(clock());
+    const departmentId = String(parsed.data.departmentId);
+    const canViewAll = hasAnyRole(request.currentUser, SALES_ACHIEVEMENT_ROLES);
+    if (!canViewAll) {
+      const access = await resolvePerformanceAccess(db, request.currentUser);
+      if (!access.departmentIds.includes(departmentId)) {
+        return reply.code(403).send({ code: "DEPARTMENT_SCOPE_FORBIDDEN", message: "只能查看当前明确负责的部门" });
+      }
+    }
+    const periodMonth = parsed.data.month ?? today.slice(0, 7);
+    const hierarchy = await loadOrganizationAchievementHierarchy(db, [departmentId], false, periodMonth, today);
+    const department = hierarchy.departments.find((item) => item.departmentId === departmentId);
+    if (!department) return reply.code(404).send({ code: "DEPARTMENT_NOT_FOUND", message: "部门不存在" });
+    return department;
+  });
+
+  app.get("/api/performance/sales-achievement/events", async (request, reply) => {
+    if (!request.currentUser) return reply.code(401).send({ message: "尚未登录" });
+    if (!hasAnyRole(request.currentUser, SALES_ACHIEVEMENT_ROLES)) {
+      return reply.code(403).send({ code: "SALES_SCOPE_FORBIDDEN", message: "当前角色没有销售组织目标达成查看权限" });
+    }
+    const parsed = dashboardQuerySchema.safeParse(request.query);
+    if (!parsed.success) return reply.code(400).send({ code: "MONTH_INVALID", message: "月份格式无效" });
+    const today = businessDate(clock());
+    const periodMonth = parsed.data.month ?? today.slice(0, 7);
+    const hierarchy = await loadOrganizationAchievementHierarchy(db, [], true, periodMonth, today);
+    return { ...hierarchy.salesAchievement!, departments: hierarchy.departments };
   });
 
   app.get("/api/performance/orders", async (request, reply) => {

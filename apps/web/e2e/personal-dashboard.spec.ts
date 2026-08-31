@@ -279,3 +279,110 @@ test("纯组长同时查看本人和小组并穿透组员订单事件", async ({
   await expect(secondaryDetails).toBeVisible();
   await expect(secondaryDetails.getByRole("heading", { name: "E2E 组员甲", exact: true })).toHaveCount(0);
 });
+
+test("主管和销售经理从部门及销售组织逐级穿透到正负事件", async ({ database, page }) => {
+  const periodMonth = shanghaiToday().slice(0, 7);
+  const users = {
+    supervisor: await seedTestUser(database.url, { username:"e2e_department_supervisor",displayName:"E2E 看板主管",password:"Dashboard@123",roleCode:"sales_supervisor",roleName:"业务主管" }),
+    leader: await seedTestUser(database.url, { username:"e2e_department_leader",displayName:"E2E 看板组长",password:"Dashboard@123",roleCode:"sales_leader",roleName:"业务员组长" }),
+    memberA: await seedTestUser(database.url, { username:"e2e_department_member_a",displayName:"E2E 部门成员甲",password:"Dashboard@123",roleCode:"salesperson",roleName:"业务员" }),
+    memberB: await seedTestUser(database.url, { username:"e2e_department_member_b",displayName:"E2E 部门成员乙",password:"Dashboard@123",roleCode:"salesperson",roleName:"业务员" }),
+    outsider: await seedTestUser(database.url, { username:"e2e_department_outsider",displayName:"E2E 外部门人员",password:"Dashboard@123",roleCode:"salesperson",roleName:"业务员" }),
+    manager: await seedTestUser(database.url, { username:"e2e_sales_manager",displayName:"E2E 销售经理",password:"Dashboard@123",roleCode:"sales_manager",roleName:"销售经理" }),
+  };
+  const client = new Client({ connectionString: database.url });
+  await client.connect();
+  try {
+    const peopleResult = await client.query<{user_id:string;person_id:string}>("select user_id::text,id::text as person_id from people where user_id=any($1::bigint[])",[Object.values(users)]);
+    const people = Object.fromEntries(peopleResult.rows.map((row)=>[row.user_id,row.person_id])) as Record<string,string>;
+    const departmentA = await client.query<{id:string}>("insert into org_units(name,unit_type) values('E2E 看板甲部','department') returning id::text");
+    const departmentB = await client.query<{id:string}>("insert into org_units(name,unit_type) values('E2E 看板乙部','department') returning id::text");
+    const groupA = await client.query<{id:string}>("insert into org_units(name,unit_type,parent_id) values('E2E 看板甲组','group',$1) returning id::text",[departmentA.rows[0]!.id]);
+    const groupB = await client.query<{id:string}>("insert into org_units(name,unit_type,parent_id) values('E2E 看板乙组','group',$1) returning id::text",[departmentB.rows[0]!.id]);
+    await client.query(
+      `insert into org_responsibilities(person_id,org_unit_id,responsibility_type,effective_from)
+       values($1,$2,'leader','2026-01-01'),($3,$4,'supervisor','2026-01-01'),
+             ($5,$6,'leader','2026-01-01'),($5,$7,'supervisor','2026-01-01')`,
+      [people[users.leader],groupA.rows[0]!.id,people[users.supervisor],departmentA.rows[0]!.id,
+       people[users.outsider],groupB.rows[0]!.id,departmentB.rows[0]!.id],
+    );
+    await client.query(
+      `insert into org_memberships(person_id,department_id,group_id,effective_from)
+       values($1,$3,$4,'2026-01-01'),($2,$3,$4,'2026-01-01'),($5,$6,$7,'2026-01-01')`,
+      [people[users.memberA],people[users.memberB],departmentA.rows[0]!.id,groupA.rows[0]!.id,
+       people[users.outsider],departmentB.rows[0]!.id,groupB.rows[0]!.id],
+    );
+    const addOrder = async ({orderNo,customerName,personId,personName,departmentId,departmentName,groupId,groupName,leaderId,leaderName,supervisorId,supervisorName,amount,adjustment=0}:{orderNo:string;customerName:string;personId:string;personName:string;departmentId:string;departmentName:string;groupId:string;groupName:string;leaderId:string;leaderName:string;supervisorId:string;supervisorName:string;amount:number;adjustment?:number}) => {
+      const finalAmount=amount+adjustment;
+      const order=await client.query<{id:string}>(
+        `insert into performance_orders
+          (qingflow_order_no,customer_name,customer_unit,salesperson_person_id,salesperson_name,
+           source_received_on,original_amount,current_revenue,counted_amount,lifecycle_state,posted_at)
+         values($1,$2,'E2E 看板单位',$3,$4,$5,$6,$7,$7,'active',now()) returning id::text`,
+        [orderNo,customerName,personId,personName,`${periodMonth}-01`,amount,finalAmount],
+      );
+      await client.query(
+        `insert into performance_events
+          (order_id,event_type,delta_amount,resulting_current_revenue,resulting_counted_amount,
+           accounting_month,occurred_on,reason,salesperson_person_id,salesperson_name,
+           department_unit_id,department_name,group_unit_id,group_name,
+           leader_person_id,leader_name,supervisor_person_id,supervisor_name)
+         values($1,'initial',$2,$2,$2,$3,$3,'首次计入',$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+        [order.rows[0]!.id,amount,`${periodMonth}-01`,personId,personName,departmentId,departmentName,groupId,groupName,leaderId,leaderName,supervisorId,supervisorName],
+      );
+      if(adjustment!==0){await client.query(
+        `insert into performance_events
+         (order_id,event_type,delta_amount,resulting_current_revenue,resulting_counted_amount,
+           accounting_month,occurred_on,reason,salesperson_person_id,salesperson_name,
+           department_unit_id,department_name,group_unit_id,group_name,
+           leader_person_id,leader_name,supervisor_person_id,supervisor_name)
+         values($1,'revenue_change',$2,$3,$3,$4,$5,'金额调减',$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+        [order.rows[0]!.id,adjustment,finalAmount,`${periodMonth}-01`,`${periodMonth}-02`,personId,personName,departmentId,departmentName,groupId,groupName,leaderId,leaderName,supervisorId,supervisorName],
+      );}
+    };
+    await addOrder({orderNo:"DEPARTMENT-A",customerName:"部门客户甲",personId:people[users.memberA]!,personName:"E2E 部门成员甲",departmentId:departmentA.rows[0]!.id,departmentName:"E2E 看板甲部",groupId:groupA.rows[0]!.id,groupName:"E2E 看板甲组",leaderId:people[users.leader]!,leaderName:"E2E 看板组长",supervisorId:people[users.supervisor]!,supervisorName:"E2E 看板主管",amount:100,adjustment:-25});
+    await addOrder({orderNo:"DEPARTMENT-B",customerName:"部门客户乙",personId:people[users.memberB]!,personName:"E2E 部门成员乙",departmentId:departmentA.rows[0]!.id,departmentName:"E2E 看板甲部",groupId:groupA.rows[0]!.id,groupName:"E2E 看板甲组",leaderId:people[users.leader]!,leaderName:"E2E 看板组长",supervisorId:people[users.supervisor]!,supervisorName:"E2E 看板主管",amount:100});
+    await addOrder({orderNo:"DEPARTMENT-SUPERVISOR",customerName:"主管本人客户",personId:people[users.supervisor]!,personName:"E2E 看板主管",departmentId:departmentA.rows[0]!.id,departmentName:"E2E 看板甲部",groupId:groupA.rows[0]!.id,groupName:"E2E 看板甲组",leaderId:people[users.leader]!,leaderName:"E2E 看板组长",supervisorId:people[users.supervisor]!,supervisorName:"E2E 看板主管",amount:40});
+    await addOrder({orderNo:"DEPARTMENT-OUTSIDE",customerName:"外部门客户",personId:people[users.outsider]!,personName:"E2E 外部门人员",departmentId:departmentB.rows[0]!.id,departmentName:"E2E 看板乙部",groupId:groupB.rows[0]!.id,groupName:"E2E 看板乙组",leaderId:people[users.outsider]!,leaderName:"E2E 外部门人员",supervisorId:people[users.outsider]!,supervisorName:"E2E 外部门人员",amount:100});
+    const root=await client.query<{id:string}>("insert into goals(period_month,goal_level,owner_user_id,owner_person_id) values($1,'sales_manager',$2,$3) returning id::text",[`${periodMonth}-01`,users.manager,people[users.manager]]);
+    const goalDepartmentA=await client.query<{id:string}>("insert into goals(period_month,goal_level,owner_user_id,owner_person_id,parent_goal_id,org_unit_id) values($1,'department',$2,$3,$4,$5) returning id::text",[`${periodMonth}-01`,users.supervisor,people[users.supervisor],root.rows[0]!.id,departmentA.rows[0]!.id]);
+    const goalDepartmentB=await client.query<{id:string}>("insert into goals(period_month,goal_level,owner_user_id,owner_person_id,parent_goal_id,org_unit_id) values($1,'department',$2,$3,$4,$5) returning id::text",[`${periodMonth}-01`,users.outsider,people[users.outsider],root.rows[0]!.id,departmentB.rows[0]!.id]);
+    const goalGroupA=await client.query<{id:string}>("insert into goals(period_month,goal_level,owner_user_id,owner_person_id,parent_goal_id,org_unit_id) values($1,'group',$2,$3,$4,$5) returning id::text",[`${periodMonth}-01`,users.leader,people[users.leader],goalDepartmentA.rows[0]!.id,groupA.rows[0]!.id]);
+    const personal=await client.query<{id:string}>("insert into goals(period_month,goal_level,owner_user_id,owner_person_id) values($1,'personal',$2,$3) returning id::text",[`${periodMonth}-01`,users.supervisor,people[users.supervisor]]);
+    for(const[goalId,amount,status]of[[root.rows[0]!.id,500,"active"],[goalDepartmentA.rows[0]!.id,250,"active"],[goalDepartmentB.rows[0]!.id,200,"pending_hr"],[goalGroupA.rows[0]!.id,200,"active"],[personal.rows[0]!.id,500,"active"]]as const){await client.query("insert into goal_versions(goal_id,version_no,amount,status,created_by,created_by_person_id,change_reason) values($1,1,$2,$3,$4,$5,'E2E 部门看板')",[goalId,amount,status,users.manager,people[users.manager]]);}
+  } finally { await client.end(); }
+
+  const login=async(username:string)=>{await page.goto("/");await page.getByLabel("账号").fill(username);await page.getByLabel("密码",{exact:true}).fill("Dashboard@123");await page.getByRole("button",{name:"进入 SampleFlow"}).click();};
+  const money=(value:number)=>`¥${value.toLocaleString("en-US",{minimumFractionDigits:2})}`;
+  await login("e2e_department_supervisor");
+  await expect(page.locator(".dashboard > header p")).toContainText("个人、部门目标与不可变业绩事件");
+  const personal=page.getByRole("region",{name:"个人目标达成"});
+  await expect(personal.getByRole("button",{name:"查看个人业绩构成"})).toHaveText(money(40));
+  const department=page.getByRole("article",{name:"部门目标达成 · E2E 看板甲部"});
+  await expect(department.getByText(money(250),{exact:true})).toBeVisible();
+  await expect(department.getByText("86.00%",{exact:true})).toBeVisible();
+  await department.getByRole("button",{name:"查看部门业绩构成"}).click();
+  const departmentDialog=page.getByRole("dialog",{name:"E2E 看板甲部 · 部门业绩构成"});
+  await expect(departmentDialog.getByText(`4 条事件 · 净额 ${money(215)}`,{exact:true})).toBeVisible();
+  await expect(departmentDialog.getByRole("heading",{name:"E2E 看板甲组",exact:true})).toBeVisible();
+  await expect(departmentDialog.getByRole("heading",{name:"E2E 部门成员甲",exact:true})).toBeVisible();
+  await expect(departmentDialog.getByText("DEPARTMENT-A · 部门客户甲",{exact:false})).toBeVisible();
+  await expect(departmentDialog.getByText("负向 ¥25.00",{exact:true})).toBeVisible();
+  await expect(departmentDialog.getByText("E2E 外部门人员",{exact:true})).toHaveCount(0);
+  await page.getByRole("button",{name:"关闭"}).click();
+  await page.getByRole("button",{name:"退出登录"}).click();
+
+  await login("e2e_sales_manager");
+  const sales=page.getByRole("article",{name:"销售组织目标达成"});
+  await expect(sales.getByText(money(500),{exact:true})).toBeVisible();
+  await expect(sales.getByRole("button",{name:"查看销售组织业绩构成"})).toHaveText(money(315));
+  const inactiveDepartment=page.getByRole("article",{name:"部门目标达成 · E2E 看板乙部"});
+  await expect(inactiveDepartment.getByText("部门目标尚未生效",{exact:true}).first()).toBeVisible();
+  await expect(inactiveDepartment.getByText("不计算",{exact:true})).toHaveCount(4);
+  await sales.getByRole("button",{name:"查看销售组织业绩构成"}).click();
+  const salesDialog=page.getByRole("dialog",{name:"销售组织 · 业绩构成"});
+  await expect(salesDialog.getByText(`5 条事件 · 净额 ${money(315)}`,{exact:true})).toBeVisible();
+  await expect(salesDialog.getByRole("heading",{name:"E2E 看板甲部",exact:true})).toBeVisible();
+  await expect(salesDialog.getByRole("heading",{name:"E2E 看板乙部",exact:true})).toBeVisible();
+  await expect(salesDialog.getByText("E2E 外部门人员",{exact:true})).toBeVisible();
+});
