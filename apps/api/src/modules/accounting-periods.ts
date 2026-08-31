@@ -2,8 +2,10 @@ import type { FastifyInstance } from "fastify";
 import type { PoolClient } from "pg";
 import { z } from "zod";
 import type { Database } from "../db.js";
+import { standardBusinessRegionName } from "../domain/business-regions.js";
 import { businessDate } from "../domain/business-time.js";
 import { hasAnyRole, type CurrentUser } from "./auth.js";
+import { recordEventAnalysisDimensions } from "./event-analysis-dimensions.js";
 import { OrganizationResolutionError, resolveOrganization } from "./organization.js";
 
 const monthParamSchema = z.object({ month: z.string().regex(/^\d{4}-\d{2}$/) });
@@ -14,6 +16,10 @@ const correctionSchema = z.strictObject({
   eventType: z.enum(["revenue_change", "pause", "restart", "first_include"]),
   occurredOn: z.iso.date(),
   reason: z.string().trim().min(1).max(500),
+  businessRegionCode: z.string().refine((value) => standardBusinessRegionName(value) !== undefined, "必须选择标准业务区域"),
+  businessRegionSourceText: z.string().trim().min(1).max(100),
+  customerUnit: z.string().trim().min(1).max(300),
+  analysisDimensionEvidence: z.string().trim().min(1).max(1000),
 });
 const idSchema = z.object({ id: z.coerce.number().int().positive() });
 const correctionListSchema = z.object({
@@ -42,7 +48,14 @@ const reviewListSchema = z.object({
 
 export class AccountingPeriodError extends Error {}
 
-export type ApprovedCorrection = Readonly<{ id: string; periodMonth: string; occurredOn: string }>;
+export type ApprovedCorrection = Readonly<{
+  id: string;
+  periodMonth: string;
+  occurredOn: string;
+  businessRegionCode: string;
+  businessRegionSourceText: string;
+  customerUnit: string;
+}>;
 
 type PeriodRow = {
   status: "open" | "closed";
@@ -86,9 +99,14 @@ export async function assertAccountingPeriodOpen(client: QueryClient, month: str
 }
 
 export async function lockApprovedCorrection(client: PoolClient, correctionRequestId: number, orderId: number, eventType: string, actorPersonId: string, now: Date): Promise<ApprovedCorrection> {
-  const result = await client.query<{ id: string; period_month: string; occurred_on: string; status: string; expires_at: Date | null; reviewed_by_person_id: string | null }>(
+  const result = await client.query<{
+    id: string; period_month: string; occurred_on: string; status: string; expires_at: Date | null;
+    reviewed_by_person_id: string | null; business_region_code: string | null;
+    business_region_source_text: string | null; customer_unit: string | null;
+  }>(
     `select request_row.id::text,request_row.period_month::text,request_row.occurred_on::text,
-            request_row.status,request_row.expires_at,request_row.reviewed_by_person_id::text
+            request_row.status,request_row.expires_at,request_row.reviewed_by_person_id::text,
+            request_row.business_region_code,request_row.business_region_source_text,request_row.customer_unit
      from accounting_correction_requests request_row
      join accounting_periods period on period.period_month=request_row.period_month
      where request_row.id=$1 and request_row.order_id=$2 and request_row.event_type=$3
@@ -100,7 +118,17 @@ export async function lockApprovedCorrection(client: PoolClient, correctionReque
   if (correction.status !== "approved") throw new AccountingPeriodError("更正申请不是可执行状态");
   if (correction.reviewed_by_person_id === actorPersonId) throw new AccountingPeriodError("审批人与执行人必须是不同人员");
   if (!correction.expires_at || correction.expires_at.getTime() <= now.getTime()) throw new AccountingPeriodError("更正批准已过期");
-  return { id: correction.id, periodMonth: correction.period_month, occurredOn: correction.occurred_on };
+  if (!correction.business_region_code || !correction.business_region_source_text || !correction.customer_unit) {
+    throw new AccountingPeriodError("更正申请缺少事件发生时分析维度证据");
+  }
+  return {
+    id: correction.id,
+    periodMonth: correction.period_month,
+    occurredOn: correction.occurred_on,
+    businessRegionCode: correction.business_region_code,
+    businessRegionSourceText: correction.business_region_source_text,
+    customerUnit: correction.customer_unit,
+  };
 }
 
 export async function consumeApprovedCorrection(client: PoolClient, correction: ApprovedCorrection, actorUserId: string, actorPersonId: string, eventId: string, now: Date, ipAddress: string): Promise<void> {
@@ -148,6 +176,10 @@ export async function registerAccountingPeriods(app: FastifyInstance, db: Databa
       `select request_row.id::text,request_row.period_month::text as "periodMonth",request_row.order_id::text as "orderId",
               orders.qingflow_order_no as "orderNo",request_row.event_type as "eventType",
               request_row.occurred_on::text as "occurredOn",request_row.reason,request_row.status,
+              request_row.business_region_code as "businessRegionCode",
+              request_row.business_region_source_text as "businessRegionSourceText",
+              request_row.customer_unit as "customerUnit",
+              request_row.analysis_dimension_evidence as "analysisDimensionEvidence",
               request_row.requested_at as "requestedAt",requester.display_name as "requestedBy",
               reviewer.display_name as "reviewedBy",request_row.review_note as "reviewNote",request_row.expires_at as "expiresAt"
        from accounting_correction_requests request_row
@@ -262,9 +294,13 @@ export async function registerAccountingPeriods(app: FastifyInstance, db: Databa
       if (!order.rowCount) { await client.query("rollback"); return reply.code(404).send({ message: "订单不存在" }); }
       const created = await client.query<{ id: string }>(
         `insert into accounting_correction_requests
-          (period_month,order_id,event_type,occurred_on,reason,requested_by_user_id,requested_by_person_id,requested_at)
-         values($1,$2,$3,$4,$5,$6,$7,$8) returning id::text`,
-        [periodMonth, input.orderId, input.eventType, input.occurredOn, input.reason, request.currentUser!.id, request.currentUser!.personId, now],
+          (period_month,order_id,event_type,occurred_on,reason,business_region_code,
+           business_region_source_text,customer_unit,analysis_dimension_evidence,
+           requested_by_user_id,requested_by_person_id,requested_at)
+         values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) returning id::text`,
+        [periodMonth, input.orderId, input.eventType, input.occurredOn, input.reason,
+         input.businessRegionCode, input.businessRegionSourceText, input.customerUnit,
+         input.analysisDimensionEvidence, request.currentUser!.id, request.currentUser!.personId, now],
       );
       const id = created.rows[0]!.id;
       await writeAudit(client, request.currentUser!.id, "accounting.correction_requested", "accounting_correction", id, input, request.ip);
@@ -288,12 +324,17 @@ export async function registerAccountingPeriods(app: FastifyInstance, db: Databa
     const client = await db.connect();
     try {
       await client.query("begin");
-      const pending = await client.query<{ requested_by_person_id: string; status: string }>(
-        "select requested_by_person_id::text,status from accounting_correction_requests where id=$1 for update", [params.data.id],
+      const pending = await client.query<{ requested_by_person_id: string; status: string; analysis_dimensions_required: boolean; business_region_code: string | null }>(
+        `select requested_by_person_id::text,status,analysis_dimensions_required,business_region_code
+         from accounting_correction_requests where id=$1 for update`, [params.data.id],
       );
       const row = pending.rows[0];
       if (!row) { await client.query("rollback"); return reply.code(404).send({ message: "更正申请不存在" }); }
       if (row.status !== "pending") { await client.query("rollback"); return reply.code(409).send({ message: "更正申请已处理" }); }
+      if (!row.analysis_dimensions_required || !row.business_region_code) {
+        await client.query("rollback");
+        return reply.code(409).send({ message: "旧更正申请缺少事件发生时分析维度证据，请重新提交" });
+      }
       if (row.requested_by_person_id === request.currentUser!.personId) {
         await client.query("rollback");
         return reply.code(409).send({ message: "申请人与审批人必须是不同人员" });
@@ -439,12 +480,18 @@ export async function registerAccountingPeriods(app: FastifyInstance, db: Databa
         await client.query("rollback");
         return reply.code(409).send({ message: "核对人与审批人必须是不同人员" });
       }
-      const order = await client.query<{ salesperson_person_id: string; counted_amount: string; lifecycle_state: string }>(
-        "select salesperson_person_id::text,counted_amount::text,lifecycle_state from performance_orders where id=$1 for update", [row.order_id],
+      const order = await client.query<{ salesperson_person_id: string; counted_amount: string; lifecycle_state: string; customer_unit:string; business_region_source_text:string|null; business_region_code:string|null }>(
+        `select salesperson_person_id::text,counted_amount::text,lifecycle_state,customer_unit,
+                business_region_source_text,business_region_code
+         from performance_orders where id=$1 for update`, [row.order_id],
       );
       if (order.rows[0]?.lifecycle_state !== "historical_review_required") {
         await client.query("rollback");
         return reply.code(409).send({ message: "订单已不处于历史待核状态" });
+      }
+      if(!order.rows[0]!.business_region_code||!order.rows[0]!.business_region_source_text){
+        await client.query("rollback");
+        return reply.code(409).send({message:"订单分析维度尚未取得可信来源，不能批准历史核对"});
       }
       await assertAccountingPeriodOpen(client, accountingMonth(occurredOn));
       const organization = await resolveOrganization(client, order.rows[0]!.salesperson_person_id, occurredOn);
@@ -465,6 +512,11 @@ export async function registerAccountingPeriods(app: FastifyInstance, db: Databa
          organization.personId, organization.departmentId, organization.groupId, organization.leaderPersonId,
          organization.supervisorPersonId, now],
       );
+      await recordEventAnalysisDimensions(client,inserted.rows[0]!.id,{
+        businessRegionCode:order.rows[0]!.business_region_code,
+        businessRegionSourceText:order.rows[0]!.business_region_source_text,
+        customerUnit:order.rows[0]!.customer_unit,
+      });
       await client.query("update performance_orders set lifecycle_state=$2,current_revenue=$3,counted_amount=$4 where id=$1", [row.order_id, row.proposed_lifecycle_state, currentRevenue, countedAmount]);
       await client.query(
         `update historical_order_reviews set status='approved',reviewed_by_user_id=$2,

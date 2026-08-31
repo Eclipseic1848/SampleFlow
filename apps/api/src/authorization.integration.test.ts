@@ -37,7 +37,7 @@ test("人工录入阻断仅大小写空格或全半角不同的订单编号", as
     await withTestApi(database.url, async (app) => {
       const headers = await loginWriteHeaders(app, "scope_assistant");
       const payload = {
-        customerName: "疑似重复客户", customerUnit: "测试单位", businessRegionCode: "CN-JS",
+        customerName: "疑似重复客户", customerUnit: "测试单位", businessRegionSourceText:"江苏原文", businessRegionCode: "CN-JS",
         salespersonPersonId: scenario.people[scenario.users.alice], sourceReceivedOn: "2026-08-10",
         amount: 100, reason: "人工录入",
       };
@@ -180,6 +180,7 @@ test("业绩写入只接受稳定人员标识并由服务端固化组织快照",
           orderNo: "STABLE-IDENTITY-1",
           customerName: "稳定身份客户",
           customerUnit: "测试单位",
+          businessRegionSourceText: "江苏原文",
           businessRegionCode: "CN-JS",
           salespersonPersonId: scenario.people[scenario.users.alice],
           sourceReceivedOn: "2026-08-10",
@@ -215,6 +216,7 @@ test("业绩写入只接受稳定人员标识并由服务端固化组织快照",
           orderNo: "STABLE-IDENTITY-2",
           customerName: "伪造归属客户",
           customerUnit: "测试单位",
+          businessRegionSourceText: "江苏原文",
           businessRegionCode: "CN-JS",
           salespersonPersonId: scenario.people[scenario.users.alice],
           sourceReceivedOn: "2026-08-10",
@@ -1002,7 +1004,7 @@ test("人员跨组后对旧订单暂停，正负事件分别归属发生时组�
       const created = await app.inject({
         method:"POST", url:"/api/performance/orders", headers,
         payload:{
-          orderNo:"TRANSFER-1", customerName:"跨组客户", customerUnit:"测试单位", businessRegionCode:"CN-JS",
+          orderNo:"TRANSFER-1", customerName:"跨组客户", customerUnit:"测试单位", businessRegionSourceText:"江苏原文", businessRegionCode:"CN-JS",
           salespersonPersonId:scenario.people[scenario.users.alice], sourceReceivedOn:"2026-08-31",
           amount:100, reason:"转组前入账",
         },

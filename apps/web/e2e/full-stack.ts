@@ -114,7 +114,7 @@ export const test = base.extend<{ database: FullStackDatabase }>({
           ...process.env,
           API_PORT: String(apiPort),
           APP_ORIGINS: webBaseUrl,
-          DATABASE_URL: database.url,
+          DATABASE_URL: database.runtimeUrl,
           NODE_ENV: "test",
           SAMPLEFLOW_E2E_READY_TOKEN: readyToken,
         });

@@ -5,6 +5,7 @@ import { businessDate } from "../domain/business-time.js";
 import { AccountingPeriodError, accountingMonth, consumeApprovedCorrection, lockApprovedCorrection } from "../modules/accounting-periods.js";
 import type { OrganizationSnapshot } from "../modules/organization.js";
 import { decidePerformanceEvent, PerformanceRuleError, type PerformanceCommand, type PerformanceState } from "../domain/performance.js";
+import { recordEventAnalysisDimensions } from "../modules/event-analysis-dimensions.js";
 
 export type ImportEventType = "initial" | "revenue_change" | "pause" | "restart" | "first_include" | "legacy_adjustment";
 
@@ -642,13 +643,18 @@ export async function preflightImportRows(database: Database, input: Readonly<{
   const closedMonths = new Set(periods.rows.filter((period) => period.status === "closed").map((period) => String(period.period_month).slice(0, 10)));
   const correctionIds = [...new Set(rowsRequiringPeriodCheck.flatMap((row) => row.correctionRequestId === undefined ? [] : [row.correctionRequestId]))];
   const corrections = correctionIds.length
-    ? await database.query<{ id: string; order_no: string; event_type: string; occurred_on: string; period_month: string }>(
+    ? await database.query<{
+      id: string; order_no: string; event_type: string; occurred_on: string; period_month: string;
+      business_region_code: string; business_region_source_text: string; customer_unit: string;
+    }>(
       `select request_row.id::text,performance_order.qingflow_order_no order_no,request_row.event_type,
-              request_row.occurred_on::text,request_row.period_month::text
+              request_row.occurred_on::text,request_row.period_month::text,request_row.business_region_code,
+              request_row.business_region_source_text,request_row.customer_unit
        from accounting_correction_requests request_row
        join performance_orders performance_order on performance_order.id=request_row.order_id
        join people actor on actor.user_id=$2
        where request_row.id=any($1::bigint[]) and request_row.status='approved' and request_row.expires_at>now()
+         and request_row.analysis_dimensions_required
          and request_row.reviewed_by_person_id is distinct from actor.id`,
       [correctionIds, input.actorUserId],
     )
@@ -669,6 +675,10 @@ export async function preflightImportRows(database: Database, input: Readonly<{
     if (!correction || correction.order_no !== row.orderNo || correction.event_type !== row.eventType
       || String(correction.occurred_on).slice(0, 10) !== row.occurredOn || String(correction.period_month).slice(0, 10) !== month) {
       addIssue(issues, row, "CLOSED_PERIOD_AUTHORIZATION_INVALID", "历史更正授权不存在、已失效或与订单事件日期不匹配");
+    } else if (correction.business_region_code !== row.businessRegionCode
+      || correction.business_region_source_text !== row.businessRegionSourceText
+      || correction.customer_unit !== row.customerUnit) {
+      addIssue(issues, row, "CORRECTION_ANALYSIS_DIMENSIONS_MISMATCH", "导入行分析维度与历史更正授权不匹配");
     }
   }
 
@@ -832,7 +842,13 @@ async function insertEvent(
      row.organization.departmentId, row.organization.groupId, row.organization.leaderPersonId,
      row.organization.supervisorPersonId, batchId, row.sheet, row.rowNumber, row.sourceRecordId ?? null, row.sourceKey, row.businessSequence ?? null],
   );
-  return inserted.rows[0]!.id;
+  const eventId=inserted.rows[0]!.id;
+  await recordEventAnalysisDimensions(client,eventId,{
+    businessRegionCode:row.businessRegionCode,
+    businessRegionSourceText:row.businessRegionSourceText,
+    customerUnit:row.customerUnit,
+  });
+  return eventId;
 }
 
 async function updateLegacyOrderProjection(client: PoolClient, orderId: string, eventId: string, row: NormalizedRow): Promise<void> {
@@ -1048,6 +1064,11 @@ export async function confirmImportBatch(database: Database, batchId: string, ac
           correction = await lockApprovedCorrection(client, row.correctionRequestId, Number(orderId), row.eventType, actorPersonId, now);
           if (correction.periodMonth !== accountingMonth(row.occurredOn) || String(correction.occurredOn).slice(0, 10) !== row.occurredOn) {
             throw new ImportJobError(`第 ${row.rowNumber} 行更正授权与发生日期不匹配`);
+          }
+          if (correction.businessRegionCode !== row.businessRegionCode
+            || correction.businessRegionSourceText !== row.businessRegionSourceText
+            || correction.customerUnit !== row.customerUnit) {
+            throw new ImportJobError(`第 ${row.rowNumber} 行分析维度与更正授权不匹配`);
           }
         }
         let eventId: string;

@@ -12,6 +12,7 @@ import {
 import { standardBusinessRegionName } from "../domain/business-regions.js";
 import { hasAnyRole, PERFORMANCE_EDITOR_ROLES } from "./auth.js";
 import { canReadPerformance, pendingGoalSql, pendingGoalValues, performanceScopeSql, performanceScopeValues, resolvePerformanceAccess } from "./authorization.js";
+import { recordEventAnalysisDimensions } from "./event-analysis-dimensions.js";
 import { achievementCalculationReason, loadFormalReport } from "./formal-reports.js";
 import { latestOrderEventJoinSql, normalizeOrderFilters, orderFilterQuerySchema, orderFilterSql, orderFilterValues, type OrderFilters } from "./order-query.js";
 import { OrganizationResolutionError, resolveOrganization } from "./organization.js";
@@ -84,6 +85,7 @@ const createOrderSchema = z.strictObject({
   ),
   customerName: z.string().trim().min(1).max(200),
   customerUnit: z.string().trim().min(1).max(300),
+  businessRegionSourceText: z.string().trim().min(1).max(100),
   businessRegionCode: z.string().refine((value) => standardBusinessRegionName(value) !== undefined, "必须选择标准业务区域"),
   salespersonPersonId: z.coerce.number().int().positive(),
   serviceType: z.string().trim().max(200).optional().default(""),
@@ -109,6 +111,8 @@ type OrderRow = {
   qingflow_order_no: string;
   customer_name: string;
   customer_unit: string;
+  business_region_source_text: string | null;
+  business_region_code: string | null;
   salesperson_person_id: string;
   salesperson_name: string;
   service_type: string | null;
@@ -1050,6 +1054,9 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
               e.occurred_on::text as "occurredOn", e.reason, e.salesperson_name as "salespersonName",
               e.department_name as "departmentName", e.group_name as "groupName", e.leader_name as "leaderName",
               e.supervisor_name as "supervisorName", e.occurred_at as "occurredAt", e.order_sequence as sequence,
+              dimensions.business_region_code as "businessRegionCode",
+              dimensions.business_region_source_text as "businessRegionSourceText",
+              dimensions.customer_unit as "customerUnit",
               actor.display_name as "actorName", e.created_at as "createdAt",
               o.lifecycle_state as "lifecycleState",
               case when e.event_type='legacy_adjustment' then null
@@ -1057,6 +1064,7 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
                    when e.event_type in ('restart','first_include') then 'active'
                    when e.resulting_current_revenue>0 then 'active' else 'zero' end as "resultingLifecycleState"
        from performance_events e join performance_orders o on o.id=e.order_id
+       left join performance_event_analysis_dimensions dimensions on dimensions.event_id=e.id
        left join users actor on actor.id=e.created_by
        where e.order_id = $1 and ${performanceScopeSql("e", 2)} order by e.order_sequence`,
       [params.data.id, ...performanceScopeValues(access)],
@@ -1088,24 +1096,30 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
            salesperson_person_id, salesperson_name, service_type, source_received_on,
             original_amount, current_revenue, counted_amount, lifecycle_state, created_by, posted_at)
          values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,now()) returning id::text`,
-        [input.orderNo, input.customerName, input.customerUnit, standardBusinessRegionName(input.businessRegionCode), input.businessRegionCode,
+        [input.orderNo, input.customerName, input.customerUnit, input.businessRegionSourceText, input.businessRegionCode,
          organization.personId, organization.salespersonName, input.serviceType || null, input.sourceReceivedOn,
          input.amount, decision.next.currentRevenue, decision.next.countedAmount, decision.next.lifecycle, request.currentUser!.id],
       );
       const orderId = order.rows[0]!.id;
-      await client.query(
+      const event = await client.query<{id:string}>(
         `insert into performance_events
           (order_id, event_type, delta_amount, resulting_current_revenue, resulting_counted_amount,
            accounting_month, occurred_on, reason, salesperson_name, department_name, group_name,
            leader_name, supervisor_name, created_by, salesperson_person_id, department_unit_id,
            group_unit_id, leader_person_id, supervisor_person_id)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+         returning id::text`,
         [orderId, decision.eventType, decision.deltaAmount, decision.next.currentRevenue,
          decision.next.countedAmount, accountingMonth(input.sourceReceivedOn), input.sourceReceivedOn, input.reason,
          organization.salespersonName, organization.departmentName, organization.groupName, organization.leaderName,
          organization.supervisorName, request.currentUser!.id, organization.personId, organization.departmentId,
          organization.groupId, organization.leaderPersonId, organization.supervisorPersonId],
       );
+      await recordEventAnalysisDimensions(client,event.rows[0]!.id,{
+        businessRegionCode:input.businessRegionCode,
+        businessRegionSourceText:input.businessRegionSourceText,
+        customerUnit:input.customerUnit,
+      });
       await client.query(
         `insert into audit_logs (actor_user_id, action, entity_type, entity_id, after_data, ip_address)
          values ($1, 'performance.order_posted', 'performance_order', $2, $3, $4)`,
@@ -1141,7 +1155,8 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
     try {
       await client.query("begin");
       const found = await client.query<OrderRow>(
-        `select id::text, qingflow_order_no, customer_name, customer_unit, salesperson_person_id::text, salesperson_name, service_type,
+        `select id::text, qingflow_order_no, customer_name, customer_unit, business_region_source_text, business_region_code,
+                salesperson_person_id::text, salesperson_name, service_type,
                 source_received_on::text, original_amount::text, current_revenue::text,
                 counted_amount::text, lifecycle_state
          from performance_orders where id = $1 for update`,
@@ -1184,6 +1199,10 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
           operationTime,
         );
       }
+      if(!correction&&(!order.business_region_code||!order.business_region_source_text)){
+        await client.query("rollback");
+        return reply.code(409).send({message:"订单分析维度尚未取得可信来源，不能执行调整"});
+      }
       const occurredOn=correction?.occurredOn ?? businessDate(operationTime);
       const eventAccountingMonth=correction?.periodMonth ?? accountingMonth(occurredOn);
       if (!correction) await assertAccountingPeriodOpen(client, eventAccountingMonth);
@@ -1203,6 +1222,11 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
          organization.departmentId, organization.groupId, organization.leaderPersonId, organization.supervisorPersonId,
          operationTime.toISOString(),parsed.data.idempotencyKey,fingerprint],
       );
+      await recordEventAnalysisDimensions(client,inserted.rows[0]!.id,{
+        businessRegionCode:correction?.businessRegionCode??order.business_region_code!,
+        businessRegionSourceText:correction?.businessRegionSourceText??order.business_region_source_text!,
+        customerUnit:correction?.customerUnit??order.customer_unit,
+      });
       await client.query(
         `update performance_orders set current_revenue = $2, counted_amount = $3, lifecycle_state = $4 where id = $1`,
         [params.data.id, decision.next.currentRevenue, decision.next.countedAmount, decision.next.lifecycle],
