@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { PoolClient } from "pg";
 import { z } from "zod";
 import type { Database } from "../db.js";
+import { recordOperation } from "../observability.js";
 import { postgresBigintIdSchema } from "../validation.js";
 import { hasAnyRole, type CurrentUser } from "./auth.js";
 import { canReadGoals, pendingGoalSql, pendingGoalValues, resolveGoalAccess } from "./authorization.js";
@@ -114,8 +115,17 @@ function goalError(reply: FastifyReply, error: unknown) {
 function unexpectedGoalError(request: FastifyRequest, reply: FastifyReply, error: unknown) {
   const handled = goalError(reply, error);
   if (handled) return handled;
-  request.log.error({ err: error }, "目标工作流处理失败");
   return reply.code(500).send({ code: "GOAL_INTERNAL_ERROR", message: "目标工作流暂时无法处理，请稍后重试" });
+}
+
+function goalReasonCode(error: unknown): string {
+  if (error instanceof GoalError) return error.code;
+  const databaseCode = typeof error === "object" && error !== null && "code" in error
+    ? String((error as { code?: unknown }).code ?? "")
+    : "";
+  return ["23503", "23505", "23P01", "40001", "40P01"].includes(databaseCode)
+    ? "GOAL_STATE_CONFLICT"
+    : "GOAL_INTERNAL_ERROR";
 }
 
 async function audit(
@@ -520,10 +530,16 @@ export async function registerGoals(app: FastifyInstance, db: Database) {
   });
 
   app.post("/api/goals/:id/decision", async (request, reply) => {
-    if (!request.currentUser) return reply.code(401).send({ message: "尚未登录" });
+    if (!request.currentUser) {
+      recordOperation(request, "approval", "failure", "AUTH_REQUIRED");
+      return reply.code(401).send({ message: "尚未登录" });
+    }
     const params = idSchema.safeParse(request.params);
     const parsed = decisionSchema.safeParse(request.body);
-    if (!params.success || !parsed.success) return reply.code(400).send({ message: "审批信息无效；批准或拒绝时必须填写意见" });
+    if (!params.success || !parsed.success) {
+      recordOperation(request, "approval", "failure", "APPROVAL_INPUT_INVALID");
+      return reply.code(400).send({ message: "审批信息无效；批准或拒绝时必须填写意见" });
+    }
     const client = await db.connect();
     try {
       await client.query("begin");
@@ -588,9 +604,11 @@ export async function registerGoals(app: FastifyInstance, db: Database) {
         }
       }
       await client.query("commit");
+      recordOperation(request, "approval", "success", "APPROVAL_RECORDED");
       return { ok: true };
     } catch (error) {
       await client.query("rollback");
+      recordOperation(request, "approval", "failure", goalReasonCode(error));
       return unexpectedGoalError(request, reply, error);
     } finally { client.release(); }
   });
