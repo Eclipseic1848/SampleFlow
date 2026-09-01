@@ -21,8 +21,6 @@ function shiftMonth(periodMonth: string, offset: number): string {
   return `${shifted.getUTCFullYear()}-${String(shifted.getUTCMonth() + 1).padStart(2, "0")}`;
 }
 
-test.use({ locale: "zh-CN", timezoneId: "Asia/Shanghai", viewport: { width: 1024, height: 768 } });
-
 test("业务员默认查看当前月个人目标并穿透正负业绩事件", async ({ database, page }) => {
   const today = shanghaiToday();
   const periodMonth = today.slice(0, 7);
