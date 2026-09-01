@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Activity, BarChart3, ClipboardCheck, FileClock, LogOut, Network, Search, ShieldCheck, Target, UsersRound } from "lucide-react";
 import { apiFetch, roleNames } from "./app-api";
 import type { User } from "./app-types";
+import { Onboarding } from "./onboarding";
 import { PAGE_ORDER, PAGE_ROUTES, readPageId, type PageId } from "./page-routes";
 import { AccountsPage } from "./pages/accounts-page";
 import { AnalysisPage } from "./pages/analysis-page";
@@ -54,5 +55,5 @@ export function Dashboard({ user, onLogout }: { user: User; onLogout: () => void
       : active === "accounts"
         ? <AccountsPage user={user}/>
       : <Overview canEdit={user.capabilities.editPerformance} canExport={user.capabilities.exportPerformance} onEnterOrders={() => navigate("orders")} />;
-  return <div className="app-shell"><aside className="sidebar"><div className="sidebar-brand"><img src="/brand-logo.png" alt="瑞源生物 Pronetbio"/></div><nav>{pages.map(({Icon,label,id}) => <button className={id === active ? "active" : ""} key={id} onClick={() => navigate(id)} aria-label={label} aria-current={id===active?"page":undefined}><Icon size={18}/><span>{label}</span></button>)}</nav><div className="sidebar-user"><div className="avatar">{user.displayName.slice(0,1)}</div><div><strong>{user.displayName}</strong><span>{user.roles.map((r) => roleNames[r] ?? r).join("、")}</span></div><button onClick={logout} disabled={loggingOut} aria-label="退出登录"><LogOut size={17}/></button></div>{logoutError?<p className="form-error" role="alert">{logoutError}</p>:null}</aside>{content}</div>;
+  return <div className="app-shell"><aside className="sidebar"><div className="sidebar-brand"><img src="/brand-logo.png" alt="瑞源生物 Pronetbio"/></div><nav data-onboarding="navigation">{pages.map(({Icon,label,id}) => <button className={id === active ? "active" : ""} key={id} onClick={() => navigate(id)} aria-label={label} aria-current={id===active?"page":undefined}><Icon size={18}/><span>{label}</span></button>)}</nav><div className="sidebar-user"><div className="avatar">{user.displayName.slice(0,1)}</div><div><strong>{user.displayName}</strong><span>{user.roles.map((r) => roleNames[r] ?? r).join("、")}</span></div><button onClick={logout} disabled={loggingOut} aria-label="退出登录"><LogOut size={17}/></button></div>{logoutError?<p className="form-error" role="alert">{logoutError}</p>:null}</aside>{content}<Onboarding key={`${user.id}:${[...user.roles].sort().join(".")}:${active}`} user={user} page={active} canOpen={canOpen(active)} includeNavigation={active===defaultPage}/></div>;
 }

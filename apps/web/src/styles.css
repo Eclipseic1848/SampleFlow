@@ -358,6 +358,22 @@ th { color: #607084; background: #fafbfc; font-weight: 600; }
 .status-zero { color: #8a640c; background: #fff3d4; }
 .status-draft { color: #596779; background: #edf0f4; }
 .status-historical_review_required { color: #8a4f0c; background: #fff0d6; }
+.onboarding-replay { position: fixed; z-index: 40; right: 24px; bottom: 24px; min-height: 42px; padding: 0 16px; border: 1px solid #b9ccec; border-radius: 999px; color: #174d99; background: #fff; box-shadow: 0 8px 24px rgba(20, 50, 90, .14); display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px; font-weight: 700; }
+.onboarding-replay:hover { border-color: var(--blue); background: #f4f8ff; }
+.onboarding-layer { position: fixed; z-index: 80; inset: 0; overflow: hidden; }
+.onboarding-spotlight { position: fixed; z-index: 1; border: 3px solid #7ba9ff; border-radius: 10px; box-shadow: 0 0 0 9999px rgba(9, 22, 40, .68), 0 0 0 7px rgba(123, 169, 255, .25); pointer-events: none; transition: top .2s ease, left .2s ease, width .2s ease, height .2s ease; }
+.onboarding-bubble { position: fixed; z-index: 2; width: min(360px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); padding: 20px; overflow-y: auto; border: 1px solid #c7d6eb; border-radius: 10px; color: var(--navy); background: #fff; box-shadow: 0 20px 60px rgba(8, 24, 46, .3); }
+.onboarding-progress { color: #527098; font-size: 11px; font-weight: 800; letter-spacing: .03em; }
+.onboarding-bubble h2 { margin: 8px 0 0; font-size: 19px; line-height: 1.35; }
+.onboarding-bubble p { margin: 10px 0 0; color: #526175; font-size: 13px; line-height: 1.7; }
+.onboarding-bubble small { display: block; margin-top: 12px; color: var(--muted); font-size: 11px; text-align: right; }
+.onboarding-secondary-actions, .onboarding-primary-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.onboarding-secondary-actions { margin-top: 18px; }
+.onboarding-primary-actions { margin-top: 10px; justify-content: flex-end; }
+.onboarding-bubble button { width: auto; min-height: 36px; margin: 0; padding: 0 12px; border: 1px solid #c8d4e2; border-radius: 6px; color: #3f536c; background: #fff; cursor: pointer; font-size: 12px; }
+.onboarding-bubble button:hover:not(:disabled) { border-color: #8fa9cc; background: #f3f7fc; }
+.onboarding-bubble button:disabled { color: #9aa6b5; background: #f4f5f7; cursor: not-allowed; }
+.onboarding-bubble .primary-action { border-color: var(--blue); color: #fff; background: var(--blue); }
 .modal-backdrop { position: fixed; z-index: 50; inset: 0; padding: 36px 18px; overflow-y: auto; background: rgba(9, 22, 40, .6); display: grid; place-items: start center; }
 .modal { width: min(860px, 100%); max-height: calc(100dvh - 72px); overflow-y: auto; scrollbar-gutter: stable; border-radius: 10px; background: #fff; box-shadow: 0 24px 80px rgba(10, 27, 50, .25); }
 .modal > header { position: sticky; z-index: 2; top: 0; padding: 22px 24px 18px; border-bottom: 1px solid var(--line); background: #fff; display: flex; align-items: flex-start; justify-content: space-between; }
@@ -480,7 +496,8 @@ th { color: #607084; background: #fafbfc; font-weight: 600; }
 
 @media (forced-colors: active) {
   html { scrollbar-color: auto; }
-  .event-sequence, .event-content { border-color: CanvasText; }
+  .event-sequence, .event-content, .onboarding-spotlight, .onboarding-bubble { border-color: CanvasText; }
+  .onboarding-spotlight { outline: 4px solid Highlight; box-shadow: 0 0 0 9999px Canvas; }
 }
 .row-actions { display: flex; gap: 6px; }
 .row-actions button { padding: 6px 9px; border: 1px solid #cbd6e5; border-radius: 5px; color: #31517c; background: #fff; cursor: pointer; }
