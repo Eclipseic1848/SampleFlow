@@ -261,6 +261,25 @@ form button:disabled { cursor: wait; opacity: .72; }
 .events-panel { margin-top: 20px; overflow: auto; }
 .events-panel .panel-title { padding: 20px 22px 15px; }
 .events-panel .panel-title button { border: 0; color: var(--blue); background: transparent; cursor: pointer; }
+.analysis-panel { margin-top: 20px; border: 1px solid var(--line); background: #fff; }
+.analysis-header { min-height: 78px; padding: 16px 22px; display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+.analysis-header h2, .analysis-card h3 { margin: 0; font-size: 16px; }
+.analysis-header p { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
+.analysis-header label { width: 180px; margin: 0; }
+.analysis-header label span { display: block; margin-bottom: 6px; color: var(--muted); font-size: 12px; }
+.analysis-header input { height: 40px; }
+.analysis-metrics { margin-top: 0; grid-template-columns: repeat(3,1fr); border-right: 0; border-left: 0; }
+.analysis-reconciliation { margin: 0; padding: 12px 22px; color: #147465; background: #eaf7f4; font-size: 13px; }
+.analysis-reconciliation-error { color: #a63232; background: #fdeaea; }
+.analysis-loading { margin: 0; padding: 28px 22px; border-top: 1px solid var(--line); color: var(--muted); }
+.analysis-grid { display: grid; grid-template-columns: minmax(320px,.8fr) minmax(0,1.2fr); }
+.analysis-card { min-width: 0; border-top: 1px solid var(--line); }
+.analysis-card + .analysis-card { border-left: 1px solid var(--line); }
+.analysis-card h3 { padding: 18px 22px; }
+.analysis-foreign { min-height: 72px; padding: 14px 22px; border-top: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.analysis-foreign div { display: grid; gap: 4px; }
+.analysis-foreign strong, .analysis-foreign b { font-size: 13px; }
+.analysis-foreign span { color: var(--muted); font-size: 11px; }
 .personal-drilldown { padding: 0 0 22px; }
 .personal-drilldown table { min-width: 800px; }
 .team-achievement { overflow: hidden; }
@@ -469,6 +488,9 @@ th { color: #68778a; background: #fafbfc; font-weight: 600; }
   .metric { border-right: 0; border-bottom: 1px solid var(--line); }
   .metric:last-child { border-bottom: 0; }
   .dashboard-grid { grid-template-columns: 1fr; }
+  .analysis-header { align-items: flex-start; }
+  .analysis-grid { grid-template-columns: 1fr; }
+  .analysis-card + .analysis-card { border-left: 0; }
   .org-grid { grid-template-columns: 1fr; }
   .governance-grid, .governance-lists { grid-template-columns: 1fr; }
   .events-panel { max-width: 100%; }

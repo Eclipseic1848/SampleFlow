@@ -29,6 +29,8 @@ type DepartmentAchievementDrilldown = DepartmentAchievement&{groups:Organization
 type SalesAchievement = PersonalAchievement&{departmentCount:number};
 type SalesAchievementDrilldown = SalesAchievement&{departments:DepartmentAchievementDrilldown[]};
 type DashboardData = { month: string; metrics: { total: string; eventCount: number; negativeTotal: string; pendingApprovals: number }; monthly: Array<{ month: string; total: string }>; groups: Array<{ id:string;name:string;total:string }>; recent: Array<{ orderNo: string; salespersonName: string; eventType: string; month: string; amount: string; groupName: string }>; personalAchievement:PersonalAchievement|null;groupAchievements:GroupAchievement[];departmentAchievements:DepartmentAchievement[];salesAchievement:SalesAchievement|null };
+type AnalysisAmount = { eventCount:number;totalAmount:string };
+type PerformanceAnalysis = { month:string;ledger:AnalysisAmount;mapped:AnalysisAmount;pending:AnalysisAmount;reconciled:boolean;provinces:Array<{regionCode:string;regionName:string;eventCount:number;totalAmount:string}>;foreignTrade:{regionCode:"EXT-TRADE";regionName:string;eventCount:number;totalAmount:string};customers:Array<{regionCode:string;regionName:string;customerUnit:string;eventCount:number;totalAmount:string}> };
 type GoalLevel="sales_manager"|"department"|"group"|"personal";
 type Goal = { id:string;periodMonth:string;level:GoalLevel;ownerUsername:string|null;ownerName:string;ownerPersonId:string;orgUnitId:string|null;orgUnitName:string|null;parentGoalId:string|null;versionId:string;versionNo:string;amount:string;effectiveAmount:string|null;status:string;signatureText:string|null;signedAt:string|null;changeReason:string;allocatedAmount:string;allocationDifference:string;allocationType:"unallocated"|"overallocated"|"balanced";allocationRatio:string|null };
 type GoalOption={personId:string;name:string;orgUnitId:string|null;orgUnitName:string|null};
@@ -294,9 +296,23 @@ function Overview({ canEdit, canExport, onEnterOrders }: { canEdit: boolean; can
         onClose={()=>{groupDetailsRequest.current+=1;setSelectedGroup(null);}}
       >{groupDetailsError?<p className="form-error group-drilldown" role="alert">{groupDetailsError}</p>:groupDetails?<div className="group-drilldown"><AchievementMembers members={groupDetails.members}/></div>:<p className="group-drilldown">正在读取小组业绩构成…</p>}</Modal>:null}
       <section className="metric-band"><Metric label="账本净额" value={data ? formatMoney(data.metrics.total) : "—"} note={`${data?.metrics.eventCount ?? 0} 条授权范围事件`}/><Metric label="正式报表" value="从生效目标进入" note="未生效不计算达成率"/><Metric label="待处理审批" value={String(data?.metrics.pendingApprovals ?? 0)} note="目标确认与变更" warning/><Metric label="负向调整" value={data ? formatMoney(data.metrics.negativeTotal) : "—"} note="暂停与金额变更" negative/></section>
+      <AnalysisPanel/>
       <section className="dashboard-grid"><article className="trend-panel"><PanelTitle title="月度业绩趋势" note={`${data?.month.slice(0,4)??"当前"} 年授权范围业绩净额`}/><TrendChart year={data?.month.slice(0,4)??""} monthly={data?.monthly??[]}/></article><article className="ranking-panel"><PanelTitle title="小组业绩" note="按事件发生时组织归属"/>{data?.groups.map((group,i) => <div className="rank-row" key={group.id}><span>{i+1}</span><div><strong>{group.name}</strong><span><i style={{width:`${Math.max(0, Number(group.total)) / maxGroup * 100}%`}}/></span></div><b>{(Number(group.total)/10000).toFixed(1)}万</b></div>)}</article></section>
       <section className="events-panel"><div className="panel-title"><div><h2>最近业绩事件</h2><p>入账后不可覆盖或删除</p></div><button onClick={onEnterOrders}>查看全部</button></div><table><thead><tr><th>订单编号</th><th>业务员</th><th>事件类型</th><th>记账月</th><th>金额</th><th>组织归属</th><th>状态</th></tr></thead><tbody>{data?.recent.map((event) => <tr key={`${event.orderNo}-${event.month}-${event.amount}`}><td>{event.orderNo}</td><td>{event.salespersonName}</td><td>{eventTypeName(event.eventType)}</td><td>{event.month}</td><td className={Number(event.amount)<0?"negative":""}>{formatMoney(event.amount)}</td><td>{event.groupName}</td><td>已入账</td></tr>)}</tbody></table></section>
     </main>;
+}
+
+function AnalysisPanel(){
+  const[month,setMonth]=useState(businessDateToday().slice(0,7));
+  const[data,setData]=useState<PerformanceAnalysis|null>(null);
+  const[error,setError]=useState("");
+  const[revision,setRevision]=useState(0);
+  useEffect(()=>{const controller=new AbortController();setData(null);setError("");fetch(`/api/performance/analysis?month=${month}`,{signal:controller.signal}).then(async(response)=>{const result=await readResponseJson<PerformanceAnalysis&{message?:string}>(response,"分析服务响应无效");if(!response.ok)throw new Error(result.message??"分析加载失败");setData(result);}).catch((failure)=>{if(failure instanceof DOMException&&failure.name==="AbortError")return;setError(failure instanceof Error?failure.message:"分析加载失败");});return()=>controller.abort();},[month,revision]);
+  return <section className="analysis-panel" aria-labelledby="analysis-title"><div className="analysis-header"><div><h2 id="analysis-title">地区与客户单位分析</h2><p>只按事件发生时的不可变分析维度快照汇总，不使用订单当前资料</p></div><label><span>分析月份</span><input type="month" value={month} onChange={(event)=>setMonth(event.target.value)}/></label></div>
+    {error?<div className="query-feedback"><p className="page-message" role="alert">{error}</p><button type="button" onClick={()=>setRevision((value)=>value+1)}>重试查询</button></div>:null}
+    {!data&&!error?<p className="analysis-loading" role="status">正在读取地区与客户单位分析…</p>:null}
+    {data?<><section className="metric-band analysis-metrics"><Metric label="授权范围总账" value={formatMoney(data.ledger.totalAmount)} note={`${data.ledger.eventCount} 条事件`}/><Metric label="已映射" value={formatMoney(data.mapped.totalAmount)} note={`${data.mapped.eventCount} 条可信维度事件`}/><Metric label="待补齐" value={formatMoney(data.pending.totalAmount)} note={`${data.pending.eventCount} 条缺少可信维度事件`} warning/></section><p className={`analysis-reconciliation ${data.reconciled?"":"analysis-reconciliation-error"}`}>{data.reconciled?"已映射金额 + 待补齐金额与授权范围总账完全对平。":"分析维度对账失败，请停止使用当前汇总。"}</p><div className="analysis-grid"><article className="analysis-card"><h3>省份汇总</h3><div className="orders-table-wrap"><table aria-label="省份汇总"><thead><tr><th>省份</th><th>事件</th><th>金额</th></tr></thead><tbody>{data.provinces.length?data.provinces.map((item)=><tr key={item.regionCode}><td>{item.regionName}</td><td>{item.eventCount}</td><td className={Number(item.totalAmount)<0?"negative":""}>{formatMoney(item.totalAmount)}</td></tr>):<tr><td colSpan={3} className="empty-cell">本月没有已映射省份事件。</td></tr>}</tbody></table></div><div className="analysis-foreign"><div><strong>外贸（EXT-TRADE）</strong><span>独立区域，不进入省份统计</span></div><b className={Number(data.foreignTrade.totalAmount)<0?"negative":""}>{data.foreignTrade.eventCount} 条事件 · {formatMoney(data.foreignTrade.totalAmount)}</b></div></article><article className="analysis-card"><h3>客户单位汇总</h3><div className="orders-table-wrap"><table aria-label="客户单位汇总"><thead><tr><th>区域</th><th>客户单位</th><th>事件</th><th>金额</th></tr></thead><tbody>{data.customers.length?data.customers.map((item)=><tr key={`${item.regionCode}:${item.customerUnit}`}><td>{item.regionName}</td><td>{item.customerUnit}</td><td>{item.eventCount}</td><td className={Number(item.totalAmount)<0?"negative":""}>{formatMoney(item.totalAmount)}</td></tr>):<tr><td colSpan={4} className="empty-cell">本月没有已映射客户单位事件。</td></tr>}</tbody></table></div></article></div></>:null}
+  </section>;
 }
 
 function OrdersPage({ user }: { user: User }) {
@@ -570,7 +586,13 @@ function AchievementMembers({members}:{members:GroupAchievementMember[]}){
     </div>)}
   </section>)}</>;
 }
-function formatMoney(value: string | number) { return new Intl.NumberFormat("zh-CN", { style: "currency", currency: "CNY", minimumFractionDigits: 2 }).format(Number(value)); }
+function formatMoney(value: string | number) {
+  if(typeof value==="string"){
+    const decimal=/^(-?)(\d+)(?:\.(\d{1,2}))?$/.exec(value);
+    if(decimal)return `${decimal[1]}¥${new Intl.NumberFormat("zh-CN").format(BigInt(decimal[2]!))}.${(decimal[3]??"").padEnd(2,"0")}`;
+  }
+  return new Intl.NumberFormat("zh-CN", { style: "currency", currency: "CNY", minimumFractionDigits: 2 }).format(Number(value));
+}
 function formatOperationTime(value:string){return new Intl.DateTimeFormat("zh-CN",{timeZone:"Asia/Shanghai",year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false}).format(new Date(value));}
 function eventTypeName(type: string) { return ({ initial:"首次录入", revenue_change:"营业额修改", pause:"整单暂停", restart:"订单重启", first_include:"首次计入", legacy_adjustment:"历史迁移",historical_review_resolution:"历史核对解析" } as Record<string,string>)[type] ?? type; }
 function businessRegionName(code:string){return standardBusinessRegions.find(([value])=>value===code)?.[1]??code;}
