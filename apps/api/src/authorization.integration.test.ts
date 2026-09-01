@@ -1178,7 +1178,7 @@ test("账号管理接口返回与服务端授权同源的只读角色权限矩�
       const cookie = await loginCookie(app, "scope_admin");
       const response = await app.inject({ method: "GET", url: "/api/admin/users", headers: { cookie } });
       assert.equal(response.statusCode, 200, response.body);
-      const matrix = response.json().permissionMatrix as Array<{ code: string; businessScope: string; businessOperations:string[]; forbidden: string[] }>;
+      const matrix = response.json().permissionMatrix as Array<{ code: string; businessScope: string; businessOperations:string[]; targetResponsibilities:string; forbidden: string[] }>;
       assert.equal(matrix.find((role) => role.code === "system_admin")?.businessScope, "none");
       assert.ok(matrix.find((role) => role.code === "system_admin")?.forbidden.includes("业务查看与导出"));
       assert.equal(matrix.find((role) => role.code === "salesperson")?.businessScope, "self");
@@ -1186,6 +1186,7 @@ test("账号管理接口返回与服务端授权同源的只读角色权限矩�
       assert.equal(matrix.find((role) => role.code === "sales_supervisor")?.businessScope, "department");
       assert.ok(matrix.find((role) => role.code === "sales_assistant_leader")?.businessOperations.includes("月度核对与关闭月更正"));
       assert.ok(matrix.find((role) => role.code === "hr")?.businessOperations.includes("记账期间关闭与更正审批"));
+      assert.equal(matrix.find((role) => role.code === "hr")?.targetResponsibilities, "审批目标确认与修改申请");
     });
   });
 });

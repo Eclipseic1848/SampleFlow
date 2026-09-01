@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { PoolClient } from "pg";
 import { z } from "zod";
 import type { Database } from "../db.js";
+import { postgresBigintIdSchema } from "../validation.js";
 import { hasAnyRole, type CurrentUser } from "./auth.js";
 import { canReadGoals, pendingGoalSql, pendingGoalValues, resolveGoalAccess } from "./authorization.js";
 
@@ -17,7 +18,8 @@ const createSchema = z.object({
   amount: z.number().finite().min(0).max(99_999_999_999.99),
   changeReason: z.string().trim().min(1).max(500).optional().default("目标下达"),
 });
-const signatureSchema = z.object({ signatureText: z.string().trim().min(1).max(100) });
+const confirmationSchema = z.strictObject({});
+const GOAL_CONFIRMATION_STATEMENT = "本人已核对并确认承担本目标版本。";
 const decisionSchema = z.object({
   decision: z.enum(["approved", "rejected"]),
   comment: z.string().trim().min(1).max(500),
@@ -37,6 +39,7 @@ const linkageSchema = z.object({
   newAmount: z.number().finite().min(0).max(99_999_999_999.99).optional(),
 });
 const idSchema = z.object({ id: z.coerce.number().int().positive() });
+const versionIdSchema = z.strictObject({ id: postgresBigintIdSchema });
 const listSchema = z.object({ pendingOnly: z.stringbool().optional().default(false) });
 const optionsSchema = z.object({
   periodMonth: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/),
@@ -460,28 +463,55 @@ export async function registerGoals(app: FastifyInstance, db: Database) {
     }
   });
 
-  app.post("/api/goals/:id/sign", async (request, reply) => {
+  app.post("/api/goal-versions/:id/confirm", async (request, reply) => {
     if (!request.currentUser) return reply.code(401).send({ message: "尚未登录" });
-    const params = idSchema.safeParse(request.params);
-    const parsed = signatureSchema.safeParse(request.body);
-    if (!params.success || !parsed.success) return reply.code(400).send({ message: "签名信息无效" });
+    const params = versionIdSchema.safeParse(request.params);
+    const parsed = confirmationSchema.safeParse(request.body);
+    if (!params.success || !parsed.success) return reply.code(400).send({ message: "目标确认信息无效" });
     const client = await db.connect();
     try {
       await client.query("begin");
-      const version = await latestPendingVersion(client, params.data.id, true);
-      if (!version || version.status !== "pending_signature") throw new GoalError(409, "GOAL_NOT_PENDING_SIGNATURE", "目标当前没有待签名版本");
-      if (version.owner_person_id !== request.currentUser.personId) throw new GoalError(403, "GOAL_SIGN_FORBIDDEN", "仅目标责任人可确认该版本");
-      if (version.level !== "sales_manager" && version.created_by_person_id === request.currentUser.personId) {
-        throw new GoalError(409, "GOAL_DUTY_SEPARATION", "目标下达人和责任人签名者必须是不同人员");
-      }
-      const nextStatus = version.level === "sales_manager" ? "pending_gm" : "pending_hr";
-      await client.query(
-        `update goal_versions set signed_by=$2,signed_by_person_id=$3,signed_at=now(),signature_text=$4,status=$5 where id=$1`,
-        [version.id, request.currentUser.id, request.currentUser.personId, parsed.data.signatureText, nextStatus],
+      const result = await client.query<PendingVersion & { signed_by: string | null; signed_at: string | null; signature_text: string | null; amount: string }>(
+        `select v.id::text,v.goal_id::text,v.version_no::text,v.status,v.amount::text,
+                v.signed_by::text,v.signed_by_person_id::text,v.signed_at::text,v.signature_text,
+                g.goal_level as level,g.owner_person_id::text,g.parent_goal_id::text,v.created_by_person_id::text
+         from goal_versions v join goals g on g.id=v.goal_id where v.id=$1 for update of v`,
+        [params.data.id],
       );
-      await audit(client, request.currentUser, request.ip, "goal.version_signed", "goal_version", version.id, { status: version.status }, { status: nextStatus, signatureText: parsed.data.signatureText });
+      const version = result.rows[0];
+      if (!version) throw new GoalError(404, "GOAL_VERSION_NOT_FOUND", "目标版本不存在");
+      if (version.owner_person_id !== request.currentUser.personId) throw new GoalError(403, "GOAL_CONFIRM_FORBIDDEN", "仅目标责任人可确认该版本");
+      if (version.level !== "sales_manager" && version.created_by_person_id === request.currentUser.personId) {
+        throw new GoalError(409, "GOAL_DUTY_SEPARATION", "目标下达人和责任人确认者必须是不同人员");
+      }
+      if (version.signed_by_person_id !== null || version.signed_by !== null || version.signed_at !== null) {
+        if (version.signed_by_person_id !== request.currentUser.personId || version.signed_by !== request.currentUser.id) {
+          throw new GoalError(409, "GOAL_ALREADY_CONFIRMED", "该目标版本已由其他账号确认");
+        }
+        await client.query("commit");
+        return reply.send({ ok: true, changed: false, versionId: version.id, confirmedAt: version.signed_at });
+      }
+      if (version.status !== "pending_signature") throw new GoalError(409, "GOAL_NOT_PENDING_CONFIRMATION", "目标版本当前不待责任人确认");
+      const nextStatus = version.level === "sales_manager" ? "pending_gm" : "pending_hr";
+      const confirmed = await client.query<{ signed_at: string }>(
+        `update goal_versions set signed_by=$2,signed_by_person_id=$3,signed_at=now(),signature_text=$4,status=$5
+         where id=$1 returning signed_at::text`,
+        [version.id, request.currentUser.id, request.currentUser.personId, GOAL_CONFIRMATION_STATEMENT, nextStatus],
+      );
+      const confirmedAt = confirmed.rows[0]!.signed_at;
+      await audit(client, request.currentUser, request.ip, "goal.version_confirmed", "goal_version", version.id, { status: version.status }, {
+        status: nextStatus,
+        goalId: version.goal_id,
+        versionId: version.id,
+        amount: version.amount,
+        accountId: request.currentUser.id,
+        personId: request.currentUser.personId,
+        statement: GOAL_CONFIRMATION_STATEMENT,
+        confirmedAt,
+        result: "confirmed",
+      });
       await client.query("commit");
-      return { ok: true };
+      return { ok: true, changed: true, versionId: version.id, confirmedAt };
     } catch (error) {
       await client.query("rollback");
       return unexpectedGoalError(request, reply, error);
@@ -502,7 +532,7 @@ export async function registerGoals(app: FastifyInstance, db: Database) {
       const isHr = version.status === "pending_hr" && hasAnyRole(request.currentUser, ["hr"]);
       if (!isGm && !isHr) throw new GoalError(403, "GOAL_APPROVAL_FORBIDDEN", "当前角色无权处理此审批节点");
       if ([version.created_by_person_id, version.signed_by_person_id].includes(request.currentUser.personId)) {
-        throw new GoalError(409, "GOAL_DUTY_SEPARATION", "目标录入人或签名人不能审批同一版本");
+        throw new GoalError(409, "GOAL_DUTY_SEPARATION", "目标录入人或确认者不能审批同一版本");
       }
       if (isHr && version.level === "sales_manager") {
         const gm = await client.query<{ decided_by_person_id: string }>(
