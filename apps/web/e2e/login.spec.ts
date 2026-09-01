@@ -903,16 +903,47 @@ test("订单搜索与不可变事件链在浏览器和数据库中保持一致",
       await expect(page).toHaveURL(/orderSearch=CHAIN-E2E-110/);
       await expect(orderRow).toBeVisible();
       await orderRow.getByRole("button",{name:"查看 / 调整"}).click();
+      const adjustDialog=page.getByRole("dialog",{name:"CHAIN-E2E-110"});
       await expect(page.getByRole("heading",{name:"不可变事件链"})).toBeVisible();
       await expect(page.getByLabel("事件发生日期")).toHaveCount(0);
       await expect(page.locator(".event-summary b")).toHaveText(["+¥110.00"]);
       await expect(page.getByText("外贸 (EXT-TRADE) · 来源 外贸事件线索 · 客户单位 事件链测试单位")).toBeVisible();
+      await expect(adjustDialog.getByRole("button",{name:"修改营业额"})).toHaveAttribute("aria-pressed","true");
       await page.getByLabel("调整后营业额").fill("100");
       await page.getByLabel("原因（必填）").fill("浏览器改单为 100");
-      await page.getByRole("button",{name:"确认追加事件"}).click();
+      let dropAdjustmentResponse=true;
+      let releaseAdjustment!:()=>void;
+      const adjustmentGate=new Promise<void>((resolve)=>{releaseAdjustment=resolve;});
+      await page.route("**/api/performance/orders/*/events",async(route)=>{
+        if(route.request().method()==="POST"&&dropAdjustmentResponse){
+          dropAdjustmentResponse=false;
+          await adjustmentGate;
+          const response=await route.fetch();
+          expect(response.status()).toBe(201);
+          await route.abort("failed");
+          return;
+        }
+        await route.continue();
+      });
+      const adjustmentSubmit=adjustDialog.locator('button[type="submit"]');
+      await adjustmentSubmit.click();
+      await expect(adjustmentSubmit).toHaveAttribute("aria-busy","true");
+      await expect(adjustDialog.getByRole("button",{name:"关闭"})).toBeDisabled();
+      await expect(adjustDialog.getByRole("button",{name:"取消"})).toBeDisabled();
+      await page.keyboard.press("Escape");
+      await page.locator(".modal-backdrop").dispatchEvent("mousedown");
+      await expect(adjustDialog).toBeVisible();
+      releaseAdjustment();
+      await expect(adjustDialog.getByRole("alert")).toHaveText("网络异常，结果尚未确认；可安全重试，系统不会重复入账。");
+      await expect(adjustDialog.getByLabel("调整后营业额")).toHaveValue("100");
+      await expect(adjustDialog.getByLabel("原因（必填）")).toHaveValue("浏览器改单为 100");
+      await adjustDialog.getByRole("button",{name:"确认追加事件"}).click();
+      await page.unroute("**/api/performance/orders/*/events");
 
       await orderRow.getByRole("button",{name:"查看 / 调整"}).click();
       await page.getByRole("button",{name:"整单暂停"}).click();
+      await expect(page.getByRole("button",{name:"整单暂停"})).toHaveAttribute("aria-pressed","true");
+      await expect(page.getByRole("button",{name:"修改营业额"})).toHaveAttribute("aria-pressed","false");
       await page.getByLabel("原因（必填）").fill("浏览器整单暂停");
       await page.getByRole("button",{name:"确认追加事件"}).click();
 
