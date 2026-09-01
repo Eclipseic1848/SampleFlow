@@ -1190,6 +1190,112 @@ test("账号管理接口返回与服务端授权同源的只读角色权限矩�
   });
 });
 
+test("账号管理使用稳定搜索分页并审计固定角色组合变更", async () => {
+  await withMigratedTestDatabase(async (database) => {
+    const scenario = await seedAuthorizationScenario(database.url);
+    const setup = new Client({ connectionString: database.url });
+    await setup.connect();
+    try {
+      const inserted = await setup.query<{ id: string }>(
+        `insert into users(username,display_name,password_hash,password_salt,must_change_password)
+         select 'account_page_'||lpad(series::text,2,'0'),'分页账号 '||lpad(series::text,2,'0'),source.password_hash,source.password_salt,false
+         from generate_series(1,60) series cross join users source where source.id=$1
+         returning id::text`,
+        [scenario.users.admin],
+      );
+      await setup.query(
+        `insert into user_roles(user_id,role_code,assigned_by)
+         select id,'salesperson',$1 from users where username like 'account_page_%'`,
+        [scenario.users.admin],
+      );
+      await setup.query("insert into roles(code,name) values('custom_power','自定义权限')");
+
+      await withTestApi(database.url, async (app) => {
+        const adminHeaders = await loginWriteHeaders(app, "scope_admin");
+        const search = encodeURIComponent("分页账号");
+        const first = await app.inject({ method: "GET", url: `/api/admin/users?search=${search}`, headers: adminHeaders });
+        assert.equal(first.statusCode, 200, first.body);
+        assert.equal(first.json().users.length, 50);
+        assert.equal(first.json().pageSize, 50);
+        assert.ok(first.json().nextCursor);
+        assert.equal(first.json().roles.some((role: { code: string }) => role.code === "custom_power"), false);
+
+        const late = await setup.query<{ id: string }>(
+          `insert into users(username,display_name,password_hash,password_salt,must_change_password)
+           select 'account_page_late','分页账号 99',password_hash,password_salt,false from users where id=$1 returning id::text`,
+          [scenario.users.admin],
+        );
+        await setup.query("insert into user_roles(user_id,role_code,assigned_by) values($1,'salesperson',$2)", [late.rows[0]!.id, scenario.users.admin]);
+
+        const second = await app.inject({
+          method: "GET",
+          url: `/api/admin/users?search=${search}&cursor=${encodeURIComponent(first.json().nextCursor)}`,
+          headers: adminHeaders,
+        });
+        assert.equal(second.statusCode, 200, second.body);
+        assert.equal(second.json().users.length, 10);
+        assert.equal(second.json().nextCursor, null);
+        const ids = [...first.json().users, ...second.json().users].map((user: { id: string }) => user.id);
+        assert.equal(new Set(ids).size, 60);
+        assert.equal(ids.includes(late.rows[0]!.id), false);
+
+        const mismatchedCursor = await app.inject({
+          method: "GET",
+          url: `/api/admin/users?search=其他&cursor=${encodeURIComponent(first.json().nextCursor)}`,
+          headers: adminHeaders,
+        });
+        assert.equal(mismatchedCursor.statusCode, 400, mismatchedCursor.body);
+        const empty = await app.inject({ method: "GET", url: "/api/admin/users?search=不存在的账号", headers: adminHeaders });
+        assert.equal(empty.statusCode, 200, empty.body);
+        assert.deepEqual(empty.json().users, []);
+        assert.equal(empty.json().nextCursor, null);
+
+        const targetId = inserted.rows[0]!.id;
+        const changed = await app.inject({
+          method: "PATCH",
+          url: `/api/admin/users/${targetId}/roles`,
+          headers: adminHeaders,
+          payload: { roles: ["system_admin"] },
+        });
+        assert.equal(changed.statusCode, 200, changed.body);
+        assert.deepEqual(changed.json(), { ok: true, changed: true });
+        const roleRows = await setup.query<{ role_code: string }>("select role_code from user_roles where user_id=$1 order by role_code", [targetId]);
+        assert.deepEqual(roleRows.rows.map((row) => row.role_code), ["system_admin"]);
+        const audit = await setup.query<{ actor_user_id: string; before_data: { roles: string[] }; after_data: { roles: string[]; result: string }; created_at: string }>(
+          `select actor_user_id::text,before_data,after_data,created_at::text
+           from audit_logs where action='auth.account_roles_changed' and entity_type='user' and entity_id=$1 order by id desc limit 1`,
+          [targetId],
+        );
+        assert.equal(audit.rows[0]!.actor_user_id, scenario.users.admin);
+        assert.deepEqual(audit.rows[0]!.before_data, { roles: ["salesperson"] });
+        assert.deepEqual(audit.rows[0]!.after_data, { roles: ["system_admin"], result: "succeeded" });
+        assert.ok(audit.rows[0]!.created_at);
+
+        const targetHeaders = await loginWriteHeaders(app, "account_page_01");
+        const business = await app.inject({ method: "GET", url: "/api/performance/dashboard", headers: targetHeaders });
+        assert.equal(business.statusCode, 403, business.body);
+
+        const custom = await app.inject({
+          method: "PATCH",
+          url: `/api/admin/users/${targetId}/roles`,
+          headers: adminHeaders,
+          payload: { roles: ["custom_power"] },
+        });
+        assert.equal(custom.statusCode, 400, custom.body);
+        const selfRemoval = await app.inject({
+          method: "PATCH",
+          url: `/api/admin/users/${scenario.users.admin}/roles`,
+          headers: adminHeaders,
+          payload: { roles: ["salesperson"] },
+        });
+        assert.equal(selfRemoval.statusCode, 409, selfRemoval.body);
+      });
+    } finally {
+      await setup.end();
+    }
+  });
+});
+
 test("订单台账用固定快照稳定遍历并保持有界查询次数", async () => {
   await withMigratedTestDatabase(async (database) => {
     const scenario = await seedAuthorizationScenario(database.url);

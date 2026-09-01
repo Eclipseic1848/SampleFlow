@@ -334,6 +334,13 @@ th { color: #68778a; background: #fafbfc; font-weight: 600; }
 .orders-toolbar { min-height: 70px; padding: 15px 20px; display: flex; align-items: center; justify-content: space-between; }
 .orders-toolbar h2 { margin: 0; font-size: 16px; }
 .orders-toolbar span { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; }
+.account-search { display: flex; align-items: center; gap: 8px; }
+.account-search-field { position: relative; display: block; }
+.account-search-field > svg { position: absolute; top: 12px; left: 11px; color: var(--muted); pointer-events: none; }
+.account-search input { width: 250px; height: 40px; padding: 0 40px 0 34px; border: 1px solid var(--line); border-radius: 6px; }
+.account-search > button { width: auto; height: 40px; margin: 0; padding: 0 15px; border: 1px solid var(--blue); color: #fff; background: var(--blue); }
+.account-search .account-search-clear { position: absolute; top: 4px; right: 4px; width: 32px; height: 32px; margin: 0; padding: 0; border: 0; color: var(--muted); background: transparent; display: grid; place-items: center; cursor: pointer; }
+.account-search .account-search-clear:hover { color: var(--navy); background: #eef2f6; }
 .icon-action { width: 36px; height: 36px; border: 1px solid var(--line); border-radius: 6px; color: #56657a; background: #fff; display: grid; place-items: center; cursor: pointer; }
 .orders-table-wrap { overflow-x: auto; }
 .permission-matrix-table { min-width: 1080px; white-space: normal; }
@@ -424,8 +431,13 @@ th { color: #68778a; background: #fafbfc; font-weight: 600; }
 .query-feedback { display: flex; align-items: center; gap: 10px; }
 .query-feedback .page-message { flex: 1; }
 .table-pagination { padding: 14px 20px; border-top: 1px solid var(--line); display: flex; justify-content: flex-end; gap: 8px; }
+.table-pagination > span { margin-right: auto; align-self: center; color: var(--muted); font-size: 12px; }
 .table-pagination button { width: auto; height: 36px; margin: 0; padding: 0 14px; border: 1px solid var(--line); border-radius: 6px; color: #39495d; background: #fff; }
 .table-pagination button:disabled { color: #9aa6b5; background: #f4f5f7; cursor: not-allowed; }
+.role-options { margin: 0 0 18px; padding: 0; border: 0; display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; }
+.role-options legend { margin-bottom: 10px; color: var(--navy); font-size: 13px; font-weight: 700; }
+.role-options label { padding: 11px 12px; border: 1px solid var(--line); border-radius: 6px; display: flex; align-items: center; gap: 9px; }
+.role-options input { width: 16px; height: 16px; margin: 0; }
 .event-ledger { padding: 20px 24px 4px; }
 .event-ledger-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .event-ledger-heading h3 { margin: 0; color: var(--navy); font-size: 15px; }
