@@ -54,6 +54,22 @@ test("获批列布局可以精确读取同日业务顺序", () => {
   assert.equal(rows[0]?.businessSequence, 2);
 });
 
+test("更正授权标识保留 bigint 文本且只兼容安全整数单元格", () => {
+  const layout: ImportLayout = {
+    sheetName: "更正流水",
+    columnMapping: { ...standard.columnMapping, correctionRequestId: "更正授权标识" },
+  };
+  const base = ["SRC-1", "001-A", new Date("2026-03-05T00:00:00Z"), "客户甲", "单位甲", "江苏省", "person:a", "检测", "revenue_change", 90, "更正"];
+  const rows = mapImportWorksheetRows([
+    Object.values(layout.columnMapping),
+    [...base, "9007199254740993"],
+    [...base, 42],
+    [...base, Number.MAX_SAFE_INTEGER + 1],
+    [...base, null],
+  ], layout);
+  assert.deepEqual(rows.map((row) => row.correctionRequestId), ["9007199254740993", "42", "", undefined]);
+});
+
 test("空备注按空文本原样保留，不自动补写业务语义", () => {
   const date = new Date("2026-03-05T00:00:00Z");
   const rows = mapImportWorksheetRows([

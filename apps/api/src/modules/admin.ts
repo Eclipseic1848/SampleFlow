@@ -6,16 +6,17 @@ import { postgresBigintIdSchema } from "../validation.js";
 import { hasAnyRole } from "./auth.js";
 import { BUSINESS_DATE_SQL, canReadPerformance, resolveGoalAccess, resolvePerformanceAccess, ROLE_PERMISSION_MATRIX } from "./authorization.js";
 
-const createUserSchema = z.strictObject({ username:z.string().trim().min(2).max(100), displayName:z.string().trim().min(1).max(100), roles:z.array(z.string().trim().min(1)).min(1), personId:z.coerce.number().int().positive().nullable().optional() });
+const createUserSchema = z.strictObject({ username:z.string().trim().min(2).max(100), displayName:z.string().trim().min(1).max(100), roles:z.array(z.string().trim().min(1)).min(1), personId:postgresBigintIdSchema.nullable().optional() });
 const accountListQuerySchema = z.strictObject({ search:z.string().trim().max(100).optional().default(""), cursor:z.string().max(2048).optional() });
 const accountCursorSchema = z.strictObject({ version:z.literal(1), userId:postgresBigintIdSchema, search:z.string().max(100), id:postgresBigintIdSchema, cutoffId:postgresBigintIdSchema });
 const roleUpdateSchema = z.strictObject({ roles:z.array(z.string().trim().min(1)).min(1) });
 const statusSchema = z.object({ isActive:z.boolean() });
 const resetSchema = z.strictObject({});
-const unitSchema = z.object({ name:z.string().trim().min(1).max(100), unitType:z.enum(["department","group"]), parentId:z.coerce.number().int().positive().nullable().optional() });
-const assignmentSchema = z.strictObject({ personId:z.coerce.number().int().positive(), departmentId:z.coerce.number().int().positive(), groupId:z.coerce.number().int().positive(), leaderPersonId:z.coerce.number().int().positive(), supervisorPersonId:z.coerce.number().int().positive(), effectiveFrom:z.iso.date(), effectiveTo:z.iso.date().nullable().optional(), closePrevious:z.boolean().optional().default(false) });
+const unitSchema = z.object({ name:z.string().trim().min(1).max(100), unitType:z.enum(["department","group"]), parentId:postgresBigintIdSchema.nullable().optional() });
+const assignmentSchema = z.strictObject({ personId:postgresBigintIdSchema, departmentId:postgresBigintIdSchema, groupId:postgresBigintIdSchema, leaderPersonId:postgresBigintIdSchema, supervisorPersonId:postgresBigintIdSchema, effectiveFrom:z.iso.date(), effectiveTo:z.iso.date().nullable().optional(), closePrevious:z.boolean().optional().default(false) });
 const membershipCloseSchema = z.strictObject({ effectiveOn:z.iso.date() });
 const responsibilityReplaceSchema = z.strictObject({ successorPersonId:postgresBigintIdSchema, effectiveOn:z.iso.date() });
+const userIdParamsSchema = z.strictObject({ id:postgresBigintIdSchema });
 const ADMIN_USER_PAGE_SIZE=50;
 const fixedRoles=ROLE_PERMISSION_MATRIX.map(({code,name})=>({code,name}));
 const fixedRoleCodes=new Set(fixedRoles.map(({code})=>code));
@@ -82,13 +83,14 @@ export async function registerAdmin(app:FastifyInstance,db:Database){
   });
   app.patch("/api/admin/users/:id/roles",async(request,reply)=>{
     const denied=requireAdmin(request,reply);if(denied)return denied;
-    const params=z.object({id:z.coerce.number().int().positive()}).safeParse(request.params);const parsed=roleUpdateSchema.safeParse(request.body);
+    const params=userIdParamsSchema.safeParse(request.params);const parsed=roleUpdateSchema.safeParse(request.body);
     if(!params.success||!parsed.success)return reply.code(400).send({message:"角色信息无效"});
     const roles=normalizedFixedRoles(parsed.data.roles);if(!roles)return reply.code(400).send({message:"包含不存在的固定角色"});
-    if(String(params.data.id)===request.currentUser!.id&&!roles.includes("system_admin"))return reply.code(409).send({message:"不能移除当前登录账号的系统管理员角色"});
+    if(params.data.id===request.currentUser!.id&&!roles.includes("system_admin"))return reply.code(409).send({message:"不能移除当前登录账号的系统管理员角色"});
     const client=await db.connect();
     try{
       await client.query("begin");
+      await client.query("select pg_advisory_xact_lock(hashtext('sampleflow.active-system-admin'))");
       const user=await client.query("select id from users where id=$1 for update",[params.data.id]);
       if(!user.rowCount){await client.query("rollback");return reply.code(404).send({message:"账号不存在"});}
       const before=await client.query<{role_code:string}>("select role_code from user_roles where user_id=$1 order by role_code for update",[params.data.id]);
@@ -96,33 +98,38 @@ export async function registerAdmin(app:FastifyInstance,db:Database){
       if(previous.length===roles.length&&previous.every((role,index)=>role===roles[index])){await client.query("commit");return{ok:true,changed:false};}
       await client.query("delete from user_roles where user_id=$1",[params.data.id]);
       await client.query("insert into user_roles(user_id,role_code,assigned_by) select $1,unnest($2::text[]),$3",[params.data.id,roles,request.currentUser!.id]);
+      const activeAdmin=await client.query(`select 1 from users user_account join user_roles role on role.user_id=user_account.id where user_account.is_active and role.role_code='system_admin' limit 1`);
+      if(!activeAdmin.rowCount){await client.query("rollback");return reply.code(409).send({message:"必须至少保留一个启用的系统管理员"});}
       await client.query(
         `insert into audit_logs(actor_user_id,action,entity_type,entity_id,before_data,after_data,ip_address)
          values($1,'auth.account_roles_changed','user',$2,$3::jsonb,$4::jsonb,$5)`,
-        [request.currentUser!.id,String(params.data.id),JSON.stringify({roles:previous}),JSON.stringify({roles,result:"succeeded"}),request.ip],
+        [request.currentUser!.id,params.data.id,JSON.stringify({roles:previous}),JSON.stringify({roles,result:"succeeded"}),request.ip],
       );
       await client.query("commit");return{ok:true,changed:true};
     }catch(error){await client.query("rollback");throw error;}finally{client.release();}
   });
   app.patch("/api/admin/users/:id/status",async(request,reply)=>{
     const denied=requireAdmin(request,reply);if(denied)return denied;
-    const params=z.object({id:z.coerce.number().int().positive()}).safeParse(request.params);const parsed=statusSchema.safeParse(request.body);
+    const params=userIdParamsSchema.safeParse(request.params);const parsed=statusSchema.safeParse(request.body);
     if(!params.success||!parsed.success)return reply.code(400).send({message:"状态信息无效"});
-    if(String(params.data.id)===request.currentUser!.id&&!parsed.data.isActive)return reply.code(409).send({message:"不能停用当前登录账号"});
+    if(params.data.id===request.currentUser!.id&&!parsed.data.isActive)return reply.code(409).send({message:"不能停用当前登录账号"});
     const client=await db.connect();
     try{
       await client.query("begin");
+      await client.query("select pg_advisory_xact_lock(hashtext('sampleflow.active-system-admin'))");
       const before=await client.query<{is_active:boolean}>("select is_active from users where id=$1 for update",[params.data.id]);
       if(!before.rowCount){await client.query("rollback");return reply.code(404).send({message:"账号不存在"});}
       await client.query("update users set is_active=$2,updated_at=now() where id=$1",[params.data.id,parsed.data.isActive]);
+      const activeAdmin=await client.query(`select 1 from users user_account join user_roles role on role.user_id=user_account.id where user_account.is_active and role.role_code='system_admin' limit 1`);
+      if(!activeAdmin.rowCount){await client.query("rollback");return reply.code(409).send({message:"必须至少保留一个启用的系统管理员"});}
       if(!parsed.data.isActive)await client.query("update sessions set revoked_at=now() where user_id=$1 and revoked_at is null",[params.data.id]);
-      await client.query(`insert into audit_logs(actor_user_id,action,entity_type,entity_id,before_data,after_data,ip_address) values($1,'auth.account_status_changed','user',$2,jsonb_build_object('isActive',$3::boolean),jsonb_build_object('isActive',$4::boolean),$5)`,[request.currentUser!.id,String(params.data.id),before.rows[0]!.is_active,parsed.data.isActive,request.ip]);
+      await client.query(`insert into audit_logs(actor_user_id,action,entity_type,entity_id,before_data,after_data,ip_address) values($1,'auth.account_status_changed','user',$2,jsonb_build_object('isActive',$3::boolean),jsonb_build_object('isActive',$4::boolean),$5)`,[request.currentUser!.id,params.data.id,before.rows[0]!.is_active,parsed.data.isActive,request.ip]);
       await client.query("commit");return{ok:true};
     }catch(error){await client.query("rollback");throw error;}finally{client.release();}
   });
   app.post("/api/admin/users/:id/reset-password",async(request,reply)=>{
     const denied=requireAdmin(request,reply);if(denied)return denied;
-    const params=z.object({id:z.coerce.number().int().positive()}).safeParse(request.params);const parsed=resetSchema.safeParse(request.body??{});
+    const params=userIdParamsSchema.safeParse(request.params);const parsed=resetSchema.safeParse(request.body??{});
     if(!params.success||!parsed.success)return reply.code(400).send({message:"密码信息无效"});
     const temporaryPassword=generateTemporaryPassword();const temporaryPasswordExpiresAt=new Date(Date.now()+TEMPORARY_PASSWORD_TTL_MS);const password=await hashPassword(temporaryPassword);const client=await db.connect();
     try{
@@ -130,7 +137,7 @@ export async function registerAdmin(app:FastifyInstance,db:Database){
       const result=await client.query("update users set password_hash=$2,password_salt=$3,must_change_password=true,temporary_password_expires_at=$4,updated_at=now() where id=$1 returning id",[params.data.id,password.hash,password.salt,temporaryPasswordExpiresAt]);
       if(!result.rowCount){await client.query("rollback");return reply.code(404).send({message:"账号不存在"});}
       await client.query("update sessions set revoked_at=now() where user_id=$1 and revoked_at is null",[params.data.id]);
-      await client.query(`insert into audit_logs(actor_user_id,action,entity_type,entity_id,ip_address) values($1,'auth.password_reset','user',$2,$3)`,[request.currentUser!.id,String(params.data.id),request.ip]);
+      await client.query(`insert into audit_logs(actor_user_id,action,entity_type,entity_id,ip_address) values($1,'auth.password_reset','user',$2,$3)`,[request.currentUser!.id,params.data.id,request.ip]);
       await client.query("commit");
       return{ok:true,temporaryPassword,temporaryPasswordExpiresAt:temporaryPasswordExpiresAt.toISOString()};
     }catch(error){await client.query("rollback");throw error;}finally{client.release();}

@@ -16,6 +16,7 @@ type BuildAppOptions = {
   clock?: () => Date;
   database?: Database;
   logger?: FastifyServerOptions["logger"];
+  passwordVerifier?: (password: string, hash: string, salt: string) => Promise<boolean>;
   trustProxy?: boolean | string | string[];
 };
 
@@ -77,7 +78,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
   });
 
   await app.register(cookie);
-  await registerAuth(app, database, options.clock);
+  await registerAuth(app, database, options.clock, options.passwordVerifier);
   await registerAccountingPeriods(app, database, options.clock);
   await registerPerformance(app, database, options.clock);
   await registerImports(app, database);

@@ -17,9 +17,16 @@ if errorlevel 1 (
   exit /b 1
 )
 
+for /f "delims=" %%V in ('node -p "process.versions.node.split('.')[0]"') do set "NODE_MAJOR=%%V"
+if %NODE_MAJOR% LSS 24 (
+  echo [SampleFlow] Node.js 24 or newer is required.
+  pause
+  exit /b 1
+)
+
 if not exist "node_modules" (
   echo [SampleFlow] Installing project dependencies...
-  call npm.cmd install
+  call npm.cmd ci
   if errorlevel 1 (
     echo [SampleFlow] Dependency installation failed.
     pause

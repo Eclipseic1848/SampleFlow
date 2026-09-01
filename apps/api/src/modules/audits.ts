@@ -4,17 +4,37 @@ import type { Database } from "../db.js";
 import { postgresBigintIdSchema } from "../validation.js";
 import { canReadGoals, canReadPerformance, performanceScopeSql, performanceScopeValues, resolveGoalAccess, resolvePerformanceAccess } from "./authorization.js";
 
-const querySchema = z.strictObject({
+const auditFiltersSchema = z.strictObject({
   person: z.string().trim().max(100).optional().default(""),
   action: z.string().trim().max(100).optional().default(""),
   entityType: z.string().trim().max(100).optional().default(""),
   entityId: z.string().trim().max(100).optional().default(""),
   from: z.iso.datetime({ offset: true }).optional(),
   to: z.iso.datetime({ offset: true }).optional(),
-  cursor: postgresBigintIdSchema.optional(),
+});
+const querySchema = auditFiltersSchema.extend({ cursor: z.string().max(2048).optional() });
+const auditCursorSchema = z.strictObject({
+  version: z.literal(1),
+  userId: postgresBigintIdSchema,
+  filters: auditFiltersSchema,
+  id: postgresBigintIdSchema,
+  cutoffId: postgresBigintIdSchema,
 });
 const PAGE_SIZE = 50;
 const SENSITIVE_FIELD = /password|token|secret|credential|authorization|cookie|session/i;
+
+function encodeAuditCursor(value: z.infer<typeof auditCursorSchema>): string {
+  return Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
+}
+
+function decodeAuditCursor(value: string): z.infer<typeof auditCursorSchema> | null {
+  try {
+    const parsed = auditCursorSchema.safeParse(JSON.parse(Buffer.from(value, "base64url").toString("utf8")));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+}
 
 function redact(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(redact);
@@ -30,6 +50,12 @@ export async function registerAudits(app: FastifyInstance, db: Database) {
       return reply.code(400).send({ message: "审计查询条件无效" });
     }
 
+    const { cursor: encodedCursor, ...filters } = parsed.data;
+    const cursor = encodedCursor ? decodeAuditCursor(encodedCursor) : null;
+    if (encodedCursor && (!cursor || cursor.userId !== request.currentUser.id || JSON.stringify(cursor.filters) !== JSON.stringify(filters))) {
+      return reply.code(400).send({ message: "审计分页游标无效或已不适用于当前查询" });
+    }
+
     const systemAdmin = request.currentUser.roles.includes("system_admin");
     const performanceAccess = await resolvePerformanceAccess(db, request.currentUser);
     const goalAccess = await resolveGoalAccess(db, request.currentUser);
@@ -37,9 +63,13 @@ export async function registerAudits(app: FastifyInstance, db: Database) {
     if (!systemAdmin && !performanceReader && !canReadGoals(goalAccess)) {
       return reply.code(403).send({ message: "当前角色没有审计查询权限" });
     }
-    const filters = parsed.data;
     const safeEntityId = "case when audit.entity_id ~ '^[1-9][0-9]{0,18}$' and (length(audit.entity_id)<19 or audit.entity_id<='9223372036854775807') then audit.entity_id::bigint end";
-    const result = await db.query<{
+    const client = await db.connect();
+    try {
+      await client.query("begin");
+      // ponytail: 首屏短暂锁表冻结快照；审计写入吞吐成为瓶颈时再改持久化快照。
+      if (!cursor) await client.query("lock table audit_logs in share mode");
+      const result = await client.query<{
       action: string;
       actorDisplayName: string | null;
       actorPersonId: string | null;
@@ -50,12 +80,16 @@ export async function registerAudits(app: FastifyInstance, db: Database) {
       entityId: string | null;
       entityType: string;
       id: string;
+      cutoffId: string;
     }>(
-      `select audit.id::text,
-              actor_person.id::text as "actorPersonId",actor_user.username as "actorUsername",actor_user.display_name as "actorDisplayName",
-              audit.action,audit.entity_type as "entityType",audit.entity_id as "entityId",
-              audit.before_data as "beforeData",audit.after_data as "afterData",audit.created_at as "createdAt"
+      `with cutoff as (select coalesce($20::bigint,max(id)) as id from audit_logs)
+       select audit.id::text,
+               actor_person.id::text as "actorPersonId",actor_user.username as "actorUsername",actor_user.display_name as "actorDisplayName",
+               audit.action,audit.entity_type as "entityType",audit.entity_id as "entityId",
+               audit.before_data as "beforeData",audit.after_data as "afterData",audit.created_at as "createdAt",
+               cutoff.id::text as "cutoffId"
        from audit_logs audit
+       cross join cutoff
        left join users actor_user on actor_user.id=audit.actor_user_id
        left join people actor_person on actor_person.user_id=actor_user.id
        where (
@@ -104,10 +138,11 @@ export async function registerAudits(app: FastifyInstance, db: Database) {
          and ($11='' or position(lower($11) in lower(audit.action))>0)
          and ($12='' or audit.entity_type=$12)
          and ($13='' or coalesce(audit.entity_id,'')=$13)
-         and ($14::timestamptz is null or audit.created_at>=$14::timestamptz)
-         and ($15::timestamptz is null or audit.created_at<=$15::timestamptz)
-         and ($16::bigint is null or audit.id<$16::bigint)
-       order by audit.id desc limit $19`,
+          and ($14::timestamptz is null or audit.created_at>=$14::timestamptz)
+          and ($15::timestamptz is null or audit.created_at<=$15::timestamptz)
+          and ($16::bigint is null or audit.id<$16::bigint)
+          and audit.id<=cutoff.id
+        order by audit.id desc limit $19`,
       [
         systemAdmin,
         goalAccess.all,
@@ -121,18 +156,34 @@ export async function registerAudits(app: FastifyInstance, db: Database) {
         filters.entityId,
         filters.from ?? null,
         filters.to ?? null,
-        filters.cursor ?? null,
+        cursor?.id ?? null,
         request.currentUser.id,
         performanceReader,
         PAGE_SIZE + 1,
+        cursor?.cutoffId ?? null,
       ],
     );
-    const hasNext = result.rows.length > PAGE_SIZE;
-    const audits = result.rows.slice(0, PAGE_SIZE).map((row) => ({
-      ...row,
-      beforeData: redact(row.beforeData),
-      afterData: redact(row.afterData),
-    }));
-    return { audits, pageSize: PAGE_SIZE, nextCursor: hasNext ? audits.at(-1)!.id : null };
+      await client.query("commit");
+      const hasNext = result.rows.length > PAGE_SIZE;
+      const audits = result.rows.slice(0, PAGE_SIZE).map(({ cutoffId: _cutoffId, ...row }) => ({
+        ...row,
+        beforeData: redact(row.beforeData),
+        afterData: redact(row.afterData),
+      }));
+      const last = audits.at(-1);
+      const cutoffId = result.rows[0]?.cutoffId;
+      return {
+        audits,
+        pageSize: PAGE_SIZE,
+        nextCursor: hasNext && last && cutoffId
+          ? encodeAuditCursor({ version: 1, userId: request.currentUser.id, filters, id: last.id, cutoffId })
+          : null,
+      };
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
   });
 }

@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { Database } from "../db.js";
 import { recordOperation } from "../observability.js";
+import { postgresBigintIdSchema } from "../validation.js";
 import { standardBusinessRegionName } from "../domain/business-regions.js";
 import { ImportWorkbookError, parseImportWorkbook, type ImportColumn, type ImportLayout } from "../domain/performance-import-xlsx.js";
 import { confirmDimensionBackfillBatch, confirmImportBatch, ImportJobError, preflightDimensionBackfillRows, preflightImportRows, type ImportEventType } from "../services/import-job.js";
@@ -52,7 +53,7 @@ const configSchema = z.strictObject({
 });
 type ConfigInput = z.infer<typeof configSchema>;
 const preflightSchema = z.strictObject({
-  configId: z.coerce.number().int().positive(),
+  configId: postgresBigintIdSchema,
   fileName: z.string().min(1).max(255),
   contentBase64: z.string().min(1).max(40_000_000),
 });
@@ -161,7 +162,7 @@ export async function registerImports(app: FastifyInstance, database: Database) 
   app.patch("/api/imports/configs/:id", async (request, reply) => {
     if (!request.currentUser) return reply.code(401).send({ message: "尚未登录" });
     if (!hasAnyRole(request.currentUser, ["sales_assistant_leader"])) return reply.code(403).send({ message: "仅销售助理组长可以修改导入配置草稿" });
-    const params = z.object({ id: z.coerce.number().int().positive() }).safeParse(request.params);
+    const params = z.object({ id: postgresBigintIdSchema }).safeParse(request.params);
     const parsed = configSchema.safeParse(request.body);
     if (!params.success || !parsed.success) return reply.code(400).send({ message: "导入配置无效" });
     const invalid = configInputError(parsed.data);
@@ -184,7 +185,7 @@ export async function registerImports(app: FastifyInstance, database: Database) 
   app.post("/api/imports/configs/:id/approve", async (request, reply) => {
     if (!request.currentUser) return reply.code(401).send({ message: "尚未登录" });
     if (!hasAnyRole(request.currentUser, ["hr"])) return reply.code(403).send({ message: "仅人事部可以批准导入配置" });
-    const params = z.object({ id: z.coerce.number().int().positive() }).safeParse(request.params);
+    const params = z.object({ id: postgresBigintIdSchema }).safeParse(request.params);
     if (!params.success) return reply.code(400).send({ message: "导入配置标识无效" });
     const client = await database.connect();
     try {
@@ -306,7 +307,7 @@ export async function registerImports(app: FastifyInstance, database: Database) 
   app.post("/api/imports/batches/:id/confirm", async (request, reply) => {
     if (!request.currentUser) return reply.code(401).send({ message: "尚未登录" });
     if (!hasAnyRole(request.currentUser, ["sales_assistant_leader"])) return reply.code(403).send({ message: "仅销售助理组长可以确认导入批次" });
-    const params = z.object({ id: z.coerce.number().int().positive() }).safeParse(request.params);
+    const params = z.object({ id: postgresBigintIdSchema }).safeParse(request.params);
     const body = confirmSchema.safeParse(request.body ?? {});
     if (!params.success || !body.success) return reply.code(400).send({ message: "确认参数无效" });
     try {
@@ -320,7 +321,7 @@ export async function registerImports(app: FastifyInstance, database: Database) 
   app.post("/api/imports/dimension-backfills/:id/confirm", async (request, reply) => {
     if (!request.currentUser) return reply.code(401).send({ message:"尚未登录" });
     if (!hasAnyRole(request.currentUser, ["sales_assistant_leader"])) return reply.code(403).send({ message:"仅销售助理组长可以确认历史维度补齐批次" });
-    const params = z.object({ id:z.coerce.number().int().positive() }).safeParse(request.params);
+    const params = z.object({ id:postgresBigintIdSchema }).safeParse(request.params);
     if (!params.success) return reply.code(400).send({ message:"确认参数无效" });
     try {
       return await confirmDimensionBackfillBatch(database, String(params.data.id), request.currentUser.id, request.ip);

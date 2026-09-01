@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -57,7 +58,7 @@ test("干净隔离数据库可应用全部现有迁移", async () => {
     const client = new Client({ connectionString: database.url });
     await client.connect();
     try {
-      const result = await client.query<{ name: string }>("select name from schema_migrations order by name");
+      const result = await client.query<{ name: string; sha256: string }>("select name,sha256 from schema_migrations order by name");
       assert.deepEqual(result.rows.map((row) => row.name), [
         "001_bootstrap.sql",
         "002_identity_and_organization.sql",
@@ -82,9 +83,63 @@ test("干净隔离数据库可应用全部现有迁移", async () => {
         "021_controlled_dimension_backfill.sql",
         "022_freeze_analysis_dimension_pagination.sql",
         "023_immutable_confirmations_and_audit.sql",
+        "024_auth_throttle_cleanup.sql",
       ]);
+      assert.ok(result.rows.every((row) => /^[a-f0-9]{64}$/.test(row.sha256)));
     } finally {
       await client.end();
+    }
+  });
+});
+
+test("旧迁移账本可审计补齐 SHA-256 且重复执行不改业务数据", async () => {
+  await withTestDatabase(async (database) => {
+    const migrationsDirectory = await mkdtemp(path.join(tmpdir(), "sampleflow-migrations-"));
+    const migrationName = "001_bootstrap.sql";
+    const sql = await readFile(`${migrationsRoot}${migrationName}`, "utf8");
+    await writeFile(path.join(migrationsDirectory, migrationName), sql, "utf8");
+    const expectedHash = createHash("sha256").update(sql).digest("hex");
+    const client = new Client({ connectionString: database.url });
+    await client.connect();
+    try {
+      await client.query("create table schema_migrations(name text primary key,applied_at timestamptz not null default now())");
+      await client.query(sql);
+      await client.query("insert into schema_migrations(name) values($1)", [migrationName]);
+      await client.query("insert into app_metadata(key,value) values('legacy-proof','unchanged')");
+
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        await execFileAsync(process.execPath, ["--import", "tsx", "src/cli/migrate.ts"], {
+          cwd: apiRoot,
+          env: { ...process.env, DATABASE_URL: database.url, NODE_ENV: "test", TEST_MIGRATIONS_DIR: migrationsDirectory },
+          encoding: "utf8",
+        });
+      }
+
+      const ledger = await client.query<{ sha256: string; sha256_recorded_at: Date | null }>(
+        "select sha256,sha256_recorded_at from schema_migrations where name=$1",
+        [migrationName],
+      );
+      assert.equal(ledger.rows[0]!.sha256, expectedHash);
+      assert.ok(ledger.rows[0]!.sha256_recorded_at);
+      assert.equal((await client.query<{ value: string }>("select value from app_metadata where key='legacy-proof'")).rows[0]!.value, "unchanged");
+      assert.equal((await client.query("select 1 from schema_migrations")).rowCount, 1);
+
+      await writeFile(path.join(migrationsDirectory, migrationName), `${sql}\n-- 内容变化`, "utf8");
+      await assert.rejects(
+        execFileAsync(process.execPath, ["--import", "tsx", "src/cli/migrate.ts"], {
+          cwd: apiRoot,
+          env: { ...process.env, DATABASE_URL: database.url, NODE_ENV: "test", TEST_MIGRATIONS_DIR: migrationsDirectory },
+          encoding: "utf8",
+        }),
+        (error: unknown) => {
+          assert.match(String((error as { stderr?: string }).stderr), /已应用迁移内容校验失败/);
+          return true;
+        },
+      );
+      assert.equal((await client.query<{ value: string }>("select value from app_metadata where key='legacy-proof'")).rows[0]!.value, "unchanged");
+    } finally {
+      await client.end();
+      await rm(migrationsDirectory, { recursive: true, force: true });
     }
   });
 });
@@ -163,8 +218,10 @@ test("事件分析维度迁移故障不留下 schema 记录、对象或数据半
       await client.query("create table schema_migrations(name text primary key,applied_at timestamptz not null default now())");
       const previousMigrations = (await readdir(migrationsRoot)).filter((name) => name.endsWith(".sql") && name < "020_").sort();
       for (const name of previousMigrations) {
-        await client.query(await readFile(`${migrationsRoot}${name}`, "utf8"));
+        const sql = await readFile(`${migrationsRoot}${name}`, "utf8");
+        await client.query(sql);
         await client.query("insert into schema_migrations(name) values($1)", [name]);
+        await writeFile(path.join(injectedMigrations, name), sql, "utf8");
       }
       await client.query(
         `insert into performance_orders

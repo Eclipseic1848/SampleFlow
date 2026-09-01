@@ -52,7 +52,7 @@ test("结构化日志和有界指标定位核心失败且不泄漏业务值", as
     const importFailure = await app.inject({
       method: "POST",
       url: "/api/imports/preflight",
-      payload: { fileName: "ORDER-CANARY.xlsx", contentBase64: "CUSTOMER-CANARY", configId: 1 },
+      payload: { fileName: "ORDER-CANARY.xlsx", contentBase64: "CUSTOMER-CANARY", configId: "1" },
     });
     assert.equal(importFailure.statusCode, 401);
 

@@ -27,6 +27,11 @@ async function getCurrentUser(): Promise<User | null> {
 
 export function App() {
   const [auth, setAuth] = useState<AuthState>({ status: "loading" });
+  useEffect(() => {
+    const expireSession = () => setAuth({ status: "guest" });
+    window.addEventListener("sampleflow:session-expired", expireSession);
+    return () => window.removeEventListener("sampleflow:session-expired", expireSession);
+  }, []);
   useEffect(() => { getCurrentUser().then((user) => setAuth(user ? { status: "authenticated", user } : { status: "guest" })).catch(() => setAuth({ status: "guest" })); }, []);
   if (auth.status === "loading") return <div className="app-loading">正在连接 SampleFlow…</div>;
   if (auth.status === "guest") return <Login onLogin={(user) => setAuth({ status: "authenticated", user })} />;
@@ -38,9 +43,10 @@ function ChangePassword({onChanged}:{onChanged:()=>Promise<void>}){
   const[currentPassword,setCurrentPassword]=useState("");
   const[newPassword,setNewPassword]=useState("");
   const[message,setMessage]=useState("");
-  async function submit(event:FormEvent<HTMLFormElement>){event.preventDefault();const formData=new FormData(event.currentTarget);const submittedCurrentPassword=String(formData.get("currentPassword")??"");const submittedNewPassword=String(formData.get("newPassword")??"");const response=await apiFetch("/api/auth/change-password",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({currentPassword:submittedCurrentPassword,newPassword:submittedNewPassword})});const data=await response.json() as {message?:string};if(!response.ok){setMessage(data.message??"密码修改失败");return;}await onChanged();}
+  const[submitting,setSubmitting]=useState(false);
+  async function submit(event:FormEvent<HTMLFormElement>){event.preventDefault();if(submitting)return;setSubmitting(true);setMessage("");try{const formData=new FormData(event.currentTarget);const submittedCurrentPassword=String(formData.get("currentPassword")??"");const submittedNewPassword=String(formData.get("newPassword")??"");const response=await apiFetch("/api/auth/change-password",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({currentPassword:submittedCurrentPassword,newPassword:submittedNewPassword})});const data=await readResponseJson<{message?:string}>(response,"密码修改响应无效，请重试。");if(!response.ok){setMessage(data.message??"密码修改失败");return;}await onChanged();}catch(failure){setMessage(failure instanceof Error?failure.message:"网络异常，密码修改失败，请重试。");}finally{setSubmitting(false);}}
   const currentPasswordError=message==="当前密码错误";
-  return <main className="password-shell"><section className="login-card"><div className="login-heading"><p>首次登录安全设置</p><h2>请修改初始密码</h2><span>6—128 位，并包含英文字母、数字和符号</span></div><form noValidate onSubmit={submit}><PasswordInput id="current-password" name="currentPassword" label="当前密码" value={currentPassword} onChange={(value)=>{setCurrentPassword(value);if(message)setMessage("");}} autoComplete="current-password" describedBy={`current-password-hint${currentPasswordError?" current-password-error":""}`} invalid={currentPasswordError}/><p id="current-password-hint" className="password-hint">当前密码请填写刚才登录时使用的临时密码。</p><PasswordInput id="new-password" name="newPassword" label="新密码" value={newPassword} onChange={(value)=>{setNewPassword(value);if(message)setMessage("");}} autoComplete="new-password"/><p className="password-strength" aria-live="polite">密码强度：{passwordStrength(newPassword)}</p><button type="submit">保存新密码</button>{message?<p id={currentPasswordError?"current-password-error":undefined} className="form-error" role="alert">{message}</p>:null}</form></section></main>;
+  return <main className="password-shell"><section className="login-card"><div className="login-heading"><p>首次登录安全设置</p><h2>请修改初始密码</h2><span>6—128 位，并包含英文字母、数字和符号</span></div><form noValidate onSubmit={submit}><PasswordInput id="current-password" name="currentPassword" label="当前密码" value={currentPassword} onChange={(value)=>{setCurrentPassword(value);if(message)setMessage("");}} autoComplete="current-password" describedBy={`current-password-hint${currentPasswordError?" current-password-error":""}`} invalid={currentPasswordError}/><p id="current-password-hint" className="password-hint">当前密码请填写刚才登录时使用的临时密码。</p><PasswordInput id="new-password" name="newPassword" label="新密码" value={newPassword} onChange={(value)=>{setNewPassword(value);if(message)setMessage("");}} autoComplete="new-password"/><p className="password-strength" aria-live="polite">密码强度：{passwordStrength(newPassword)}</p><button type="submit" disabled={submitting} aria-busy={submitting}>{submitting?"正在保存…":"保存新密码"}</button>{message?<p id={currentPasswordError?"current-password-error":undefined} className="form-error" role="alert">{message}</p>:null}</form></section></main>;
 }
 
 function Login({ onLogin }: { onLogin: (user: User) => void }) {

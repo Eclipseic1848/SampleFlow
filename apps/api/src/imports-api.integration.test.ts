@@ -152,7 +152,7 @@ test("导入配置草稿与批准遵守销售助理组长/人事职责分离", a
         url: "/api/imports/preflight",
         headers: leader,
         payload: {
-          configId: Number(templateId),
+          configId: templateId,
           fileName: "SampleFlow标准业绩导入模板.xlsx",
           contentBase64: (await readFile(standardTemplate)).toString("base64"),
         },

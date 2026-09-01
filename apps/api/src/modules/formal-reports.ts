@@ -29,7 +29,7 @@ export function achievementCalculationReason(periodMonth: string, today: string,
 export async function loadFormalReport(
   database: Database,
   user: CurrentUser,
-  goalId: number,
+  goalId: string,
   today: string,
 ): Promise<FormalReportResult> {
   const access = await resolveGoalAccess(database, user);

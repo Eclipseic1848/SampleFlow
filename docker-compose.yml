@@ -184,6 +184,26 @@ services:
         condition: service_healthy
     command: ["node", "apps/api/dist/cli/bootstrap-admin.js"]
 
+  maintenance-cleanup:
+    <<: *api-runtime
+    profiles: ["operations"]
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: "no"
+    networks: [backend]
+    environment:
+      NODE_ENV: production
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-sampleflow}
+      DB_USER: ${DB_APP_USER:?请设置 DB_APP_USER}
+      DB_PASSWORD: ${DB_APP_PASSWORD:?请设置 DB_APP_PASSWORD}
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["node", "apps/api/dist/cli/cleanup-sessions.js"]
+
   import-preflight:
     <<: *api-runtime
     profiles: ["operations"]

@@ -1847,14 +1847,14 @@ test("组织创建与任职写入保持未配置单元停用并记录审计",asy
       const headers=await loginWriteHeaders(app,"scope_admin");
       const department=await app.inject({method:"POST",url:"/api/admin/organization/units",headers,payload:{name:"审计部门",unitType:"department",parentId:null}});
       assert.equal(department.statusCode,201,department.body);
-      const group=await app.inject({method:"POST",url:"/api/admin/organization/units",headers,payload:{name:"审计小组",unitType:"group",parentId:Number(department.json().id)}});
+      const group=await app.inject({method:"POST",url:"/api/admin/organization/units",headers,payload:{name:"审计小组",unitType:"group",parentId:department.json().id}});
       assert.equal(group.statusCode,201,group.body);
       const before=new Client({connectionString:database.url});await before.connect();
       const inactive=await before.query<{active:string}>("select count(*) filter(where is_active)::text as active from org_units where id=any($1::bigint[])",[[department.json().id,group.json().id]]);
       await before.end();assert.equal(inactive.rows[0]!.active,"0");
       const assignment=await app.inject({
         method:"POST",url:"/api/admin/organization/assignments",headers,
-        payload:{personId:scenario.people[scenario.users.assistant],departmentId:Number(department.json().id),groupId:Number(group.json().id),leaderPersonId:scenario.people[scenario.users.leader],supervisorPersonId:scenario.people[scenario.users.supervisor],effectiveFrom:"2026-09-01",effectiveTo:null},
+        payload:{personId:scenario.people[scenario.users.assistant],departmentId:department.json().id,groupId:group.json().id,leaderPersonId:scenario.people[scenario.users.leader],supervisorPersonId:scenario.people[scenario.users.supervisor],effectiveFrom:"2026-09-01",effectiveTo:null},
       });
       assert.equal(assignment.statusCode,201,assignment.body);
       const verification=new Client({connectionString:database.url});await verification.connect();
@@ -1957,7 +1957,7 @@ test("系统管理员按生效日关闭任职并原子更换负责人",async()=>
         assert.equal(supervisorReplaced.statusCode,201,supervisorReplaced.body);
         const transferred=await app.inject({
           method:"POST",url:"/api/admin/organization/assignments",headers,
-          payload:{personId:Number(scenario.people[scenario.users.bob]),departmentId:Number(unitIds["乙部"]),groupId:Number(unitIds["乙组"]),leaderPersonId:Number(scenario.people[scenario.users.carol]),supervisorPersonId:Number(scenario.people[scenario.users.carol]),effectiveFrom:"2026-09-01",effectiveTo:null,closePrevious:true},
+          payload:{personId:scenario.people[scenario.users.bob],departmentId:unitIds["乙部"],groupId:unitIds["乙组"],leaderPersonId:scenario.people[scenario.users.carol],supervisorPersonId:scenario.people[scenario.users.carol],effectiveFrom:"2026-09-01",effectiveTo:null,closePrevious:true},
         });
         assert.equal(transferred.statusCode,201,transferred.body);
       });

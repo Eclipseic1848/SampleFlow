@@ -1,6 +1,6 @@
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { FileUp, PauseCircle, PlayCircle, Plus, RefreshCw, Search, ShieldCheck, X } from "lucide-react";
-import { apiFetch, businessDateToday, eventTypeName, formatMoney, formatOperationTime, readResponseJson } from "../app-api";
+import { apiFetch, businessDateToday, downloadApiFile, eventTypeName, formatMoney, formatOperationTime, readResponseJson } from "../app-api";
 import type { AccountingCorrection, AccountingPeriod, HistoricalReview, Order, OrderFilters, OrderLifecycle, PerformanceEvent, User } from "../app-types";
 import { Field, Modal, Status } from "../shared-ui";
 
@@ -22,6 +22,8 @@ export function OrdersPage({ user }: { user: User }) {
   const [isComposing, setIsComposing] = useState(false);
   const [loadState,setLoadState]=useState<"loading"|"ready"|"error"|"forbidden">("loading");
   const [loadError,setLoadError]=useState("");
+  const [exportError,setExportError]=useState("");
+  const [exporting,setExporting]=useState(false);
   const [refreshVersion, setRefreshVersion] = useState(0);
   const [pageCursor, setPageCursor] = useState<string | null>(initialUrlState.cursor);
   const [previousCursor, setPreviousCursor] = useState<string | null>(null);
@@ -52,7 +54,7 @@ export function OrdersPage({ user }: { user: User }) {
     if(lastFilterRequestKey.current!==filterRequestKey){lastFilterRequestKey.current=filterRequestKey;setOrders([]);setPreviousCursor(null);setNextCursor(null);}
     const controller=new AbortController();setLoadState("loading");setLoadError("");
     const params=new URLSearchParams();for(const [key,value] of Object.entries(committedFilters))if(value)params.set(key,value);if(pageCursor)params.set("cursor",pageCursor);
-    fetch(`/api/performance/orders?${params.toString()}`,{signal:controller.signal}).then(async(response)=>{
+    apiFetch(`/api/performance/orders?${params.toString()}`,{signal:controller.signal}).then(async(response)=>{
       const data=await readResponseJson<{orders?:Order[];previousCursor?:string|null;nextCursor?:string|null;message?:string}>(response,"订单服务响应无效，请重试");
       if(response.status===403){setOrders([]);setPreviousCursor(null);setNextCursor(null);setLoadState("forbidden");return;}
       if(!response.ok)throw new Error(data.message??"订单加载失败");
@@ -68,9 +70,10 @@ export function OrdersPage({ user }: { user: User }) {
   function movePage(cursor:string|null){if(!cursor)return;if(cursor===pageCursor){setRefreshVersion((value)=>value+1);return;}writeOrderUrlState(committedFilters,cursor);setPageCursor(cursor);}
   function clearSearch(){setDraftFilters((current)=>({...current,search:""}));commitFilters({...committedFilters,search:""},"push",false);window.requestAnimationFrame(()=>searchRef.current?.focus());}
   function updateFilter(key:keyof OrderFilters,value:string){setDraftFilters((current)=>({...current,[key]:value}));}
-  function exportOrders(){const params=new URLSearchParams();for(const [key,value] of Object.entries(committedFilters))if(value)params.set(key,value);const query=params.toString();window.location.href=`/api/exports/performance.csv${query?`?${query}`:""}`;}
+  async function exportOrders(){if(exporting)return;const params=new URLSearchParams();for(const [key,value] of Object.entries(committedFilters))if(value)params.set(key,value);const query=params.toString();setExporting(true);setExportError("");try{await downloadApiFile(`/api/exports/performance.csv${query?`?${query}`:""}`);}catch(failure){setExportError(failure instanceof Error?failure.message:"导出失败，请重试。");}finally{setExporting(false);}}
   const emptyMessage=loadState==="forbidden"?"无可显示订单。":loadState==="error"?"订单加载失败，可重试。":hasFilters?"没有符合当前组合条件的订单。":"暂无订单数据。";
-  return <main className="dashboard orders-page"><header><div><h1>订单业绩</h1><p>按订单编号维护不可变业绩事件；已入账记录不能覆盖或删除</p></div>{canExport||canEdit ? <div className="header-actions">{canExport?<button className="secondary-action" onClick={exportOrders}>导出全部匹配订单</button>:null}{canEdit?<><button className="secondary-action" onClick={() => setShowImport(true)}><FileUp size={16}/>Excel 导入</button><button className="primary-action" onClick={() => setShowCreate(true)}><Plus size={16}/>录入新订单</button></>:null}</div> : null}</header>
+  return <main className="dashboard orders-page"><header><div><h1>订单业绩</h1><p>按订单编号维护不可变业绩事件；已入账记录不能覆盖或删除</p></div>{canExport||canEdit ? <div className="header-actions">{canExport?<button className="secondary-action" disabled={exporting} onClick={exportOrders}>{exporting?"正在导出…":"导出全部匹配订单"}</button>:null}{canEdit?<><button className="secondary-action" onClick={() => setShowImport(true)}><FileUp size={16}/>Excel 导入</button><button className="primary-action" onClick={() => setShowCreate(true)}><Plus size={16}/>录入新订单</button></>:null}</div> : null}</header>
+    {exportError?<p className="page-message" role="alert">{exportError}</p>:null}
     {loadState==="error"?<div className="query-feedback"><p className="page-message" role="alert">{loadError}</p><button type="button" onClick={()=>setRefreshVersion((value)=>value+1)}>重试查询</button></div>:null}
     {loadState==="forbidden"?<div className="permission-note"><ShieldCheck size={18}/>当前账号没有订单查看权限。</div>:null}
     {!canEdit ? <div className="permission-note"><ShieldCheck size={18}/>当前角色仅可查看。只有销售助理及销售助理组长可以录入或调整业绩。</div> : null}
@@ -105,11 +108,11 @@ function fileAsBase64(file:File):Promise<string>{return new Promise((resolve,rej
 
 function ExcelImportDialog({user,onClose,onImported}:{user:User;onClose:()=>void;onImported:()=>Promise<void>}){
   const[configs,setConfigs]=useState<ImportConfig[]>([]);const[configId,setConfigId]=useState("");const[file,setFile]=useState<File|null>(null);const[report,setReport]=useState<ImportReport|null>(null);const[mode,setMode]=useState<"ledger"|"dimension_backfill">("ledger");const[confirmedWarnings,setConfirmedWarnings]=useState<Set<string>>(new Set());const[error,setError]=useState("");const[loading,setLoading]=useState(true);const[busy,setBusy]=useState(false);const isLeader=user.roles.includes("sales_assistant_leader");
-  useEffect(()=>{const controller=new AbortController();fetch("/api/imports/configs",{signal:controller.signal}).then(async(response)=>{const data=await response.json() as {configs?:ImportConfig[];message?:string};if(!response.ok)throw new Error(data.message??"导入配置加载失败");const approved=(data.configs??[]).filter((item)=>item.status==="approved");setConfigs(approved);setConfigId(approved[0]?.id??"");}).catch((failure)=>{if(failure instanceof DOMException&&failure.name==="AbortError")return;setError(failure instanceof Error?failure.message:"导入配置加载失败");}).finally(()=>{if(!controller.signal.aborted)setLoading(false);});return()=>controller.abort();},[]);
+  useEffect(()=>{const controller=new AbortController();apiFetch("/api/imports/configs",{signal:controller.signal}).then(async(response)=>{const data=await response.json() as {configs?:ImportConfig[];message?:string};if(!response.ok)throw new Error(data.message??"导入配置加载失败");const approved=(data.configs??[]).filter((item)=>item.status==="approved");setConfigs(approved);setConfigId(approved[0]?.id??"");}).catch((failure)=>{if(failure instanceof DOMException&&failure.name==="AbortError")return;setError(failure instanceof Error?failure.message:"导入配置加载失败");}).finally(()=>{if(!controller.signal.aborted)setLoading(false);});return()=>controller.abort();},[]);
   const availableConfigs=mode==="dimension_backfill"?configs.filter((item)=>item.fixedEventType==="legacy_adjustment"):configs;
   function changeMode(next:"ledger"|"dimension_backfill"){setMode(next);setReport(null);setConfirmedWarnings(new Set());setError("");const candidates=next==="dimension_backfill"?configs.filter((item)=>item.fixedEventType==="legacy_adjustment"):configs;setConfigId(candidates[0]?.id??"");}
   function chooseFile(selected:File|null){setReport(null);setConfirmedWarnings(new Set());setError("");if(!selected){setFile(null);return;}if(!selected.name.toLowerCase().endsWith(".xlsx")){setFile(null);setError("只接受 .xlsx 工作簿。");return;}if(selected.size===0||selected.size>20*1024*1024){setFile(null);setError("文件必须大于 0 且不超过 20 MB。");return;}setFile(selected);}
-  async function preflight(event:FormEvent){event.preventDefault();if(busy)return;if(!configId||!file){setError("请选择已批准的导入配置和一个 .xlsx 文件。");return;}setBusy(true);setError("");setReport(null);try{const contentBase64=await fileAsBase64(file);const endpoint=mode==="dimension_backfill"?"/api/imports/dimension-backfills/preflight":"/api/imports/preflight";const response=await apiFetch(endpoint,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({configId:Number(configId),fileName:file.name,contentBase64})});const data=await response.json() as ImportReport&{message?:string};if(!response.ok)throw new Error(data.message??"预检失败");setReport(data);}catch(failure){setError(failure instanceof Error?failure.message:"预检失败，请重试。");}finally{setBusy(false);}}
+  async function preflight(event:FormEvent){event.preventDefault();if(busy)return;if(!configId||!file){setError("请选择已批准的导入配置和一个 .xlsx 文件。");return;}setBusy(true);setError("");setReport(null);try{const contentBase64=await fileAsBase64(file);const endpoint=mode==="dimension_backfill"?"/api/imports/dimension-backfills/preflight":"/api/imports/preflight";const response=await apiFetch(endpoint,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({configId,fileName:file.name,contentBase64})});const data=await response.json() as ImportReport&{message?:string};if(!response.ok)throw new Error(data.message??"预检失败");setReport(data);}catch(failure){setError(failure instanceof Error?failure.message:"预检失败，请重试。");}finally{setBusy(false);}}
   async function confirm(){if(!report||busy)return;setBusy(true);setError("");try{const endpoint=mode==="dimension_backfill"?`/api/imports/dimension-backfills/${report.batchId}/confirm`:`/api/imports/batches/${report.batchId}/confirm`;const response=await apiFetch(endpoint,{method:"POST",headers:{"content-type":"application/json"},body:mode==="dimension_backfill"?"{}":JSON.stringify({confirmedWarnings:[...confirmedWarnings]})});const data=await response.json() as {message?:string};if(!response.ok)throw new Error(data.message??(mode==="dimension_backfill"?"确认补齐失败":"确认入账失败"));await onImported();}catch(failure){setError(failure instanceof Error?failure.message:"确认失败，请重试。");}finally{setBusy(false);}}
   const warningKeys=report?.issues.filter((issue)=>issue.severity==="warning").map((issue)=>`${issue.rowNumber}:${issue.code}`)??[];const allWarningsConfirmed=warningKeys.every((key)=>confirmedWarnings.has(key));
   return <Modal title="Excel 批量导入" note="先完整预检，只有销售助理组长可以确认无阻断批次" onClose={onClose}><form noValidate className="business-form import-form" onSubmit={preflight}>
@@ -159,7 +162,7 @@ function LedgerGovernancePanel({user,orders,onChanged}:{user:User;orders:Order[]
   const[executionReason,setExecutionReason]=useState("");
   const load=useCallback(async()=>{
     if(!isLeader&&!isHr)return;
-    const responses=await Promise.all([fetch("/api/accounting-periods"),fetch("/api/accounting-corrections"),fetch("/api/historical-order-reviews")]);
+    const responses=await Promise.all([apiFetch("/api/accounting-periods"),apiFetch("/api/accounting-corrections"),apiFetch("/api/historical-order-reviews")]);
     const data=await Promise.all(responses.map((response)=>response.json()));
     const failed=responses.findIndex((response)=>!response.ok);
     if(failed>=0)throw new Error((data[failed] as {message?:string}).message??"账本治理数据加载失败");
@@ -176,9 +179,9 @@ function LedgerGovernancePanel({user,orders,onChanged}:{user:User;orders:Order[]
     catch(error){setMessage(error instanceof Error?error.message:"操作失败");return false;}
     finally{setBusy(false);}
   }
-  async function submitCorrection(event:FormEvent){event.preventDefault();const ok=await post("/api/accounting-corrections",{periodMonth:month,orderId:Number(correction.orderId),eventType:correction.eventType,occurredOn:correction.occurredOn,reason:correction.reason,businessRegionCode:correction.businessRegionCode,businessRegionSourceText:correction.businessRegionSourceText,customerUnit:correction.customerUnit,analysisDimensionEvidence:correction.analysisDimensionEvidence});if(ok)setCorrection((current)=>({...current,reason:"",analysisDimensionEvidence:""}));}
-  async function submitReview(event:FormEvent){event.preventDefault();const ok=await post("/api/historical-order-reviews",{orderId:Number(review.orderId),lifecycleState:review.lifecycleState,currentRevenue:Number(review.currentRevenue),conclusion:review.conclusion,evidence:review.evidence,reason:review.reason});if(ok)setReview((current)=>({...current,currentRevenue:"",conclusion:"",evidence:"",reason:""}));}
-  async function executeCorrection(event:FormEvent){event.preventDefault();if(!execution)return;const payload={type:execution.eventType,reason:executionReason,idempotencyKey:crypto.randomUUID(),correctionRequestId:Number(execution.id),...(execution.eventType==="revenue_change"?{newAmount:Number(executionAmount)}:{}),...(execution.eventType==="first_include"?{amount:Number(executionAmount)}:{})};const ok=await post(`/api/performance/orders/${execution.orderId}/events`,payload);if(ok){setExecution(null);setExecutionAmount("");setExecutionReason("");}}
+  async function submitCorrection(event:FormEvent){event.preventDefault();const ok=await post("/api/accounting-corrections",{periodMonth:month,orderId:correction.orderId,eventType:correction.eventType,occurredOn:correction.occurredOn,reason:correction.reason,businessRegionCode:correction.businessRegionCode,businessRegionSourceText:correction.businessRegionSourceText,customerUnit:correction.customerUnit,analysisDimensionEvidence:correction.analysisDimensionEvidence});if(ok)setCorrection((current)=>({...current,reason:"",analysisDimensionEvidence:""}));}
+  async function submitReview(event:FormEvent){event.preventDefault();const ok=await post("/api/historical-order-reviews",{orderId:review.orderId,lifecycleState:review.lifecycleState,currentRevenue:Number(review.currentRevenue),conclusion:review.conclusion,evidence:review.evidence,reason:review.reason});if(ok)setReview((current)=>({...current,currentRevenue:"",conclusion:"",evidence:"",reason:""}));}
+  async function executeCorrection(event:FormEvent){event.preventDefault();if(!execution)return;const payload={type:execution.eventType,reason:executionReason,idempotencyKey:crypto.randomUUID(),correctionRequestId:execution.id,...(execution.eventType==="revenue_change"?{newAmount:Number(executionAmount)}:{}),...(execution.eventType==="first_include"?{amount:Number(executionAmount)}:{})};const ok=await post(`/api/performance/orders/${execution.orderId}/events`,payload);if(ok){setExecution(null);setExecutionAmount("");setExecutionReason("");}}
   const reviewableOrders=orders.filter((order)=>order.lifecycleState==="historical_review_required");
   return <section className="governance-card" aria-labelledby="ledger-governance-title"><div className="orders-toolbar"><div><h2 id="ledger-governance-title">记账治理工作台</h2><span>关账、更正与历史核对均保留职责分离和审计</span></div><button className="icon-action" onClick={()=>load().catch((error)=>setMessage(error instanceof Error?error.message:"刷新失败"))} aria-label="刷新记账治理"><RefreshCw size={17}/></button></div>
     {message?<p className="page-message" role="status">{message}</p>:null}
@@ -198,7 +201,7 @@ function CreateOrder({ onClose, onSaved }: { onClose: () => void; onSaved: () =>
   const [people, setPeople] = useState<Array<{ id:string; displayName:string }>>([]);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
-  useEffect(() => { fetch("/api/performance/people").then(async (response) => {
+  useEffect(() => { apiFetch("/api/performance/people").then(async (response) => {
     const data = await response.json() as { people?:Array<{ id:string; displayName:string }>; message?:string };
     if (!response.ok) throw new Error(data.message ?? "业务员列表加载失败");
     setPeople(data.people ?? []);
@@ -207,7 +210,7 @@ function CreateOrder({ onClose, onSaved }: { onClose: () => void; onSaved: () =>
   async function submit(event: FormEvent) {
     event.preventDefault(); if (saving) return; setSaving(true); setError("");
     try {
-      const response = await apiFetch("/api/performance/orders", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...form, salespersonPersonId: Number(form.salespersonPersonId), amount: Number(form.amount) }) });
+      const response = await apiFetch("/api/performance/orders", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...form, amount: Number(form.amount) }) });
       const data = await readResponseJson<{ message?: string }>(response,"订单入账响应无效，请重试。");
       if (!response.ok) throw new Error(data.message ?? "订单入账失败");
       await onSaved();
@@ -230,7 +233,7 @@ function AdjustOrder({ order, canEdit, onClose, onSaved }: { order: Order; canEd
   const idempotencyKey=useRef(crypto.randomUUID());
   useEffect(()=>{
     const controller=new AbortController();
-    fetch(`/api/performance/orders/${order.id}/events`,{signal:controller.signal}).then(async(response)=>{
+    apiFetch(`/api/performance/orders/${order.id}/events`,{signal:controller.signal}).then(async(response)=>{
       const data=await response.json() as {events?:PerformanceEvent[];lifecycleState?:OrderLifecycle;allowedActions?:string[];message?:string};
       if(!response.ok)throw new Error(data.message??"事件链加载失败");
       const nextAllowed=data.allowedActions??[];setEvents(data.events??[]);setLifecycle(data.lifecycleState??order.lifecycleState);setAllowed(nextAllowed);setType((current)=>nextAllowed.includes(current)?current:(nextAllowed[0]??""));

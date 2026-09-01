@@ -361,6 +361,14 @@ try {
   assert.deepEqual(await ready.json(), { status: "ready", database: "connected" });
   await loginThroughWeb(temporaryPassword);
 
+  const uploadProbe = await fetch(`http://127.0.0.1:${port}/api/imports/preflight`, {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: environment.APP_ORIGINS },
+    body: JSON.stringify({ fileBase64: "A".repeat(1_100_000) }),
+    signal: AbortSignal.timeout(15_000),
+  });
+  assert.notEqual(uploadProbe.status, 413, "合同内请求不应被 Web 代理提前拒绝");
+
   const loginFailure = await fetch(`http://127.0.0.1:${port}/api/auth/login`, {
     method: "POST",
     headers: { "content-type": "application/json" },

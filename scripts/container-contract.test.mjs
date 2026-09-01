@@ -58,6 +58,11 @@ test("Web 设置批准的安全响应头且不越权设置 HSTS", () => {
   assert.doesNotMatch(nginx, /Strict-Transport-Security/i);
 });
 
+test("Web 代理允许 API 合同内的大型导入请求", () => {
+  assert.match(nginx, /location \/api\/ \{[\s\S]*client_max_body_size\s+30m;/);
+  assert.match(runtimeVerifier, /1_100_000/);
+});
+
 test("容器运行验收在写入前拒绝远程 Docker endpoint", () => {
   const run = (env) => spawnSync(process.execPath, ["scripts/verify-container-runtime.mjs"], {
     cwd: root,
@@ -99,6 +104,15 @@ test("备份与恢复作业只在内部网络运行并复用受控脚本", () =>
   }
   assert.match(compose.services["db-backup"].command.join(" "), /database-operations\.sh backup/);
   assert.match(compose.services["db-restore-new"].command.join(" "), /database-operations\.sh restore-new/);
+});
+
+test("operations profile 提供可重复执行的维护清理作业", () => {
+  const service = compose.services["maintenance-cleanup"];
+  assert.deepEqual(service.profiles, ["operations"]);
+  assert.equal(service.restart, "no");
+  assert.deepEqual(Object.keys(service.networks), ["backend"]);
+  assert.equal(service.environment.DB_USER, compose.services.api.environment.DB_USER);
+  assert.match(service.command.join(" "), /cleanup-sessions\.js/);
 });
 
 test("数据库作业脚本固定 LF 且不会在 Windows checkout 后失效", () => {

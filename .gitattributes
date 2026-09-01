@@ -1,1 +1,3 @@
 scripts/*.sh text eol=lf
+apps/api/migrations/*.sql text eol=lf
+*.bat text eol=crlf

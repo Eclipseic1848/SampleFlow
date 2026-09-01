@@ -131,6 +131,183 @@ test("改密接口统一执行六位字母数字符号规则", async () => {
   });
 });
 
+test("同一旧密码的并发改密最多一个成功", async () => {
+  await withMigratedTestDatabase(async (database) => {
+    await seedTestUser(database.url, {
+      username: "password_race_user",
+      displayName: "并发改密用户",
+      password: "Before@123",
+      roleCode: "salesperson",
+      roleName: "业务员",
+    });
+
+    await withTestApi(database.url, async (app) => {
+      const login = await app.inject({
+        method: "POST",
+        url: "/api/auth/login",
+        headers: { origin: TEST_ORIGIN },
+        payload: { username: "password_race_user", password: "Before@123" },
+      });
+      const headers = authenticatedHeaders(login);
+      const responses = await Promise.all(["AfterA@123", "AfterB@123"].map((newPassword) => app.inject({
+        method: "POST",
+        url: "/api/auth/change-password",
+        headers,
+        payload: { currentPassword: "Before@123", newPassword },
+      })));
+      assert.deepEqual(responses.map((response) => response.statusCode).sort(), [200, 401]);
+    });
+  });
+});
+
+test("不存在和停用账号仍执行同一 dummy 密码验证路径", async () => {
+  await withMigratedTestDatabase(async (database) => {
+    const inactiveId = await seedTestUser(database.url, {
+      username: "inactive_timing_user",
+      displayName: "停用计时用户",
+      password: "Inactive@123",
+      roleCode: "salesperson",
+      roleName: "业务员",
+    });
+    const client = new Client({ connectionString: database.url });
+    await client.connect();
+    await client.query("update users set is_active=false where id=$1", [inactiveId]);
+    await client.end();
+    const calls: Array<{ hash: string; salt: string }> = [];
+
+    await withTestApi(database.url, async (app) => {
+      for (const username of ["missing_timing_user", "inactive_timing_user"]) {
+        const response = await app.inject({
+          method: "POST",
+          url: "/api/auth/login",
+          headers: { origin: TEST_ORIGIN },
+          payload: { username, password: "Wrong@123" },
+        });
+        assert.equal(response.statusCode, 401);
+        assert.deepEqual(response.json(), { message: "账号或密码错误" });
+      }
+    }, {
+      passwordVerifier: async (_password, hash, salt) => {
+        calls.push({ hash, salt });
+        return false;
+      },
+    });
+
+    assert.equal(calls.length, 2);
+    assert.deepEqual(calls[0], calls[1]);
+  });
+});
+
+test("并发角色和状态修改始终保留一个启用的系统管理员", async () => {
+  await withMigratedTestDatabase(async (database) => {
+    const adminA = await seedTestUser(database.url, { username: "invariant_admin_a", displayName: "不变量管理员甲", password: "AdminA@123", roleCode: "system_admin", roleName: "系统管理员" });
+    const adminB = await seedTestUser(database.url, { username: "invariant_admin_b", displayName: "不变量管理员乙", password: "AdminB@123", roleCode: "system_admin", roleName: "系统管理员" });
+    await seedTestUser(database.url, { username: "invariant_role_fixture", displayName: "不变量角色夹具", password: "Role@123", roleCode: "salesperson", roleName: "业务员" });
+    const lock = new Client({ connectionString: database.url });
+    await lock.connect();
+    try {
+      await withTestApi(database.url, async (app) => {
+        const loginA = await app.inject({ method: "POST", url: "/api/auth/login", headers: { origin: TEST_ORIGIN }, payload: { username: "invariant_admin_a", password: "AdminA@123" } });
+        const loginB = await app.inject({ method: "POST", url: "/api/auth/login", headers: { origin: TEST_ORIGIN }, payload: { username: "invariant_admin_b", password: "AdminB@123" } });
+        await lock.query("select pg_advisory_lock(hashtext('sampleflow.active-system-admin'))");
+        const requests = Promise.all([
+          app.inject({ method: "PATCH", url: `/api/admin/users/${adminB}/roles`, headers: authenticatedHeaders(loginA), payload: { roles: ["salesperson"] } }),
+          app.inject({ method: "PATCH", url: `/api/admin/users/${adminA}/status`, headers: authenticatedHeaders(loginB), payload: { isActive: false } }),
+        ]);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        await lock.query("select pg_advisory_unlock(hashtext('sampleflow.active-system-admin'))");
+        const responses = await requests;
+        assert.deepEqual(responses.map((response) => response.statusCode).sort(), [200, 409], responses.map((response) => response.body).join("\n"));
+      });
+
+      const activeAdmins = await lock.query<{ count: string }>(
+        `select count(*)::text as count from users user_account
+         join user_roles role on role.user_id=user_account.id
+         where user_account.is_active and role.role_code='system_admin'`,
+      );
+      assert.equal(activeAdmins.rows[0]!.count, "1");
+    } finally {
+      await lock.query("select pg_advisory_unlock_all()").catch(() => undefined);
+      await lock.end();
+    }
+  });
+});
+
+test("管理员账号路径和 body ID 按 bigint 字符串传递且不发生精度别名", async () => {
+  await withMigratedTestDatabase(async (database) => {
+    await seedTestUser(database.url, { username: "bigint_admin", displayName: "大整数管理员", password: "Admin@123", roleCode: "system_admin", roleName: "系统管理员" });
+    await seedTestUser(database.url, { username: "bigint_role_fixture", displayName: "大整数角色夹具", password: "Role@123", roleCode: "salesperson", roleName: "业务员" });
+    const client = new Client({ connectionString: database.url });
+    await client.connect();
+    try {
+      await client.query(
+        `insert into users(id,username,display_name,password_hash,password_salt,must_change_password) overriding system value
+         select $1,'bigint_target','大整数目标',password_hash,password_salt,false from users where username='bigint_admin'`,
+        ["9007199254740992"],
+      );
+      await client.query(
+        `insert into people(id,display_name,identity_source,source_key) overriding system value
+         values($1,'大整数人员','test','test:bigint-person')`,
+        ["9007199254740992"],
+      );
+      await client.query(
+        `insert into org_units(id,name,unit_type,parent_id,is_active) overriding system value
+         values($1,'大整数部门','department',null,false),($2,'大整数小组','group',$1,false)`,
+        ["9007199254740992", "9007199254740994"],
+      );
+
+      await withTestApi(database.url, async (app) => {
+        const login = await app.inject({ method: "POST", url: "/api/auth/login", headers: { origin: TEST_ORIGIN }, payload: { username: "bigint_admin", password: "Admin@123" } });
+        const headers = authenticatedHeaders(login);
+        const pathResponse = await app.inject({ method: "PATCH", url: "/api/admin/users/9007199254740993/status", headers, payload: { isActive: false } });
+        assert.equal(pathResponse.statusCode, 404, pathResponse.body);
+        const createResponse = await app.inject({
+          method: "POST",
+          url: "/api/admin/users",
+          headers,
+          payload: { username: "bigint_body_target", displayName: "大整数 body 目标", roles: ["salesperson"], personId: "9007199254740993" },
+        });
+        assert.equal(createResponse.statusCode, 404, createResponse.body);
+        const unitResponse = await app.inject({
+          method: "POST",
+          url: "/api/admin/organization/units",
+          headers,
+          payload: { name: "大整数别名小组", unitType: "group", parentId: 9007199254740993 },
+        });
+        assert.equal(unitResponse.statusCode, 400, unitResponse.body);
+        const assignmentResponse = await app.inject({
+          method: "POST",
+          url: "/api/admin/organization/assignments",
+          headers,
+          payload: {
+            personId: 9007199254740993,
+            departmentId: 9007199254740993,
+            groupId: 9007199254740993,
+            leaderPersonId: 9007199254740993,
+            supervisorPersonId: 9007199254740993,
+            effectiveFrom: "2026-09-01",
+          },
+        });
+        assert.equal(assignmentResponse.statusCode, 400, assignmentResponse.body);
+      });
+
+      const target = await client.query<{ is_active: boolean }>("select is_active from users where id=$1", ["9007199254740992"]);
+      assert.equal(target.rows[0]!.is_active, true);
+      const highPerson = await client.query<{ user_id: string | null }>("select user_id::text from people where id=$1", ["9007199254740992"]);
+      assert.equal(highPerson.rows[0]!.user_id, null);
+      const aliases = await client.query<{ users: string; units: string; memberships: string }>(
+        `select (select count(*) from users where username='bigint_body_target')::text as users,
+                (select count(*) from org_units where name='大整数别名小组')::text as units,
+                (select count(*) from org_memberships where person_id=$1)::text as memberships`,
+        ["9007199254740992"],
+      );
+      assert.deepEqual(aliases.rows[0], { users: "0", units: "0", memberships: "0" });
+    } finally {
+      await client.end();
+    }
+  });
+});
+
 test("管理员创建账号的一次性临时密码可完成首次改密", async () => {
   await withMigratedTestDatabase(async (database) => {
     await seedTestUser(database.url, {
@@ -556,7 +733,7 @@ test("重置密码和停用账号会立即撤销目标账号会话", async () =>
   });
 });
 
-test("会话清理命令仅删除过期或撤销超过三十天的记录", async () => {
+test("维护清理命令仅删除保留期外的会话和已过期限流记录", async () => {
   await withMigratedTestDatabase(async (database) => {
     const userId = await seedTestUser(database.url, {
       username: "session_cleanup_user",
@@ -576,6 +753,13 @@ test("会话清理命令仅删除过期或撤销超过三十天的记录", async
            ($1,'revoked-recent',now()+interval '1 day',now()-interval '1 day')`,
         [userId],
       );
+      await client.query(
+        `insert into auth_login_throttles(scope,throttle_key,window_started_at,failure_count,blocked_until,updated_at)
+         values
+           ('account','expired-throttle',now()-interval '40 days',10,now()-interval '31 days',now()-interval '31 days'),
+           ('account','recent-throttle',now()-interval '40 days',1,null,now()-interval '1 day'),
+           ('ip','blocked-throttle',now()-interval '40 days',10,now()+interval '1 day',now()-interval '31 days')`,
+      );
     } finally {
       await client.end();
     }
@@ -586,12 +770,19 @@ test("会话清理命令仅删除过期或撤销超过三十天的记录", async
       encoding: "utf8",
     });
     assert.match(result.stdout, /已删除 2 条会话/);
+    assert.match(result.stdout, /已删除 1 条登录限流/);
 
     const verify = new Client({ connectionString: database.url });
     await verify.connect();
     try {
       const remaining = await verify.query<{ token_hash: string }>("select token_hash from sessions order by token_hash");
       assert.deepEqual(remaining.rows.map((row) => row.token_hash), ["revoked-recent"]);
+      const throttles = await verify.query<{ throttle_key: string }>("select throttle_key from auth_login_throttles order by throttle_key");
+      assert.deepEqual(throttles.rows.map((row) => row.throttle_key), ["blocked-throttle", "recent-throttle"]);
+      const cleanupIndex = await verify.query<{ indexdef: string }>(
+        "select indexdef from pg_indexes where schemaname='public' and indexname='auth_login_throttles_updated_at_idx'",
+      );
+      assert.match(cleanupIndex.rows[0]!.indexdef, /updated_at/);
     } finally {
       await verify.end();
     }

@@ -32,6 +32,12 @@ test("审计页面只读展示所属域并支持组合过滤", async ({ database
       [order.rows[0]!.id, actor.rows[0]!.id],
     );
     await setup.query(
+      `insert into audit_logs(actor_user_id,action,entity_type,entity_id,created_at)
+       select $1,'organization.pagination_fixture','org_unit',series::text,'2026-09-01T11:00:00Z'::timestamptz-series*interval '1 second'
+       from generate_series(1,105) series`,
+      [adminId],
+    );
+    await setup.query(
       `insert into audit_logs(actor_user_id,action,entity_type,entity_id,after_data,created_at) values
        ($1::bigint,'auth.account_created','user',$1::text,null,'2026-09-01T12:29:00Z'),
        ($1::bigint,'organization.unit_created','org_unit','9001',null,'2026-09-01T12:30:00Z'),
@@ -44,6 +50,17 @@ test("审计页面只读展示所属域并支持组合过滤", async ({ database
     await expect(page.getByRole("heading", { name: "审计查询" })).toBeVisible();
     await expect(page.getByRole("cell", { name: "auth.account_created" })).toBeVisible();
     await expect(page.getByText("performance.order_posted", { exact: true })).not.toBeVisible();
+    await page.getByRole("button", { name: "下一页" }).click();
+    expect(new URL(page.url()).searchParams.get("auditCursor")).toBeTruthy();
+    await expect(page.getByText("auth.account_created", { exact: true })).toHaveCount(0);
+    await expect(page.getByRole("cell", { name: "organization.pagination_fixture" }).first()).toBeVisible();
+    const secondPageRows = await page.locator(".audit-table tbody tr").allTextContents();
+    await page.reload();
+    await expect(page.getByRole("heading", { name: "审计查询" })).toBeVisible();
+    await expect(page.getByRole("cell", { name: "organization.pagination_fixture" }).first()).toBeVisible();
+    expect(await page.locator(".audit-table tbody tr").allTextContents()).toEqual(secondPageRows);
+    await page.goBack();
+    await expect(page.getByRole("cell", { name: "auth.account_created" })).toBeVisible();
     await page.getByLabel("动作").fill("organization");
     await page.getByRole("button", { name: "查询审计" }).click();
     await expect(page.getByRole("cell", { name: "organization.unit_created" })).toBeVisible();
@@ -54,6 +71,11 @@ test("审计页面只读展示所属域并支持组合过滤", async ({ database
     const timeRequest = page.waitForRequest((request) => new URL(request.url()).searchParams.has("from"));
     await page.getByRole("button", { name: "查询审计" }).click();
     expect(new URL((await timeRequest).url()).searchParams.get("from")).toBe("2026-09-01T20:00:00+08:00");
+    await expect(organizationRow).toBeVisible();
+    expect(Object.fromEntries(new URL(page.url()).searchParams)).toMatchObject({auditAction:"organization",auditFrom:"2026-09-01T20:00"});
+    await page.reload();
+    await expect(page.getByLabel("动作")).toHaveValue("organization");
+    await expect(page.getByLabel("开始时间")).toHaveValue("2026-09-01T20:00");
     await expect(organizationRow).toBeVisible();
     await expect(page.getByRole("button", { name: /修改|删除/ })).toHaveCount(0);
 
