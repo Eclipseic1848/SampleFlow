@@ -23,6 +23,7 @@ test("API 返回空 502 时登录页显示服务不可用而不是 JSON 解析�
   });
 
   await page.goto("/");
+  await expect(page.getByRole("img", { name: "瑞源生物 Pronetbio" })).toHaveAttribute("src", "/brand-logo.png");
   await expect(page.getByText("正在检查 API 与数据库")).toBeVisible();
   await expect(page.getByText("API 或数据库暂不可用")).toBeVisible();
   const loginPassword = page.getByLabel("密码", { exact: true });
@@ -64,6 +65,7 @@ test("销售助理可通过真实 API 登录", async ({ database, page }) => {
       expect((await loginResponse).status()).toBe(200);
       expect((await dashboardResponse).status()).toBe(200);
       await expect(page.getByRole("heading", { name: "业绩账本总览" })).toBeVisible();
+      await expect(page.getByRole("img", { name: "瑞源生物 Pronetbio" })).toBeVisible();
 });
 
 test("销售助理组长可用标准模板预检并确认整批入账", async ({ database, page }) => {

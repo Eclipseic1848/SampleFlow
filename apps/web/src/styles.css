@@ -40,15 +40,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   justify-content: space-between;
 }
 
-.brand-mark {
-  width: 48px;
-  height: 48px;
-  border: 1px solid rgba(255, 255, 255, 0.34);
-  display: grid;
-  place-items: center;
-  font-weight: 800;
-  letter-spacing: -0.04em;
-}
+.brand-logo { width: min(280px, 100%); height: auto; display: block; }
 
 .product-name {
   margin: 0 0 28px;
@@ -209,9 +201,8 @@ form button:disabled { cursor: wait; opacity: .72; }
 .password-shell .login-card { width: min(460px,100%); padding: 38px; border-radius: 10px; background: #fff; }
 .app-shell { min-height: 100vh; display: grid; grid-template-columns: 224px 1fr; background: #f5f7fa; }
 .sidebar { position: sticky; top: 0; height: 100vh; padding: 24px 16px 18px; background: var(--navy); color: #fff; display: flex; flex-direction: column; }
-.sidebar-brand { height: 52px; display: flex; align-items: center; gap: 12px; padding: 0 10px; }
-.sidebar-brand > span { width: 34px; height: 34px; display: grid; place-items: center; border: 1px solid #5b6d83; font-size: 13px; font-weight: 800; }
-.sidebar-brand strong { font-size: 17px; }
+.sidebar-brand { height: 52px; display: flex; align-items: center; padding: 0 8px; }
+.sidebar-brand img { width: 176px; max-width: 100%; height: auto; display: block; }
 .sidebar nav { margin-top: 28px; display: grid; gap: 6px; }
 .sidebar nav button { width: 100%; height: 42px; padding: 0 12px; border: 0; border-radius: 7px; background: transparent; color: #aebdce; display: flex; align-items: center; gap: 11px; font-size: 14px; cursor: pointer; }
 .sidebar nav button:hover { background: #1c3049; color: #fff; }
@@ -525,8 +516,10 @@ th { color: #68778a; background: #fafbfc; font-weight: 600; }
   .login-panel { min-height: auto; padding: 48px 28px 64px; }
   .app-shell { grid-template-columns: 72px 1fr; }
   .sidebar { padding-inline: 10px; }
-  .sidebar-brand strong, .sidebar nav span, .sidebar-user div:nth-child(2), .sidebar-user button { display: none; }
+  .sidebar nav span, .sidebar-user div:nth-child(2), .sidebar-user button { display: none; }
   .sidebar-brand, .sidebar nav button { justify-content: center; }
+  .sidebar-brand { padding: 0; }
+  .sidebar-brand img { width: 52px; }
   .sidebar-user { grid-template-columns: 1fr; justify-items: center; }
   .dashboard { padding: 24px 18px 40px; }
   .dashboard > header { align-items: flex-start; gap: 16px; }
