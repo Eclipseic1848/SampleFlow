@@ -284,7 +284,7 @@ test("更正申请被拒绝、撤销或批准超过二十四小时后均不能�
     let now=new Date("2026-09-10T01:02:03.000Z");
     await withTestApi(database.url,async(app)=>{
       const assistant=await writeHeaders(app,"ledger_assistant");
-      const leader=await writeHeaders(app,"ledger_assistant_leader");
+      let leader=await writeHeaders(app,"ledger_assistant_leader");
       const hr=await writeHeaders(app,"ledger_hr");
       const create=async(orderNo:string)=>{
         const response=await app.inject({method:"POST",url:"/api/performance/orders",headers:assistant,payload:{orderNo,customerName:"更正治理客户",customerUnit:"测试单位",businessRegionSourceText:"江苏原文",businessRegionCode:"CN-JS",salespersonPersonId:Number(scenario.memberPersonId),sourceReceivedOn:"2026-08-15",amount:100,reason:"八月入账"}});
@@ -314,6 +314,7 @@ test("更正申请被拒绝、撤销或批准超过二十四小时后均不能�
       const expiredId=await request(expiredOrder,"批准后过期");
       assert.equal((await app.inject({method:"POST",url:`/api/accounting-corrections/${expiredId}/approve`,headers:hr,payload:{note:"批准"}})).statusCode,200);
       now=new Date(now.getTime()+24*60*60*1000+1);
+      leader=await writeHeaders(app,"ledger_assistant_leader");
       const expired=await execute(expiredOrder,expiredId,"expired-event");
       assert.equal(expired.statusCode,409,expired.body);
       assert.match(expired.body,/已过期/);
