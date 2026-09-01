@@ -48,10 +48,16 @@ jobs:
       - name: 安装 Chromium 及系统依赖
         run: npx playwright install --with-deps chromium
 
-      - name: 执行完整质量门禁
-        run: npm run verify
+      - name: 执行类型、测试、契约与构建门禁
+        run: npm run typecheck && npm run test && npm run test:container-contract && npm run build
         env:
           TEST_DATABASE_ADMIN_URL: postgresql://sampleflow:sampleflow_dev@127.0.0.1:55432/postgres
+
+      - name: 执行隔离 Compose 首装、升级与恢复门禁
+        run: npm run test:container-runtime
+
+      - name: 执行依赖与 Compose 配置门禁
+        run: npm audit --omit=dev && docker compose --env-file .env.example config --quiet
 
       - name: 保存 Playwright 失败报告
         if: failure()

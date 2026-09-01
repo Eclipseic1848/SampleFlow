@@ -169,7 +169,7 @@ restore_new() {
   role_count="$(PGPASSWORD="$TARGET_DB_ADMIN_PASSWORD" psql -X -qAt --set ON_ERROR_STOP=1 --host="$TARGET_DB_HOST" --port="$TARGET_DB_PORT" --dbname="$TARGET_DB_ADMIN_NAME" --username="$TARGET_DB_ADMIN_USER" --command="select count(*) from pg_roles where rolname in ('$TARGET_DB_OWNER','$TARGET_DB_APP_USER','$TARGET_DB_BACKUP_USER')")"
   [[ "$role_count" == 3 ]] || fail "目标迁移、应用或备份角色不存在"
 
-  summary_file="$BACKUP_FILE.target-summary.$$"
+  summary_file="$(mktemp "${TMPDIR:-/tmp}/sampleflow-target-summary.XXXXXX")"
   cleanup_restore() {
     local status="$1" cleanup_failed=0
     rm -f -- "$summary_file" || cleanup_failed=1
