@@ -282,7 +282,7 @@ form button:disabled { cursor: wait; opacity: .72; }
 .analysis-map-wrap { padding: 0 22px 18px; }
 .analysis-map { width: 100%; max-height: 420px; display: block; }
 .analysis-map path { vector-effect: non-scaling-stroke; }
-.analysis-map-empty { fill: #edf1f5; stroke: #fff; stroke-width: 1; }
+.analysis-map-empty { fill: #edf1f5; stroke: #fff; stroke-width: 1; pointer-events: none; }
 .analysis-map-region { fill: var(--blue); stroke: #fff; stroke-width: 1; cursor: pointer; transition: fill .15s ease, stroke .15s ease; }
 .analysis-map-region.negative { fill: #b83a3a; }
 .analysis-map-region:hover, .analysis-map-region:focus-visible, .analysis-map-region.selected { stroke: var(--navy); stroke-width: 3; }

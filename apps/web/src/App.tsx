@@ -1,7 +1,7 @@
 import { FormEvent, type ReactNode, useCallback, useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Activity, BarChart3, ChevronRight, ClipboardCheck, Database, Eye, EyeOff, FileClock, FileUp, LogOut, Network, PauseCircle, PlayCircle, Plus, RefreshCw, Search, ShieldCheck, Target, UsersRound, X } from "lucide-react";
-import chinaMap from "@svg-maps/china";
+import type { ChinaMap } from "./china-map";
 
 type Capabilities = { viewPerformance:boolean; viewGoals:boolean; viewOrganization:boolean; viewApprovals:boolean; editPerformance:boolean; exportPerformance:boolean; exportGoals:boolean; manageAccounts:boolean; manageOrganization:boolean };
 type User = { id: string; personId:string; username: string; displayName: string; mustChangePassword: boolean; roles: string[]; capabilities:Capabilities };
@@ -337,17 +337,20 @@ function AnalysisPanel(){
 }
 
 function ChinaProvinceMap({provinces,selectedRegionCode,onSelect}:{provinces:AnalysisProvince[];selectedRegionCode:string|null;onSelect:(province:AnalysisProvince)=>void}){
+  const[chinaMap,setChinaMap]=useState<ChinaMap|null>(null);
+  const[mapError,setMapError]=useState("");
+  useEffect(()=>{const controller=new AbortController();import("./china-map").then(({loadChinaMap})=>loadChinaMap(controller.signal)).then(setChinaMap).catch((failure)=>{if(failure instanceof DOMException&&failure.name==="AbortError")return;setMapError(failure instanceof Error?failure.message:"中国省级地图加载失败");});return()=>controller.abort();},[]);
   const byCode=new Map(provinces.map((province)=>[province.regionCode,province]));
   const finiteTotals=provinces.map((province)=>Math.abs(Number(province.totalAmount))).filter(Number.isFinite);
   const maximum=Math.max(1,...finiteTotals);
-  return <article className="analysis-card analysis-map-card"><h3>省份地图</h3><div className="analysis-map-wrap"><svg className="analysis-map" viewBox={chinaMap.viewBox} role="group" aria-label="中国省份业绩地图">{chinaMap.locations.map((location)=>{
+  return <article className="analysis-card analysis-map-card"><h3>省份地图</h3><div className="analysis-map-wrap">{chinaMap?<svg className="analysis-map" viewBox={chinaMap.viewBox} role="group" aria-label="中国省份业绩地图">{chinaMap.locations.map((location)=>{
     const regionCode=chinaMapRegionCodes[location.id];
     const province=regionCode?byCode.get(regionCode):undefined;
-    if(!province)return <path key={location.id} d={location.path} className="analysis-map-empty" aria-hidden="true"/>;
+    if(!province)return <path key={location.id} d={location.path} className="analysis-map-empty" data-region-code={regionCode} aria-hidden="true"/>;
     const selected=selectedRegionCode===province.regionCode;
     const label=`地图选择${province.regionName}，${province.eventCount} 条事件，金额 ${formatMoney(province.totalAmount)}`;
-    return <path key={location.id} d={location.path} className={`analysis-map-region${Number(province.totalAmount)<0?" negative":""}${selected?" selected":""}`} style={{fillOpacity:.3+.7*Math.abs(Number(province.totalAmount))/maximum}} role="button" tabIndex={0} aria-label={label} aria-pressed={selected} onClick={()=>onSelect(province)} onKeyDown={(event)=>{if(event.key==="Enter"||event.key===" "){event.preventDefault();onSelect(province);}}}/>;
-  })}</svg><p>颜色深浅只表示相对规模；金额以右侧省份汇总为准。</p><small>省级轮廓：<a href="https://github.com/VictorCazanave/svg-maps/tree/master/packages/china">@svg-maps/china</a>（<a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>）</small></div></article>;
+    return <path key={location.id} d={location.path} className={`analysis-map-region${Number(province.totalAmount)<0?" negative":""}${selected?" selected":""}`} style={{fillOpacity:.3+.7*Math.abs(Number(province.totalAmount))/maximum}} data-region-code={regionCode} role="button" tabIndex={0} aria-label={label} aria-pressed={selected} onClick={()=>onSelect(province)} onKeyDown={(event)=>{if(event.key==="Enter"||event.key===" "){event.preventDefault();onSelect(province);}}}/>;
+  })}</svg>:<p className={mapError?"page-message":"analysis-loading"} role={mapError?"alert":"status"}>{mapError||"正在读取中国省级地图…"}</p>}<p>颜色深浅只表示相对规模；金额以右侧省份汇总为准。</p><p><span>台湾省资料暂缺</span>；香港特别行政区、澳门特别行政区资料暂缺。</p><small>省级轮廓：<a href="https://www.tianditu.gov.cn/">天地图</a>来源；<a href="https://github.com/JayMuShui/chinese-global-compliant-geodata">chinese-global-compliant-geodata 1.0.0</a>（MIT）。</small></div></article>;
 }
 
 function AnalysisDrilldown({province,month}:{province:AnalysisProvince;month:string}){
@@ -532,7 +535,13 @@ const standardBusinessRegions = [
 ] as const;
 
 const chinaMapRegionCodes:Record<string,string>={
-  anhui:"CN-AH",beijing:"CN-BJ",chongqing:"CN-CQ",fujian:"CN-FJ",gansu:"CN-GS",guangdong:"CN-GD","guangxi-zhuang":"CN-GX",guizhou:"CN-GZ",hainan:"CN-HI",hebei:"CN-HE",heilongjiang:"CN-HL",henan:"CN-HA",hubei:"CN-HB",hunan:"CN-HN",jiangsu:"CN-JS",jiangxi:"CN-JX",jilin:"CN-JL",liaoning:"CN-LN","nei-mongol":"CN-NM","ningxia-hui":"CN-NX",quinghai:"CN-QH",shaanxi:"CN-SN",shandong:"CN-SD",shanghai:"CN-SH",shanxi:"CN-SX",sichuan:"CN-SC",tianjin:"CN-TJ","xinjiang-uygur":"CN-XJ",xizang:"CN-XZ",yunnan:"CN-YN",zhejiang:"CN-ZJ",
+  "110000":"CN-BJ","120000":"CN-TJ","130000":"CN-HE","140000":"CN-SX","150000":"CN-NM",
+  "210000":"CN-LN","220000":"CN-JL","230000":"CN-HL","310000":"CN-SH","320000":"CN-JS",
+  "330000":"CN-ZJ","340000":"CN-AH","350000":"CN-FJ","360000":"CN-JX","370000":"CN-SD",
+  "410000":"CN-HA","420000":"CN-HB","430000":"CN-HN","440000":"CN-GD","450000":"CN-GX",
+  "460000":"CN-HI","500000":"CN-CQ","510000":"CN-SC","520000":"CN-GZ","530000":"CN-YN",
+  "540000":"CN-XZ","610000":"CN-SN","620000":"CN-GS","630000":"CN-QH","640000":"CN-NX",
+  "650000":"CN-XJ","710000":"CN-TW","810000":"CN-HK","820000":"CN-MO",
 };
 
 const initialOrder = { orderNo: "", customerName: "", customerUnit: "", businessRegionSourceText:"", businessRegionCode: "", salespersonPersonId: "", serviceType: "", sourceReceivedOn: businessDateToday(), amount: "", reason: "首次录入" };

@@ -94,6 +94,17 @@ test("桌面总览显示事件快照地区、外贸、客户单位和待补齐�
   await expect(customers.getByRole("row", { name: /外贸.*客户单位乙.*1.*-¥25\.00/ })).toBeVisible();
 
   const map = analysis.getByRole("group", { name: "中国省份业绩地图" });
+  const mapRegionCodes = await map.locator("[data-region-code]").evaluateAll((elements) => elements.map((element) => element.getAttribute("data-region-code")).sort());
+  expect(mapRegionCodes).toEqual([
+    "CN-AH", "CN-BJ", "CN-CQ", "CN-FJ", "CN-GD", "CN-GS", "CN-GX", "CN-GZ", "CN-HA", "CN-HB", "CN-HE", "CN-HI",
+    "CN-HK", "CN-HL", "CN-HN", "CN-JL", "CN-JS", "CN-JX", "CN-LN", "CN-MO", "CN-NM", "CN-NX", "CN-QH", "CN-SC",
+    "CN-SD", "CN-SH", "CN-SN", "CN-SX", "CN-TJ", "CN-TW", "CN-XJ", "CN-XZ", "CN-YN", "CN-ZJ",
+  ]);
+  await expect(map.locator('[data-region-code="CN-TW"]')).toBeVisible();
+  await expect(map.locator(".analysis-map-boundary")).toHaveCount(0);
+  const southernEdge = await map.locator("[data-region-code]").evaluateAll((elements) => Math.max(...elements.map((element) => { const box = (element as SVGGraphicsElement).getBBox(); return box.y + box.height; })));
+  expect(southernEdge).toBeLessThanOrEqual(608.01);
+  await expect(analysis.getByText("台湾省资料暂缺", { exact: true })).toBeVisible();
   const jiangsu = map.getByRole("button", { name: "地图选择江苏省，102 条事件，金额 ¥101,000,000,000,098.99" });
   const zhejiang = map.getByRole("button", { name: "地图选择浙江省，1 条事件，金额 ¥50.00" });
   await expect(jiangsu).toBeVisible();
