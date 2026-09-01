@@ -1,7 +1,22 @@
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+x-api-runtime: &api-runtime
+  cpus: 1.0
+  mem_limit: 512m
+  logging: *default-logging
+
 services:
   db:
     image: postgres:16
     restart: unless-stopped
+    cpus: 2.0
+    mem_limit: 1g
+    logging: *default-logging
+    networks: [backend]
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-sampleflow}
       POSTGRES_USER: ${POSTGRES_USER:-sampleflow}
@@ -15,15 +30,17 @@ services:
       retries: 20
 
   api:
+    <<: *api-runtime
     build:
       context: .
       dockerfile: apps/api/Dockerfile
+    networks: [backend, proxy]
     restart: unless-stopped
     environment:
       NODE_ENV: production
       API_PORT: 3000
       APP_ORIGINS: ${APP_ORIGINS:?请设置允许访问系统的完整 Origin}
-      TRUST_PROXY_CIDR: ${TRUST_PROXY_CIDR:-172.16.0.0/12}
+      TRUST_PROXY_CIDR: ${SAMPLEFLOW_PROXY_SUBNET:?请设置仅承载 Web 反向代理的专用网段}
       DB_HOST: db
       DB_PORT: 5432
       DB_NAME: ${POSTGRES_DB:-sampleflow}
@@ -39,11 +56,13 @@ services:
       retries: 12
 
   db-migrate:
+    <<: *api-runtime
     profiles: ["operations"]
     build:
       context: .
       dockerfile: apps/api/Dockerfile
     restart: "no"
+    networks: [backend]
     environment:
       NODE_ENV: production
       DB_HOST: db
@@ -57,11 +76,13 @@ services:
     command: ["node", "apps/api/dist/cli/migrate.js"]
 
   db-provision-roles:
+    <<: *api-runtime
     profiles: ["operations"]
     build:
       context: .
       dockerfile: apps/api/Dockerfile
     restart: "no"
+    networks: [backend]
     environment:
       NODE_ENV: production
       DB_ADMIN_HOST: db
@@ -81,11 +102,13 @@ services:
     command: ["node", "apps/api/dist/cli/provision-database-roles.js"]
 
   admin-bootstrap:
+    <<: *api-runtime
     profiles: ["operations"]
     build:
       context: .
       dockerfile: apps/api/Dockerfile
     restart: "no"
+    networks: [backend]
     environment:
       NODE_ENV: production
       DB_HOST: db
@@ -100,11 +123,13 @@ services:
     command: ["node", "apps/api/dist/cli/bootstrap-admin.js"]
 
   import-preflight:
+    <<: *api-runtime
     profiles: ["operations"]
     build:
       context: .
       dockerfile: apps/api/Dockerfile
     restart: "no"
+    networks: [backend]
     environment:
       NODE_ENV: production
       DB_HOST: db
@@ -123,11 +148,13 @@ services:
     command: ["node", "apps/api/dist/cli/import-legacy.js"]
 
   import-confirm:
+    <<: *api-runtime
     profiles: ["operations"]
     build:
       context: .
       dockerfile: apps/api/Dockerfile
     restart: "no"
+    networks: [backend]
     environment:
       NODE_ENV: production
       DB_HOST: db
@@ -148,11 +175,28 @@ services:
       context: .
       dockerfile: apps/web/Dockerfile
     restart: unless-stopped
+    cpus: 0.5
+    mem_limit: 128m
+    logging: *default-logging
+    networks: [proxy]
     ports:
-      - "${WEB_PORT:-8080}:80"
+      - "${WEB_PORT:-8080}:8080"
     depends_on:
       api:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz | grep -qx ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+networks:
+  backend:
+    internal: true
+  proxy:
+    ipam:
+      config:
+        - subnet: ${SAMPLEFLOW_PROXY_SUBNET:?请设置仅承载 Web 反向代理的专用网段}
 
 volumes:
   sampleflow_pgdata:
