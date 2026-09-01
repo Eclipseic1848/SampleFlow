@@ -334,6 +334,9 @@ th { color: #68778a; background: #fafbfc; font-weight: 600; }
 .account-search .account-search-clear:hover { color: var(--navy); background: #eef2f6; }
 .icon-action { width: 36px; height: 36px; border: 1px solid var(--line); border-radius: 6px; color: #56657a; background: #fff; display: grid; place-items: center; cursor: pointer; }
 .orders-table-wrap { overflow-x: auto; }
+.audit-table { min-width: 1180px; }
+.audit-data { min-width: 220px; max-width: 340px; white-space: normal; }
+.audit-data code { color: #3f5065; font-family: Consolas, monospace; overflow-wrap: anywhere; }
 .permission-matrix-table { min-width: 1080px; white-space: normal; }
 .permission-matrix-table th, .permission-matrix-table td { vertical-align: top; line-height: 1.65; }
 .permission-matrix-table td:first-child { min-width: 112px; color: var(--navy); }

@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { Activity, BarChart3, ChevronRight, ClipboardCheck, Database, Eye, EyeOff, FileClock, FileUp, LogOut, Network, PauseCircle, PlayCircle, Plus, RefreshCw, Search, ShieldCheck, Target, UsersRound, X } from "lucide-react";
 import type { ChinaMap } from "./china-map";
 
-type Capabilities = { viewPerformance:boolean; viewGoals:boolean; viewOrganization:boolean; viewApprovals:boolean; editPerformance:boolean; exportPerformance:boolean; exportGoals:boolean; manageAccounts:boolean; manageOrganization:boolean };
+type Capabilities = { viewPerformance:boolean; viewGoals:boolean; viewAudits:boolean; viewOrganization:boolean; viewApprovals:boolean; editPerformance:boolean; exportPerformance:boolean; exportGoals:boolean; manageAccounts:boolean; manageOrganization:boolean };
 type User = { id: string; personId:string; username: string; displayName: string; mustChangePassword: boolean; roles: string[]; capabilities:Capabilities };
 type AuthState = { status: "loading" } | { status: "guest" } | { status: "authenticated"; user: User };
 type OrderLifecycle = "draft" | "active" | "paused" | "zero" | "historical_review_required";
@@ -55,6 +55,9 @@ type RolePermission = { code:string; name:string; businessScope:"none"|"self"|"g
 type OrgUnit = { id:string; name:string; unitType:"department"|"group"; parentId:string|null; parentName:string|null; isActive:boolean };
 type Assignment = { id:string; username:string; displayName:string; departmentName:string|null; groupName:string|null; effectiveFrom:string; effectiveTo:string|null };
 type Responsibility = { id:string; personId:string; username:string|null; displayName:string; unitId:string; unitName:string; unitType:"department"|"group"; responsibilityType:"leader"|"supervisor"; effectiveFrom:string; effectiveTo:string|null };
+type AuditRow = { id:string; actorPersonId:string|null; actorUsername:string|null; actorDisplayName:string|null; action:string; entityType:string; entityId:string|null; beforeData:unknown; afterData:unknown; createdAt:string };
+type AuditFilters = { person:string; action:string; entityType:string; entityId:string; from:string; to:string };
+const emptyAuditFilters:AuditFilters={person:"",action:"",entityType:"",entityId:"",from:"",to:""};
 const roleNames: Record<string, string> = { system_admin: "系统管理员", sales_assistant: "销售助理", sales_assistant_leader: "销售助理组长", sales_manager: "销售经理", sales_supervisor: "业务主管", sales_leader: "业务员组长", salesperson: "业务员", hr: "人事部", general_manager: "总经理" };
 function businessDateToday():string{const parts=new Intl.DateTimeFormat("zh-CN",{timeZone:"Asia/Shanghai",year:"numeric",month:"2-digit",day:"2-digit"}).formatToParts(new Date());const value=(type:Intl.DateTimeFormatPartTypes)=>parts.find((part)=>part.type===type)?.value??"";return `${value("year")}-${value("month")}-${value("day")}`;}
 
@@ -162,13 +165,14 @@ function Login({ onLogin }: { onLogin: (user: User) => void }) {
 }
 
 function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
-  type PageId = "overview"|"goals"|"orders"|"organization"|"approvals"|"accounts";
+  type PageId = "overview"|"goals"|"orders"|"organization"|"approvals"|"accounts"|"audits";
   const pages = [
     user.capabilities.viewPerformance ? {id:"overview" as const,Icon:BarChart3,label:"业绩总览"} : null,
     user.capabilities.viewGoals ? {id:"goals" as const,Icon:Target,label:"目标管理"} : null,
     user.capabilities.viewPerformance ? {id:"orders" as const,Icon:ClipboardCheck,label:"订单业绩"} : null,
     user.capabilities.viewOrganization ? {id:"organization" as const,Icon:Network,label:"组织架构"} : null,
     user.capabilities.viewApprovals ? {id:"approvals" as const,Icon:FileClock,label:"审批中心"} : null,
+    user.capabilities.viewAudits ? {id:"audits" as const,Icon:Search,label:"审计查询"} : null,
     user.capabilities.manageAccounts ? {id:"accounts" as const,Icon:UsersRound,label:"账号管理"} : null,
   ].filter((page):page is NonNullable<typeof page>=>page!==null);
   const defaultPage:PageId=user.capabilities.manageAccounts?"accounts":pages[0]?.id??"overview";
@@ -188,10 +192,26 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
         ? <GoalsPage user={user} pendingOnly />
       : active === "organization"
         ? <OrganizationPage user={user}/>
+      : active === "audits"
+        ? <AuditPage/>
       : active === "accounts"
         ? <AccountsPage user={user}/>
       : <Overview canEdit={user.capabilities.editPerformance} canExport={user.capabilities.exportPerformance} onEnterOrders={() => navigate("orders")} />;
   return <div className="app-shell"><aside className="sidebar"><div className="sidebar-brand"><img src="/brand-logo.png" alt="瑞源生物 Pronetbio"/></div><nav>{pages.map(({Icon,label,id}) => <button className={id === active ? "active" : ""} key={id} onClick={() => navigate(id)} aria-label={label} aria-current={id===active?"page":undefined}><Icon size={18}/><span>{label}</span></button>)}</nav><div className="sidebar-user"><div className="avatar">{user.displayName.slice(0,1)}</div><div><strong>{user.displayName}</strong><span>{user.roles.map((r) => roleNames[r] ?? r).join("、")}</span></div><button onClick={logout} aria-label="退出登录"><LogOut size={17}/></button></div></aside>{content}</div>;
+}
+
+function auditData(value:unknown):string{return value===null||value===undefined?"—":JSON.stringify(value);}
+function auditDateTime(value:string):string{return new Intl.DateTimeFormat("zh-CN",{dateStyle:"medium",timeStyle:"medium",timeZone:"Asia/Shanghai"}).format(new Date(value));}
+function auditTimeParameter(value:string):string{return value?`${value}${value.length===16?":00":""}+08:00`:"";}
+
+function AuditPage(){
+  const[draft,setDraft]=useState<AuditFilters>(emptyAuditFilters);const[filters,setFilters]=useState<AuditFilters>(emptyAuditFilters);const[audits,setAudits]=useState<AuditRow[]>([]);const[cursor,setCursor]=useState<string|null>(null);const[nextCursor,setNextCursor]=useState<string|null>(null);const[loading,setLoading]=useState(false);const[error,setError]=useState("");const[revision,setRevision]=useState(0);
+  const requestKey=JSON.stringify([filters,cursor,revision]);
+  useEffect(()=>{const controller=new AbortController();const params=new URLSearchParams();for(const key of ["person","action","entityType","entityId"] as const)if(filters[key])params.set(key,filters[key]);if(filters.from)params.set("from",auditTimeParameter(filters.from));if(filters.to)params.set("to",auditTimeParameter(filters.to));if(cursor)params.set("cursor",cursor);setLoading(true);setError("");setNextCursor(null);if(!cursor)setAudits([]);fetch(`/api/audits${params.size?`?${params.toString()}`:""}`,{signal:controller.signal}).then(async(response)=>{const data=await readResponseJson<{audits?:AuditRow[];nextCursor?:string|null;message?:string}>(response,"审计响应无效，请重试。");if(!response.ok)throw new Error(data.message??"审计查询失败");setAudits((current)=>cursor?[...current,...(data.audits??[])]:data.audits??[]);setNextCursor(data.nextCursor??null);}).catch((reason)=>{if(reason instanceof DOMException&&reason.name==="AbortError")return;setError(reason instanceof Error?reason.message:"审计查询失败");}).finally(()=>{if(!controller.signal.aborted)setLoading(false);});return()=>controller.abort();},[requestKey]);
+  function update(key:keyof AuditFilters,value:string){setDraft((current)=>({...current,[key]:value}));}
+  function query(event:FormEvent){event.preventDefault();setFilters(Object.fromEntries(Object.entries(draft).map(([key,value])=>[key,value.trim()])) as AuditFilters);setCursor(null);setRevision((value)=>value+1);}
+  function clear(){setDraft(emptyAuditFilters);setFilters(emptyAuditFilters);setCursor(null);setRevision((value)=>value+1);}
+  return <main className="dashboard"><header><div><h1>审计查询</h1><p>按账号、动作、实体和时间追溯不可变记录；数据范围沿用当前角色权限</p></div></header><div className="permission-note"><ShieldCheck size={18}/>此页面只提供查询，不提供修改或删除入口；敏感凭据字段不会返回。</div><section className="orders-card" aria-labelledby="audit-table-title"><div className="orders-toolbar"><div><h2 id="audit-table-title">审计记录</h2><span role="status">{loading?"正在查询…":`已加载 ${audits.length} 条记录`}</span></div></div><form noValidate className="order-filters" onSubmit={query}><div className="order-filter-grid"><label className="field"><span>人员</span><input value={draft.person} onChange={(event)=>update("person",event.target.value)} placeholder="姓名、账号或人员标识"/></label><label className="field"><span>动作</span><input value={draft.action} onChange={(event)=>update("action",event.target.value)} placeholder="如 performance.order_posted"/></label><label className="field"><span>实体类型</span><input value={draft.entityType} onChange={(event)=>update("entityType",event.target.value)} placeholder="如 performance_order"/></label><label className="field"><span>实体标识</span><input value={draft.entityId} onChange={(event)=>update("entityId",event.target.value)} placeholder="稳定标识"/></label><label className="field"><span>开始时间</span><input type="datetime-local" value={draft.from} onChange={(event)=>update("from",event.target.value)}/></label><label className="field"><span>结束时间</span><input type="datetime-local" value={draft.to} onChange={(event)=>update("to",event.target.value)}/></label></div><div className="order-filter-actions"><button type="button" onClick={clear}>清除条件</button><button type="submit">查询审计</button></div></form>{error?<div className="query-feedback"><p className="page-message" role="alert">{error}</p><button type="button" onClick={()=>setRevision((value)=>value+1)}>重试查询</button></div>:null}<div className="orders-table-wrap"><table className="audit-table"><thead><tr><th>时间</th><th>人员</th><th>动作</th><th>实体</th><th>变更前</th><th>变更后</th></tr></thead><tbody>{!loading&&!error&&audits.length===0?<tr><td className="empty-cell" colSpan={6}>没有符合当前权限和条件的审计记录。</td></tr>:audits.map((row)=><tr key={row.id}><td><time dateTime={row.createdAt}>{auditDateTime(row.createdAt)}</time></td><td>{row.actorDisplayName??"系统"}<small className="table-secondary">{row.actorUsername??row.actorPersonId??"—"}</small></td><td>{row.action}</td><td>{row.entityType}<small className="table-secondary">{row.entityId??"—"}</small></td><td className="audit-data"><code>{auditData(row.beforeData)}</code></td><td className="audit-data"><code>{auditData(row.afterData)}</code></td></tr>)}</tbody></table></div><nav className="table-pagination" aria-label="审计分页"><span>按不可变审计编号倒序加载</span>{nextCursor?<button type="button" disabled={loading} onClick={()=>setCursor(nextCursor)}>{loading?"正在加载…":"加载更多"}</button>:null}</nav></section></main>;
 }
 
 function AccountsPage({user}:{user:User}){
