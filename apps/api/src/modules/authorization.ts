@@ -54,6 +54,7 @@ export function capabilitiesForRoles(roles: readonly string[]) {
   return {
     viewPerformance,
     viewGoals,
+    viewAudits: policies.length > 0,
     viewOrganization: viewPerformance || viewGoals || policies.some((policy) => policy.organizationAdmin),
     viewApprovals: viewGoals,
     editPerformance: policies.some((policy) => policy.performanceEdit),
@@ -112,15 +113,23 @@ export function performanceScopeValues(access: PerformanceAccess): unknown[] {
   return [access.all, access.personIds, access.groupIds, access.departmentIds];
 }
 
-export type GoalAccess = Readonly<{ all: boolean; ownerPersonIds: string[] }>;
+export type GoalAccess = Readonly<{
+  all: boolean;
+  departmentIds: string[];
+  groupIds: string[];
+  ownerPersonIds: string[];
+  selfPersonIds: string[];
+}>;
 
 export async function resolveGoalAccess(database: QueryDatabase, user: CurrentUser): Promise<GoalAccess> {
   const scopes = new Set(policiesFor(user.roles).map((policy) => policy.goalScope));
-  if (scopes.has("all")) return { all: true, ownerPersonIds: [] };
+  if (scopes.has("all")) return { all: true, departmentIds: [], groupIds: [], ownerPersonIds: [], selfPersonIds: [] };
   const ownerPersonIds = new Set<string>();
-  if ([...scopes].some((scope) => ["self", "group", "department"].includes(scope))) ownerPersonIds.add(user.personId);
+  const selfPersonIds = [...scopes].some((scope) => ["self", "group", "department"].includes(scope)) ? [user.personId] : [];
+  for (const personId of selfPersonIds) ownerPersonIds.add(personId);
+  let performanceAccess: PerformanceAccess | null = null;
   if (scopes.has("group") || scopes.has("department")) {
-    const performanceAccess = await resolvePerformanceAccess(database, user);
+    performanceAccess = await resolvePerformanceAccess(database, user);
     const result = await database.query<{ person_id: string }>(
       `select distinct m.person_id::text
        from org_memberships m
@@ -133,7 +142,13 @@ export async function resolveGoalAccess(database: QueryDatabase, user: CurrentUs
     );
     for (const row of result.rows) ownerPersonIds.add(row.person_id);
   }
-  return { all: false, ownerPersonIds: [...ownerPersonIds] };
+  return {
+    all: false,
+    departmentIds: scopes.has("department") ? performanceAccess?.departmentIds ?? [] : [],
+    groupIds: scopes.has("group") ? performanceAccess?.groupIds ?? [] : [],
+    ownerPersonIds: [...ownerPersonIds],
+    selfPersonIds,
+  };
 }
 
 export function canReadGoals(access: GoalAccess): boolean {

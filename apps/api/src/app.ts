@@ -9,6 +9,7 @@ import { registerGoals } from "./modules/goals.js";
 import { registerPerformance } from "./modules/performance.js";
 import { registerAccountingPeriods } from "./modules/accounting-periods.js";
 import { registerImports } from "./modules/imports.js";
+import { registerAudits } from "./modules/audits.js";
 
 type BuildAppOptions = {
   clock?: () => Date;
@@ -52,6 +53,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
   await registerImports(app, database);
   await registerGoals(app, database);
   await registerAdmin(app, database);
+  await registerAudits(app, database);
   await registerExports(app, database, options.clock);
 
   app.get("/api/health", async () => ({
