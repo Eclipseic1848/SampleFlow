@@ -192,18 +192,46 @@ try {
   const ready = await request("/api/ready");
   assert.deepEqual(await ready.json(), { status: "ready", database: "connected" });
 
+  const loginFailure = await fetch(`http://127.0.0.1:${port}/api/auth/login`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{}",
+    signal: AbortSignal.timeout(15_000),
+  });
+  assert.equal(loginFailure.status, 403);
+
+  const metrics = docker(["exec", apiId, "node", "-e",
+    "fetch('http://127.0.0.1:3000/internal/metrics').then(async r=>{if(!r.ok)process.exit(1);process.stdout.write(await r.text())}).catch(()=>process.exit(1))",
+  ], true);
+  for (const sample of [
+    /sampleflow_http_requests_total\{route_template="\/api\/auth\/login",method="POST",status_category="4xx"\} 1/,
+    /sampleflow_http_errors_total\{route_template="\/api\/auth\/login",method="POST",status_category="4xx"\} 1/,
+    /sampleflow_http_request_duration_seconds_count\{route_template="\/api\/auth\/login",method="POST",status_category="4xx"\} 1/,
+    /sampleflow_operation_failures_total\{operation="auth.login",result="failure",reason_code="AUTH_ORIGIN_INVALID"\} 1/,
+    /sampleflow_database_ready 1/,
+  ]) assert.match(metrics, sample);
+  const publicMetrics = await request("/internal/metrics");
+  assert.match(publicMetrics.headers.get("content-type") ?? "", /text\/html/);
+  assert.doesNotMatch(await publicMetrics.text(), /sampleflow_database_ready/, "Web 不应代理内部指标");
+
   for (const [path, label] of [["/", "页面"], ["/api/health", "API"], ["/maps/china-provinces-mit-1.0.0.geojson", "地图"]]) {
     assertHeaders(await request(path, { method: "HEAD" }), label);
   }
 
   const marker = `proxy-test-${Date.now()}`;
-  await request(`/api/health?${marker}`, { headers: { "X-Forwarded-For": "203.0.113.99" } });
+  const proxyResponse = await request(`/api/health?${marker}`, { headers: { "X-Forwarded-For": "203.0.113.99" } });
+  const requestId = proxyResponse.headers.get("x-request-id");
+  assert.ok(requestId, "可信代理验收响应缺少请求标识");
   const logs = docker(["logs", "--tail", "100", apiId], true).split(/\r?\n/).flatMap((line) => {
     try { return [JSON.parse(line)]; } catch { return []; }
   });
-  const proxyRequest = logs.findLast((entry) => entry.req?.url?.includes(marker));
+  const proxyRequest = logs.findLast((entry) => entry.requestId === requestId);
   assert.ok(proxyRequest, "未找到可信代理验收请求日志");
-  assert.notEqual(proxyRequest.req.remoteAddress, "203.0.113.99", "Web 未覆盖客户端伪造的转发地址");
+  assert.equal(proxyRequest.routeTemplate, "/api/health");
+  assert.notEqual(proxyRequest.remoteAddress, "203.0.113.99", "Web 未覆盖客户端伪造的转发地址");
+  const startup = logs.find((entry) => entry.reasonCode === "STARTUP_SUCCEEDED");
+  assert.ok(startup, "未找到结构化启动成功日志");
+  assert.equal(startup.level, 30);
 
   console.log(`[容器验收] ${project} 通过：非 root、healthy、资源、日志、健康入口、安全头和可信代理`);
 } catch (error) {

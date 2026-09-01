@@ -1,6 +1,7 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { Database } from "../db.js";
+import { recordOperation } from "../observability.js";
 import { standardBusinessRegionName } from "../domain/business-regions.js";
 import { ImportWorkbookError, parseImportWorkbook, type ImportColumn, type ImportLayout } from "../domain/performance-import-xlsx.js";
 import { confirmDimensionBackfillBatch, confirmImportBatch, ImportJobError, preflightDimensionBackfillRows, preflightImportRows, type ImportEventType } from "../services/import-job.js";
@@ -57,9 +58,15 @@ const preflightSchema = z.strictObject({
 });
 const confirmSchema = z.strictObject({ confirmedWarnings: z.array(z.string().min(1).max(100)).max(5_000).default([]) });
 
-function denyPerformanceEditor(request: { currentUser: import("./auth.js").CurrentUser | null }, reply: { code: (status: number) => { send: (body: unknown) => unknown } }) {
-  if (!request.currentUser) return reply.code(401).send({ message: "尚未登录" });
-  if (!hasAnyRole(request.currentUser, PERFORMANCE_EDITOR_ROLES)) return reply.code(403).send({ message: "仅业绩数据维护角色可以使用 Excel 导入" });
+function denyPerformanceEditor(request: FastifyRequest, reply: { code: (status: number) => { send: (body: unknown) => unknown } }) {
+  if (!request.currentUser) {
+    recordOperation(request, "import", "failure", "AUTH_REQUIRED");
+    return reply.code(401).send({ message: "尚未登录" });
+  }
+  if (!hasAnyRole(request.currentUser, PERFORMANCE_EDITOR_ROLES)) {
+    recordOperation(request, "import", "failure", "IMPORT_FORBIDDEN");
+    return reply.code(403).send({ message: "仅业绩数据维护角色可以使用 Excel 导入" });
+  }
   return null;
 }
 
@@ -212,13 +219,19 @@ export async function registerImports(app: FastifyInstance, database: Database) 
     const denied = denyPerformanceEditor(request, reply);
     if (denied) return denied;
     const parsed = preflightSchema.safeParse(request.body);
-    if (!parsed.success) return reply.code(400).send({ message: "上传参数无效" });
+    if (!parsed.success) {
+      recordOperation(request, "import", "failure", "IMPORT_INPUT_INVALID");
+      return reply.code(400).send({ message: "上传参数无效" });
+    }
     try {
       const config = await database.query<{ sheet_name: string; expected_headers: unknown[]; column_mapping: ImportLayout["columnMapping"]; person_mapping: Record<string, string>; fixed_event_type:"legacy_adjustment"|null }>(
         "select sheet_name,expected_headers,column_mapping,person_mapping,fixed_event_type from import_configs where id=$1 and status='approved'",
         [parsed.data.configId],
       );
-      if (!config.rows[0]) return reply.code(409).send({ message: "只能使用已批准的导入配置" });
+      if (!config.rows[0]) {
+        recordOperation(request, "import", "failure", "IMPORT_CONFIG_NOT_APPROVED");
+        return reply.code(409).send({ message: "只能使用已批准的导入配置" });
+      }
       const bytes = decodeBase64(parsed.data.contentBase64);
       const rows = await parseImportWorkbook(parsed.data.fileName, bytes, {
         sheetName: config.rows[0].sheet_name,
@@ -227,15 +240,21 @@ export async function registerImports(app: FastifyInstance, database: Database) 
         personMapping: config.rows[0].person_mapping,
         ...(config.rows[0].fixed_event_type?{fixedEventType:config.rows[0].fixed_event_type}:{}),
       });
-      return await preflightImportRows(database, {
+      const result = await preflightImportRows(database, {
         actorUserId: request.currentUser!.id,
         configId: String(parsed.data.configId),
         sourceFileName: parsed.data.fileName,
         sourceBytes: bytes,
         rows,
       });
+      recordOperation(request, "import", result.status === "blocked" ? "failure" : "success", result.status === "blocked" ? "IMPORT_PREFLIGHT_BLOCKED" : "IMPORT_PREFLIGHT_READY");
+      return result;
     } catch (error) {
-      if (error instanceof ImportJobError || error instanceof ImportWorkbookError) return reply.code(409).send({ message: error.message });
+      if (error instanceof ImportJobError || error instanceof ImportWorkbookError) {
+        recordOperation(request, "import", "failure", "IMPORT_PREFLIGHT_REJECTED");
+        return reply.code(409).send({ message: error.message });
+      }
+      recordOperation(request, "import", "failure", "IMPORT_INTERNAL_ERROR");
       throw error;
     }
   });
@@ -244,13 +263,19 @@ export async function registerImports(app: FastifyInstance, database: Database) 
     const denied = denyPerformanceEditor(request, reply);
     if (denied) return denied;
     const parsed = preflightSchema.safeParse(request.body);
-    if (!parsed.success) return reply.code(400).send({ message: "上传参数无效" });
+    if (!parsed.success) {
+      recordOperation(request, "import", "failure", "IMPORT_INPUT_INVALID");
+      return reply.code(400).send({ message: "上传参数无效" });
+    }
     try {
       const config = await database.query<{ sheet_name:string; expected_headers:unknown[]; column_mapping:ImportLayout["columnMapping"]; person_mapping:Record<string,string>; fixed_event_type:"legacy_adjustment"|null }>(
         "select sheet_name,expected_headers,column_mapping,person_mapping,fixed_event_type from import_configs where id=$1 and status='approved'",
         [parsed.data.configId],
       );
-      if (!config.rows[0]) return reply.code(409).send({ message: "只能使用已批准的导入配置" });
+      if (!config.rows[0]) {
+        recordOperation(request, "import", "failure", "IMPORT_CONFIG_NOT_APPROVED");
+        return reply.code(409).send({ message: "只能使用已批准的导入配置" });
+      }
       const bytes = decodeBase64(parsed.data.contentBase64);
       const rows = await parseImportWorkbook(parsed.data.fileName, bytes, {
         sheetName:config.rows[0].sheet_name,
@@ -259,15 +284,21 @@ export async function registerImports(app: FastifyInstance, database: Database) 
         personMapping:config.rows[0].person_mapping,
         ...(config.rows[0].fixed_event_type ? { fixedEventType:config.rows[0].fixed_event_type } : {}),
       });
-      return await preflightDimensionBackfillRows(database, {
+      const result = await preflightDimensionBackfillRows(database, {
         actorUserId:request.currentUser!.id,
         configId:String(parsed.data.configId),
         sourceFileName:parsed.data.fileName,
         sourceBytes:bytes,
         rows,
       });
+      recordOperation(request, "import", result.status === "blocked" ? "failure" : "success", result.status === "blocked" ? "IMPORT_PREFLIGHT_BLOCKED" : "IMPORT_PREFLIGHT_READY");
+      return result;
     } catch (error) {
-      if (error instanceof ImportJobError || error instanceof ImportWorkbookError) return reply.code(409).send({ message:error.message });
+      if (error instanceof ImportJobError || error instanceof ImportWorkbookError) {
+        recordOperation(request, "import", "failure", "IMPORT_PREFLIGHT_REJECTED");
+        return reply.code(409).send({ message:error.message });
+      }
+      recordOperation(request, "import", "failure", "IMPORT_INTERNAL_ERROR");
       throw error;
     }
   });

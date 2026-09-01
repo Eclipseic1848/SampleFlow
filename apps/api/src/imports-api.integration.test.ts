@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { seedTestUser } from "./test-support/fixtures.js";
 import { withTestApi } from "./test-support/test-api.js";
 import { withMigratedTestDatabase } from "./test-support/test-database.js";
 
 const ORIGIN = "http://127.0.0.1:4174";
+const standardTemplate = fileURLToPath(new URL("../../web/public/SampleFlow标准业绩导入模板.xlsx", import.meta.url));
 
 async function loginHeaders(app: Parameters<Parameters<typeof withTestApi>[1]>[0], username: string) {
   const response = await app.inject({
@@ -121,6 +124,44 @@ test("导入配置草稿与批准遵守销售助理组长/人事职责分离", a
       assert.equal(deniedApprove.statusCode, 403);
       const approved = await app.inject({ method: "POST", url: `/api/imports/configs/${id}/approve`, headers: hr, payload: {} });
       assert.equal(approved.statusCode, 200, approved.body);
+
+      const templateConfig = {
+        configKey: "standard-template",
+        name: "标准模板",
+        sheetName: "业绩导入",
+        expectedHeaders: ["来源记录标识", "轻流订单编号", "发生日期", "客户姓名", "客户单位", "业务区域", "业务员来源标识", "服务类型", "事件类型", "金额", "原因"],
+        columnMapping: {
+          sourceRecordId: "来源记录标识", orderNo: "轻流订单编号", occurredOn: "发生日期",
+          customerName: "客户姓名", customerUnit: "客户单位", businessRegionSourceText: "业务区域",
+          salespersonSourceKey: "业务员来源标识", serviceType: "服务类型", eventType: "事件类型",
+          amount: "金额", reason: "原因",
+        },
+        requiredColumns: ["sourceRecordId", "orderNo", "occurredOn", "customerName", "customerUnit", "businessRegionSourceText", "salespersonSourceKey", "serviceType", "eventType", "amount", "reason"],
+        allowedEventTypes: ["initial"],
+        businessRegionMapping: { 外贸: "EXT-TRADE" },
+        personMapping: {},
+        allowLegacySourceKey: false,
+      };
+      const templateCreated = await app.inject({ method: "POST", url: "/api/imports/configs", headers: leader, payload: templateConfig });
+      assert.equal(templateCreated.statusCode, 201, templateCreated.body);
+      const templateId = templateCreated.json<{ id: string }>().id;
+      const templateApproved = await app.inject({ method: "POST", url: `/api/imports/configs/${templateId}/approve`, headers: hr, payload: {} });
+      assert.equal(templateApproved.statusCode, 200, templateApproved.body);
+      const preflight = await app.inject({
+        method: "POST",
+        url: "/api/imports/preflight",
+        headers: leader,
+        payload: {
+          configId: Number(templateId),
+          fileName: "SampleFlow标准业绩导入模板.xlsx",
+          contentBase64: (await readFile(standardTemplate)).toString("base64"),
+        },
+      });
+      assert.equal(preflight.statusCode, 200, preflight.body);
+      assert.equal(preflight.json<{ status: string }>().status, "blocked");
+      const metrics = await app.inject({ method: "GET", url: "/internal/metrics" });
+      assert.match(metrics.body, /sampleflow_operation_failures_total\{operation="import",result="failure",reason_code="IMPORT_PREFLIGHT_BLOCKED"\} 1/);
+
       const deniedList = await app.inject({ method: "GET", url: "/api/imports/configs", headers: salesperson });
       assert.equal(deniedList.statusCode, 403);
       const visible = await app.inject({ method: "GET", url: "/api/imports/configs", headers: assistant });

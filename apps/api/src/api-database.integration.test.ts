@@ -3,11 +3,29 @@ import { execFile } from "node:child_process";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { checkDatabaseSchema, DatabaseReadinessError, type Database } from "./db.js";
 import { withTestApi } from "./test-support/test-api.js";
 import { withMigratedTestDatabase, withTestDatabase } from "./test-support/test-database.js";
 
 const execFileAsync = promisify(execFile);
 const apiRoot = fileURLToPath(new URL("../", import.meta.url));
+
+test("连接检查后数据库中断仍报告不可用而不是结构落后", async () => {
+  let queryCount = 0;
+  const database = {
+    query: async () => {
+      queryCount += 1;
+      if (queryCount === 1) return { rows: [{ "?column?": 1 }] };
+      throw Object.assign(new Error("connection interrupted"), { code: "ECONNRESET" });
+    },
+  } as unknown as Database;
+
+  await assert.rejects(checkDatabaseSchema(database), (error: unknown) => {
+    assert.ok(error instanceof DatabaseReadinessError);
+    assert.equal(error.reasonCode, "DB_UNAVAILABLE");
+    return true;
+  });
+});
 
 test("数据库结构未迁移时 API 进程停止且不输出内部栈", async () => {
   await withTestDatabase(async (database) => {
@@ -19,10 +37,14 @@ test("数据库结构未迁移时 API 进程停止且不输出内部栈", async 
         timeout: 5_000,
       }),
       (error: unknown) => {
-        const failure = error as { code?: number; stderr?: string };
+        const failure = error as { code?: number; stderr?: string; stdout?: string };
         assert.equal(failure.code, 1);
-        assert.match(failure.stderr ?? "", /请先显式执行 db:migrate 作业/);
-        assert.doesNotMatch(failure.stderr ?? "", /\n\s+at\s/);
+        const record = JSON.parse((failure.stdout ?? "").trim()) as Record<string, unknown>;
+        assert.equal(record.operation, "database.readiness");
+        assert.equal(record.result, "failure");
+        assert.equal(record.reasonCode, "SCHEMA_OUTDATED");
+        assert.equal(failure.stderr, "");
+        assert.doesNotMatch(failure.stdout ?? "", /\n\s+at\s/);
         return true;
       },
     );

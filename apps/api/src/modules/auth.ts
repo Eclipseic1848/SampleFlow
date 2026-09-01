@@ -3,6 +3,7 @@ import type { PoolClient } from "pg";
 import { z } from "zod";
 import { config } from "../config.js";
 import type { Database } from "../db.js";
+import { recordOperation } from "../observability.js";
 import { hashPassword, isPasswordAllowed, PASSWORD_POLICY_MESSAGE, verifyPassword } from "../security/password.js";
 import { createCsrfToken, createSessionToken, CSRF_COOKIE, hashSessionToken, SESSION_COOKIE, SESSION_TTL_MS } from "../security/session.js";
 import { capabilitiesForRoles } from "./authorization.js";
@@ -193,10 +194,14 @@ export async function registerAuth(app: FastifyInstance, db: Database, clock: ()
   app.post("/api/auth/login", async (request, reply) => {
     const origin = request.headers.origin;
     if (!origin || !config.allowedOrigins.includes(origin)) {
+      recordOperation(request, "auth.login", "failure", "AUTH_ORIGIN_INVALID");
       return reply.code(403).send({ code: "ORIGIN_INVALID", message: "请求来源不受信任" });
     }
     const parsed = loginSchema.safeParse(request.body);
-    if (!parsed.success) return reply.code(400).send({ message: "请输入有效的账号和密码" });
+    if (!parsed.success) {
+      recordOperation(request, "auth.login", "failure", "AUTH_INPUT_INVALID");
+      return reply.code(400).send({ message: "请输入有效的账号和密码" });
+    }
     const accountKey = parsed.data.username.toLowerCase();
 
     const result = await db.query<{
@@ -220,6 +225,7 @@ export async function registerAuth(app: FastifyInstance, db: Database, clock: ()
     if (retryAfter !== null) {
       await auditLogin(db, request, retryAfter > 30 ? "auth.login_suspended" : "auth.login_rate_limited", accountKey, user?.id);
       reply.header("retry-after", String(retryAfter));
+      recordOperation(request, "auth.login", "failure", "LOGIN_RATE_LIMITED");
       return reply.code(429).send({ code: "LOGIN_RATE_LIMITED", message: "登录尝试过多，请稍后再试" });
     }
     const valid = user?.is_active
@@ -228,12 +234,14 @@ export async function registerAuth(app: FastifyInstance, db: Database, clock: ()
     if (!user || !valid) {
       await recordLoginFailure(db, accountKey, request.ip, now);
       await auditLogin(db, request, "auth.login_failed", accountKey, user?.id);
+      recordOperation(request, "auth.login", "failure", "INVALID_CREDENTIALS");
       return reply.code(401).send({ message: "账号或密码错误" });
     }
     if (user.must_change_password
       && user.temporary_password_expires_at
       && user.temporary_password_expires_at.getTime() <= now.getTime()) {
       await auditLogin(db, request, "auth.temporary_password_expired", accountKey, user.id);
+      recordOperation(request, "auth.login", "failure", "TEMPORARY_PASSWORD_EXPIRED");
       return reply.code(401).send({
         code: "TEMPORARY_PASSWORD_EXPIRED",
         message: "临时密码已过期，请联系管理员重置",
@@ -277,6 +285,7 @@ export async function registerAuth(app: FastifyInstance, db: Database, clock: ()
       secure: config.nodeEnv === "production",
       maxAge: SESSION_TTL_MS / 1000,
     });
+    recordOperation(request, "auth.login", "success", "LOGIN_SUCCEEDED");
     return { ok: true, csrfToken: csrf.token };
   });
 

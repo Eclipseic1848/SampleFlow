@@ -1,7 +1,8 @@
 import cookie from "@fastify/cookie";
-import Fastify from "fastify";
+import Fastify, { LogController, type FastifyServerOptions } from "fastify";
 import { config } from "./config.js";
-import { checkDatabaseSchema, db, type Database } from "./db.js";
+import { checkDatabaseSchema, databaseReadinessReason, db, type Database } from "./db.js";
+import { OperationalMetrics, recordOperation, requestOperation } from "./observability.js";
 import { registerAdmin } from "./modules/admin.js";
 import { registerAuth } from "./modules/auth.js";
 import { registerExports } from "./modules/exports.js";
@@ -14,7 +15,7 @@ import { registerAudits } from "./modules/audits.js";
 type BuildAppOptions = {
   clock?: () => Date;
   database?: Database;
-  logger?: boolean;
+  logger?: FastifyServerOptions["logger"];
   trustProxy?: boolean | string | string[];
 };
 
@@ -28,7 +29,33 @@ const SAFE_FASTIFY_CLIENT_ERRORS = new Set([
 
 export async function buildApp(options: BuildAppOptions = {}) {
   const database = options.database ?? db;
-  const app = Fastify({ logger: options.logger ?? true, trustProxy: options.trustProxy ?? config.trustProxy });
+  const metrics = new OperationalMetrics();
+  const app = Fastify({
+    logController: new LogController({ disableRequestLogging: true }),
+    logger: options.logger ?? true,
+    trustProxy: options.trustProxy ?? config.trustProxy,
+  });
+  app.decorateRequest("operationalOutcome", null);
+
+  app.addHook("onRequest", async (request, reply) => {
+    reply.header("x-request-id", request.id);
+  });
+
+  app.addHook("onResponse", async (request, reply) => {
+    const observed = metrics.observe(request, reply.statusCode, reply.elapsedTime);
+    request.log.info({
+      service: "sampleflow-api",
+      requestId: request.id,
+      method: observed.method,
+      routeTemplate: observed.routeTemplate,
+      statusCode: reply.statusCode,
+      durationMs: reply.elapsedTime,
+      operation: observed.operation,
+      result: observed.result,
+      reasonCode: observed.reasonCode,
+      remoteAddress: request.ip,
+    }, "request completed");
+  });
 
   app.setErrorHandler((error, request, reply) => {
     const statusCode = typeof error === "object" && error !== null && "statusCode" in error && typeof error.statusCode === "number"
@@ -37,8 +64,11 @@ export async function buildApp(options: BuildAppOptions = {}) {
     const errorCode = typeof error === "object" && error !== null && "code" in error && typeof error.code === "string"
       ? error.code
       : null;
-    if (statusCode && statusCode < 500 && errorCode && SAFE_FASTIFY_CLIENT_ERRORS.has(errorCode)) return reply.send(error);
-    request.log.error({ err: error, requestId: request.id }, "API 未知异常");
+    if (statusCode && statusCode < 500 && errorCode && SAFE_FASTIFY_CLIENT_ERRORS.has(errorCode)) {
+      if (!request.operationalOutcome) recordOperation(request, requestOperation(request.routeOptions.url ?? "__unmatched__"), "failure", errorCode);
+      return reply.send(error);
+    }
+    if (!request.operationalOutcome) recordOperation(request, requestOperation(request.routeOptions.url ?? "__unmatched__"), "failure", "INTERNAL_ERROR");
     return reply.code(500).send({
       code: "INTERNAL_ERROR",
       message: "服务暂时不可用，请稍后重试",
@@ -62,18 +92,26 @@ export async function buildApp(options: BuildAppOptions = {}) {
     time: new Date().toISOString(),
   }));
 
-  app.get("/api/ready", async (_request, reply) => {
+  app.get("/api/ready", async (request, reply) => {
     try {
       await checkDatabaseSchema(database);
+      recordOperation(request, "database.readiness", "success", "DB_READY");
       return { status: "ready", database: "connected" };
     } catch (error) {
-      app.log.error(error);
+      const reasonCode = databaseReadinessReason(error);
+      recordOperation(request, "database.readiness", "failure", reasonCode);
       return reply.code(503).send({
         status: "not_ready",
-        database: "schema_outdated",
-        message: "数据库结构未就绪，请先执行 db:migrate 作业",
+        database: reasonCode === "DB_UNAVAILABLE" ? "unavailable" : "schema_outdated",
+        message: reasonCode === "DB_UNAVAILABLE"
+          ? "数据库不可用，请检查连接和服务状态"
+          : "数据库结构未就绪，请先执行 db:migrate 作业",
       });
     }
+  });
+
+  app.get("/internal/metrics", async (_request, reply) => {
+    return reply.type("text/plain; version=0.0.4; charset=utf-8").send(metrics.text());
   });
 
   return app;
