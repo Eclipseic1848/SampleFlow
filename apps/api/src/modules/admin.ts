@@ -14,6 +14,8 @@ const statusSchema = z.object({ isActive:z.boolean() });
 const resetSchema = z.strictObject({});
 const unitSchema = z.object({ name:z.string().trim().min(1).max(100), unitType:z.enum(["department","group"]), parentId:z.coerce.number().int().positive().nullable().optional() });
 const assignmentSchema = z.strictObject({ personId:z.coerce.number().int().positive(), departmentId:z.coerce.number().int().positive(), groupId:z.coerce.number().int().positive(), leaderPersonId:z.coerce.number().int().positive(), supervisorPersonId:z.coerce.number().int().positive(), effectiveFrom:z.iso.date(), effectiveTo:z.iso.date().nullable().optional(), closePrevious:z.boolean().optional().default(false) });
+const membershipCloseSchema = z.strictObject({ effectiveOn:z.iso.date() });
+const responsibilityReplaceSchema = z.strictObject({ successorPersonId:postgresBigintIdSchema, effectiveOn:z.iso.date() });
 const ADMIN_USER_PAGE_SIZE=50;
 const fixedRoles=ROLE_PERMISSION_MATRIX.map(({code,name})=>({code,name}));
 const fixedRoleCodes=new Set(fixedRoles.map(({code})=>code));
@@ -142,7 +144,15 @@ export async function registerAdmin(app:FastifyInstance,db:Database){
       db.query(`select u.id::text,u.name,u.unit_type as "unitType",u.parent_id::text as "parentId",p.name as "parentName",u.is_active as "isActive" from org_units u left join org_units p on p.id=u.parent_id where ($1::boolean or u.id=any($3::bigint[]) or u.id=any($4::bigint[]) or exists(select 1 from org_memberships m where m.person_id=$2 and (m.department_id=u.id or m.group_id=u.id))) order by u.unit_type,u.name`,[all,request.currentUser.personId,performanceAccess.groupIds,performanceAccess.departmentIds]),
       db.query(`select m.id::text,u.username,p.display_name as "displayName",d.name as "departmentName",g.name as "groupName",m.effective_from::text as "effectiveFrom",m.effective_to::text as "effectiveTo" from org_memberships m join people p on p.id=m.person_id left join users u on u.id=p.user_id join org_units d on d.id=m.department_id join org_units g on g.id=m.group_id where ($1::boolean or m.person_id=$2 or ((m.group_id=any($3::bigint[]) or m.department_id=any($4::bigint[])) and m.effective_from<=${BUSINESS_DATE_SQL} and (m.effective_to is null or m.effective_to>=${BUSINESS_DATE_SQL}))) order by m.effective_from desc,p.display_name`,[all,request.currentUser.personId,performanceAccess.groupIds,performanceAccess.departmentIds]),
     ]);
-    return{units:units.rows,assignments:assignments.rows};
+    const responsibilities=request.currentUser.roles.includes("system_admin")
+      ?await db.query(`select responsibility.id::text,responsibility.person_id::text as "personId",person.display_name as "displayName",user_account.username,
+                             responsibility.org_unit_id::text as "unitId",unit.name as "unitName",unit.unit_type as "unitType",
+                             responsibility.responsibility_type as "responsibilityType",responsibility.effective_from::text as "effectiveFrom",responsibility.effective_to::text as "effectiveTo"
+                        from org_responsibilities responsibility join people person on person.id=responsibility.person_id
+                        left join users user_account on user_account.id=person.user_id join org_units unit on unit.id=responsibility.org_unit_id
+                       order by responsibility.effective_from desc,unit.unit_type,unit.name,person.display_name`)
+      :{rows:[]};
+    return{units:units.rows,assignments:assignments.rows,responsibilities:responsibilities.rows};
   });
   app.post("/api/admin/organization/units",async(request,reply)=>{
     const denied=requireAdmin(request,reply);if(denied)return denied;
@@ -190,7 +200,7 @@ export async function registerAdmin(app:FastifyInstance,db:Database){
         await client.query(
           `insert into audit_logs(actor_user_id,action,entity_type,entity_id,before_data,after_data,ip_address)
            values($1,'organization.assignment_closed_for_transfer','org_membership',$2,$3::jsonb,$4::jsonb,$5)`,
-          [request.currentUser!.id,current.id,JSON.stringify({effectiveTo:current.effectiveTo}),JSON.stringify({effectiveTo:closed.rows[0]!.effectiveTo}),request.ip],
+          [request.currentUser!.id,current.id,JSON.stringify(current),JSON.stringify({...current,effectiveTo:closed.rows[0]!.effectiveTo,effectiveOn:parsed.data.effectiveFrom,result:"succeeded"}),request.ip],
         );
       }
       for(const [personId,unitId,type] of [[parsed.data.leaderPersonId,parsed.data.groupId,"leader"],[parsed.data.supervisorPersonId,parsed.data.departmentId,"supervisor"]] as const){
@@ -210,7 +220,7 @@ export async function registerAdmin(app:FastifyInstance,db:Database){
           await client.query(
             `insert into audit_logs(actor_user_id,action,entity_type,entity_id,after_data,ip_address)
              values($1,'organization.responsibility_created','org_responsibility',$2,$3::jsonb,$4)`,
-            [request.currentUser!.id,responsibility.rows[0]!.id,JSON.stringify({personId,orgUnitId:unitId,responsibilityType:type,effectiveFrom:parsed.data.effectiveFrom,effectiveTo:parsed.data.effectiveTo??null}),request.ip],
+            [request.currentUser!.id,responsibility.rows[0]!.id,JSON.stringify({personId,orgUnitId:unitId,responsibilityType:type,effectiveFrom:parsed.data.effectiveFrom,effectiveTo:parsed.data.effectiveTo??null,effectiveOn:parsed.data.effectiveFrom,result:"succeeded"}),request.ip],
           );
         }
       }
@@ -227,9 +237,69 @@ export async function registerAdmin(app:FastifyInstance,db:Database){
           [request.currentUser!.id,unit.id,JSON.stringify({isActive:false}),JSON.stringify({isActive:true}),request.ip],
         );
       }
-      await client.query(`insert into audit_logs(actor_user_id,action,entity_type,entity_id,after_data,ip_address) values($1,'organization.assignment_created','org_membership',$2,$3::jsonb,$4)`,[request.currentUser!.id,membership.rows[0]!.id,JSON.stringify(parsed.data),request.ip]);
+      await client.query(`insert into audit_logs(actor_user_id,action,entity_type,entity_id,after_data,ip_address) values($1,'organization.assignment_created','org_membership',$2,$3::jsonb,$4)`,[request.currentUser!.id,membership.rows[0]!.id,JSON.stringify({...parsed.data,effectiveOn:parsed.data.effectiveFrom,result:"succeeded"}),request.ip]);
       await client.query("commit");
       return reply.code(201).send({ok:true});
     }catch(error){await client.query("rollback");if(["23P01","23514","23503","P0001"].includes((error as{code?:string}).code??""))return reply.code(409).send({message:"组织层级、成员任职或负责人有效期冲突"});throw error;}finally{client.release();}
+  });
+  app.post("/api/admin/organization/memberships/:id/close",async(request,reply)=>{
+    const denied=requireAdmin(request,reply);if(denied)return denied;
+    const params=z.strictObject({id:postgresBigintIdSchema}).safeParse(request.params);const parsed=membershipCloseSchema.safeParse(request.body);
+    if(!params.success||!parsed.success)return reply.code(400).send({message:"任职关闭信息无效"});
+    const client=await db.connect();
+    try{
+      await client.query("begin");
+      const before=await client.query<{id:string;personId:string;departmentId:string;groupId:string;effectiveFrom:string;effectiveTo:string|null}>(
+        `select id::text,person_id::text as "personId",department_id::text as "departmentId",group_id::text as "groupId",
+                effective_from::text as "effectiveFrom",effective_to::text as "effectiveTo"
+           from org_memberships where id=$1 for update`,
+        [params.data.id],
+      );
+      if(!before.rowCount){await client.query("rollback");return reply.code(404).send({message:"人员任职不存在"});}
+      const current=before.rows[0]!;
+      if(current.effectiveTo){await client.query("rollback");return reply.code(409).send({message:"人员任职已经关闭"});}
+      if(parsed.data.effectiveOn<=current.effectiveFrom){await client.query("rollback");return reply.code(409).send({message:"离任生效日期必须晚于任职起始日期"});}
+      const closed=await client.query<{effectiveTo:string}>("update org_memberships set effective_to=$2::date-1 where id=$1 returning effective_to::text as \"effectiveTo\"",[params.data.id,parsed.data.effectiveOn]);
+      await client.query(
+        `insert into audit_logs(actor_user_id,action,entity_type,entity_id,before_data,after_data,ip_address)
+         values($1,'organization.assignment_closed','org_membership',$2,$3::jsonb,$4::jsonb,$5)`,
+        [request.currentUser!.id,params.data.id,JSON.stringify(current),JSON.stringify({...current,effectiveTo:closed.rows[0]!.effectiveTo,effectiveOn:parsed.data.effectiveOn,result:"succeeded"}),request.ip],
+      );
+      await client.query("commit");return{ok:true,effectiveTo:closed.rows[0]!.effectiveTo};
+    }catch(error){await client.query("rollback");if(["23514","P0001"].includes((error as{code?:string}).code??""))return reply.code(409).send({message:"任职截止日期与组织有效期冲突"});throw error;}finally{client.release();}
+  });
+  app.post("/api/admin/organization/responsibilities/:id/replace",async(request,reply)=>{
+    const denied=requireAdmin(request,reply);if(denied)return denied;
+    const params=z.strictObject({id:postgresBigintIdSchema}).safeParse(request.params);const parsed=responsibilityReplaceSchema.safeParse(request.body);
+    if(!params.success||!parsed.success)return reply.code(400).send({message:"负责人继任信息无效"});
+    const client=await db.connect();
+    try{
+      await client.query("begin");
+      const successor=await client.query("select id from people where id=$1",[parsed.data.successorPersonId]);
+      if(!successor.rowCount){await client.query("rollback");return reply.code(404).send({message:"继任负责人身份不存在"});}
+      const before=await client.query<{id:string;personId:string;orgUnitId:string;responsibilityType:"leader"|"supervisor";effectiveFrom:string;effectiveTo:string|null}>(
+        `select id::text,person_id::text as "personId",org_unit_id::text as "orgUnitId",responsibility_type as "responsibilityType",
+                effective_from::text as "effectiveFrom",effective_to::text as "effectiveTo"
+           from org_responsibilities where id=$1 for update`,
+        [params.data.id],
+      );
+      if(!before.rowCount){await client.query("rollback");return reply.code(404).send({message:"负责人职责不存在"});}
+      const current=before.rows[0]!;
+      if(current.effectiveTo){await client.query("rollback");return reply.code(409).send({message:"负责人职责已经结束"});}
+      if(parsed.data.effectiveOn<=current.effectiveFrom){await client.query("rollback");return reply.code(409).send({message:"继任生效日期必须晚于现任负责人起始日期"});}
+      if(parsed.data.successorPersonId===current.personId){await client.query("rollback");return reply.code(409).send({message:"继任负责人不能与现任负责人相同"});}
+      const closed=await client.query<{effectiveTo:string}>("update org_responsibilities set effective_to=$2::date-1 where id=$1 returning effective_to::text as \"effectiveTo\"",[params.data.id,parsed.data.effectiveOn]);
+      const created=await client.query<{id:string}>(
+        `insert into org_responsibilities(person_id,org_unit_id,responsibility_type,effective_from,created_by)
+         values($1,$2,$3,$4,$5) returning id::text`,
+        [parsed.data.successorPersonId,current.orgUnitId,current.responsibilityType,parsed.data.effectiveOn,request.currentUser!.id],
+      );
+      await client.query(
+        `insert into audit_logs(actor_user_id,action,entity_type,entity_id,before_data,after_data,ip_address)
+         values($1,'organization.responsibility_replaced','org_responsibility',$2,$3::jsonb,$4::jsonb,$5)`,
+        [request.currentUser!.id,params.data.id,JSON.stringify(current),JSON.stringify({effectiveOn:parsed.data.effectiveOn,predecessor:{...current,effectiveTo:closed.rows[0]!.effectiveTo},successor:{id:created.rows[0]!.id,personId:parsed.data.successorPersonId,orgUnitId:current.orgUnitId,responsibilityType:current.responsibilityType,effectiveFrom:parsed.data.effectiveOn,effectiveTo:null},result:"succeeded"}),request.ip],
+      );
+      await client.query("commit");return reply.code(201).send({id:created.rows[0]!.id,predecessorEffectiveTo:closed.rows[0]!.effectiveTo});
+    }catch(error){await client.query("rollback");if(["23P01","23514","23503","P0001"].includes((error as{code?:string}).code??""))return reply.code(409).send({message:"负责人继任必须连续且不能重叠"});throw error;}finally{client.release();}
   });
 }

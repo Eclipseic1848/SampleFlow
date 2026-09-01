@@ -1881,6 +1881,134 @@ test("组织创建与任职写入保持未配置单元停用并记录审计",asy
   });
 });
 
+test("系统管理员按生效日关闭任职并原子更换负责人",async()=>{
+  await withMigratedTestDatabase(async(database)=>{
+    const scenario=await seedAuthorizationScenario(database.url);
+    const setup=new Client({connectionString:database.url});await setup.connect();
+    try{
+      const membership=await setup.query<{id:string}>("select id::text from org_memberships where person_id=$1",[scenario.people[scenario.users.alice]]);
+      const responsibility=await setup.query<{id:string}>(
+        `select responsibility.id::text
+           from org_responsibilities responsibility
+           join org_units unit on unit.id=responsibility.org_unit_id
+          where responsibility.person_id=$1 and responsibility.responsibility_type='leader' and unit.name='甲组'`,
+        [scenario.people[scenario.users.leader]],
+      );
+      const supervisorResponsibility=await setup.query<{id:string}>(
+        `select responsibility.id::text
+           from org_responsibilities responsibility
+           join org_units unit on unit.id=responsibility.org_unit_id
+          where responsibility.person_id=$1 and responsibility.responsibility_type='supervisor' and unit.name='甲部'`,
+        [scenario.people[scenario.users.supervisor]],
+      );
+      const units=await setup.query<{id:string;name:string}>("select id::text,name from org_units where name=any($1::text[])",[["乙部","乙组"]]);
+      const unitIds=Object.fromEntries(units.rows.map((unit)=>[unit.name,unit.id]));
+      const beforeEvents=await setup.query(
+        `select salesperson_person_id::text,department_unit_id::text,group_unit_id::text,leader_person_id::text,supervisor_person_id::text
+           from performance_events order by id`,
+      );
+      assert.equal(beforeEvents.rowCount,3);
+
+      await withTestApi(database.url,async(app)=>{
+        const headers=await loginWriteHeaders(app,"scope_admin");
+        const unauthenticated=await app.inject({method:"POST",url:`/api/admin/organization/memberships/${membership.rows[0]!.id}/close`,payload:{effectiveOn:"2026-09-01"}});
+        assert.equal(unauthenticated.statusCode,401,unauthenticated.body);
+        const businessHeaders=await loginWriteHeaders(app,"scope_assistant");
+        const forbidden=await app.inject({method:"POST",url:`/api/admin/organization/memberships/${membership.rows[0]!.id}/close`,headers:businessHeaders,payload:{effectiveOn:"2026-09-01"}});
+        assert.equal(forbidden.statusCode,403,forbidden.body);
+        const invalidCloseDate=await app.inject({method:"POST",url:`/api/admin/organization/memberships/${membership.rows[0]!.id}/close`,headers,payload:{effectiveOn:"2026-01-01"}});
+        assert.equal(invalidCloseDate.statusCode,409,invalidCloseDate.body);
+        const closed=await app.inject({
+          method:"POST",url:`/api/admin/organization/memberships/${membership.rows[0]!.id}/close`,headers,
+          payload:{effectiveOn:"2026-09-01"},
+        });
+        assert.equal(closed.statusCode,200,closed.body);
+        const closedAgain=await app.inject({
+          method:"POST",url:`/api/admin/organization/memberships/${membership.rows[0]!.id}/close`,headers,
+          payload:{effectiveOn:"2026-09-01"},
+        });
+        assert.equal(closedAgain.statusCode,409,closedAgain.body);
+
+        const missingSuccessor=await app.inject({
+          method:"POST",url:`/api/admin/organization/responsibilities/${responsibility.rows[0]!.id}/replace`,headers,
+          payload:{effectiveOn:"2026-09-01"},
+        });
+        assert.equal(missingSuccessor.statusCode,400,missingSuccessor.body);
+        const sameSuccessor=await app.inject({
+          method:"POST",url:`/api/admin/organization/responsibilities/${responsibility.rows[0]!.id}/replace`,headers,
+          payload:{successorPersonId:scenario.people[scenario.users.leader],effectiveOn:"2026-09-01"},
+        });
+        assert.equal(sameSuccessor.statusCode,409,sameSuccessor.body);
+        const unknownSuccessor=await app.inject({
+          method:"POST",url:`/api/admin/organization/responsibilities/${responsibility.rows[0]!.id}/replace`,headers,
+          payload:{successorPersonId:"9223372036854775807",effectiveOn:"2026-09-01"},
+        });
+        assert.equal(unknownSuccessor.statusCode,404,unknownSuccessor.body);
+        const replacements=await Promise.all([1,2].map(()=>app.inject({
+          method:"POST",url:`/api/admin/organization/responsibilities/${responsibility.rows[0]!.id}/replace`,headers,
+          payload:{successorPersonId:scenario.people[scenario.users.assistant],effectiveOn:"2026-09-01"},
+        })));
+        assert.deepEqual(replacements.map((response)=>response.statusCode).sort(),[201,409]);
+        const supervisorReplaced=await app.inject({
+          method:"POST",url:`/api/admin/organization/responsibilities/${supervisorResponsibility.rows[0]!.id}/replace`,headers,
+          payload:{successorPersonId:scenario.people[scenario.users.assistantLeader],effectiveOn:"2026-09-01"},
+        });
+        assert.equal(supervisorReplaced.statusCode,201,supervisorReplaced.body);
+        const transferred=await app.inject({
+          method:"POST",url:"/api/admin/organization/assignments",headers,
+          payload:{personId:Number(scenario.people[scenario.users.bob]),departmentId:Number(unitIds["乙部"]),groupId:Number(unitIds["乙组"]),leaderPersonId:Number(scenario.people[scenario.users.carol]),supervisorPersonId:Number(scenario.people[scenario.users.carol]),effectiveFrom:"2026-09-01",effectiveTo:null,closePrevious:true},
+        });
+        assert.equal(transferred.statusCode,201,transferred.body);
+      });
+
+      const assignments=await setup.query<{effective_to:string|null}>("select effective_to::text from org_memberships where id=$1",[membership.rows[0]!.id]);
+      assert.equal(assignments.rows[0]!.effective_to,"2026-08-31");
+      const responsibilities=await setup.query<{person_id:string;effective_from:string;effective_to:string|null}>(
+        `select person_id::text,effective_from::text,effective_to::text
+           from org_responsibilities where org_unit_id=(select org_unit_id from org_responsibilities where id=$1)
+            and responsibility_type='leader' order by effective_from`,
+        [responsibility.rows[0]!.id],
+      );
+      assert.deepEqual(responsibilities.rows,[
+        {person_id:scenario.people[scenario.users.leader],effective_from:"2026-01-01",effective_to:"2026-08-31"},
+        {person_id:scenario.people[scenario.users.assistant],effective_from:"2026-09-01",effective_to:null},
+      ]);
+      const supervisorResponsibilities=await setup.query<{person_id:string;effective_from:string;effective_to:string|null}>(
+        `select person_id::text,effective_from::text,effective_to::text
+           from org_responsibilities where org_unit_id=(select org_unit_id from org_responsibilities where id=$1)
+            and responsibility_type='supervisor' order by effective_from`,
+        [supervisorResponsibility.rows[0]!.id],
+      );
+      assert.deepEqual(supervisorResponsibilities.rows,[
+        {person_id:scenario.people[scenario.users.supervisor],effective_from:"2026-01-01",effective_to:"2026-08-31"},
+        {person_id:scenario.people[scenario.users.assistantLeader],effective_from:"2026-09-01",effective_to:null},
+      ]);
+      const afterEvents=await setup.query(
+        `select salesperson_person_id::text,department_unit_id::text,group_unit_id::text,leader_person_id::text,supervisor_person_id::text
+           from performance_events order by id`,
+      );
+      assert.deepEqual(afterEvents.rows,beforeEvents.rows);
+      const audits=await setup.query<{action:string;entity_id:string;actor_user_id:string;before_data:unknown;after_data:{effectiveTo?:string;effectiveOn:string;predecessor?:{effectiveTo:string};successor?:{personId:string;effectiveFrom:string};result:string};created_at:string}>(
+        `select action,entity_id,actor_user_id::text,before_data,after_data,created_at::text from audit_logs
+          where action=any($1::text[]) order by id`,
+        [["organization.assignment_closed","organization.responsibility_replaced","organization.assignment_closed_for_transfer","organization.assignment_created"]],
+      );
+      assert.equal(audits.rows.length,5);
+      assert.equal(audits.rows.every((audit)=>audit.actor_user_id===scenario.users.admin&&Boolean(audit.created_at)),true);
+      assert.equal(audits.rows.every((audit)=>audit.after_data.result==="succeeded"&&audit.after_data.effectiveOn==="2026-09-01"),true);
+      const closedAudit=audits.rows.find((audit)=>audit.action==="organization.assignment_closed")!;
+      assert.notEqual(closedAudit.before_data,null);assert.equal(closedAudit.after_data.effectiveTo,"2026-08-31");
+      const leaderAudit=audits.rows.find((audit)=>audit.action==="organization.responsibility_replaced"&&audit.entity_id===responsibility.rows[0]!.id)!;
+      assert.notEqual(leaderAudit.before_data,null);assert.equal(leaderAudit.after_data.predecessor!.effectiveTo,"2026-08-31");
+      assert.equal(leaderAudit.after_data.successor!.effectiveFrom,"2026-09-01");assert.equal(leaderAudit.after_data.successor!.personId,scenario.people[scenario.users.assistant]);
+      const supervisorAudit=audits.rows.find((audit)=>audit.action==="organization.responsibility_replaced"&&audit.entity_id===supervisorResponsibility.rows[0]!.id)!;
+      assert.notEqual(supervisorAudit.before_data,null);assert.equal(supervisorAudit.after_data.predecessor!.effectiveTo,"2026-08-31");
+      assert.equal(supervisorAudit.after_data.successor!.personId,scenario.people[scenario.users.assistantLeader]);
+      assert.notEqual(audits.rows.find((audit)=>audit.action==="organization.assignment_closed_for_transfer")!.before_data,null);
+    }finally{await setup.end();}
+  });
+});
+
 test("四层正式报表页面与 CSV 同口径、同权限并留下无正文审计", async () => {
   await withMigratedTestDatabase(async (database) => {
     const scenario = await seedAuthorizationScenario(database.url);

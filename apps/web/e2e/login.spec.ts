@@ -667,7 +667,9 @@ test("系统管理员通过页面办理组织异动并保留前后有效期", as
     await seedTestUser(database.url,{username:"e2e_org_assistant",displayName:"E2E 异动销售助理",password:"OrgAssistant@123",roleCode:"sales_assistant",roleName:"销售助理"});
     await seedTestUser(database.url,{username:"e2e_org_member",displayName:"E2E 异动业务员",password:"OrgMember@123",roleCode:"salesperson",roleName:"业务员"});
     await seedTestUser(database.url,{username:"e2e_org_leader",displayName:"E2E 异动组长",password:"OrgLeader@123",roleCode:"sales_leader",roleName:"业务员组长"});
+    await seedTestUser(database.url,{username:"e2e_org_successor",displayName:"E2E 继任组长",password:"OrgSuccessor@123",roleCode:"sales_leader",roleName:"业务员组长"});
     await seedTestUser(database.url,{username:"e2e_org_supervisor",displayName:"E2E 异动主管",password:"OrgSupervisor@123",roleCode:"sales_supervisor",roleName:"业务主管"});
+    await seedTestUser(database.url,{username:"e2e_org_supervisor_successor",displayName:"E2E 继任主管",password:"OrgSupervisorSuccessor@123",roleCode:"sales_supervisor",roleName:"业务主管"});
 
       await page.goto("/");
       await page.getByLabel("账号").fill("e2e_org_admin");
@@ -713,6 +715,41 @@ test("系统管理员通过页面办理组织异动并保留前后有效期", as
       const newAssignment=page.locator(".compact-list > div").filter({hasText:"E2E 异动业务员"}).filter({hasText:"E2E 新部门 / E2E 新小组"});
       await expect(oldAssignment).toContainText("2026-07-01 至 2026-07-31");
       await expect(newAssignment).toContainText("2026-08-01 起");
+
+      let failOrganizationRefresh=true;
+      await page.route("**/api/organization",async(route)=>{
+        if(failOrganizationRefresh&&route.request().method()==="GET"){
+          failOrganizationRefresh=false;
+          await route.fulfill({status:503,contentType:"application/json",body:JSON.stringify({message:"组织列表暂不可用"})});
+          return;
+        }
+        await route.continue();
+      });
+      await newAssignment.getByRole("button",{name:"关闭任职"}).click();
+      const closeDialog=page.getByRole("dialog",{name:"关闭人员任职"});
+      await closeDialog.getByLabel("离任生效日期").fill("2026-10-01");
+      await closeDialog.getByRole("button",{name:"确认关闭"}).click();
+      await expect(newAssignment).toContainText("2026-08-01 至 2026-09-30");
+      await expect(page.getByRole("alert")).toHaveText("任职已关闭，但组织列表刷新失败，请刷新页面重试。");
+      await expect(newAssignment.getByRole("button",{name:"关闭任职"})).toHaveCount(0);
+
+      const currentLeader=page.locator(".responsibility-list > div").filter({hasText:"E2E 新小组"}).filter({hasText:"E2E 异动组长"}).filter({hasText:"2026-08-01 起"});
+      await currentLeader.getByRole("button",{name:"更换负责人"}).click();
+      const successorDialog=page.getByRole("dialog",{name:"更换负责人"});
+      await successorDialog.getByLabel("继任负责人").selectOption({label:"E2E 继任组长（e2e_org_successor）"});
+      await successorDialog.getByLabel("继任生效日期").fill("2026-09-01");
+      await successorDialog.getByRole("button",{name:"确认继任"}).click();
+      await expect(page.locator(".responsibility-list > div").filter({hasText:"E2E 新小组"}).filter({hasText:"E2E 异动组长"})).toContainText("2026-08-01 至 2026-08-31");
+      await expect(page.locator(".responsibility-list > div").filter({hasText:"E2E 新小组"}).filter({hasText:"E2E 继任组长"})).toContainText("2026-09-01 起");
+
+      const currentSupervisor=page.locator(".responsibility-list > div").filter({hasText:"E2E 新部门"}).filter({hasText:"E2E 异动主管"}).filter({hasText:"2026-08-01 起"});
+      await currentSupervisor.getByRole("button",{name:"更换负责人"}).click();
+      const supervisorDialog=page.getByRole("dialog",{name:"更换负责人"});
+      await supervisorDialog.getByLabel("继任负责人").selectOption({label:"E2E 继任主管（e2e_org_supervisor_successor）"});
+      await supervisorDialog.getByLabel("继任生效日期").fill("2026-09-01");
+      await supervisorDialog.getByRole("button",{name:"确认继任"}).click();
+      await expect(page.locator(".responsibility-list > div").filter({hasText:"E2E 新部门"}).filter({hasText:"E2E 异动主管"})).toContainText("2026-08-01 至 2026-08-31");
+      await expect(page.locator(".responsibility-list > div").filter({hasText:"E2E 新部门"}).filter({hasText:"E2E 继任主管"})).toContainText("2026-09-01 起");
 
       await page.getByRole("button",{name:"退出登录"}).click();
       await expect(page.getByRole("heading",{name:"登录系统"})).toBeVisible();
