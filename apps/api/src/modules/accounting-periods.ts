@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { Database } from "../db.js";
 import { standardBusinessRegionName } from "../domain/business-regions.js";
 import { businessDate } from "../domain/business-time.js";
+import { postgresBigintIdSchema } from "../validation.js";
 import { hasAnyRole, type CurrentUser } from "./auth.js";
 import { recordEventAnalysisDimensions } from "./event-analysis-dimensions.js";
 import { OrganizationResolutionError, resolveOrganization } from "./organization.js";
@@ -12,7 +13,7 @@ const monthParamSchema = z.object({ month: z.string().regex(/^\d{4}-\d{2}$/) });
 const noteSchema = z.strictObject({ note: z.string().trim().min(1).max(500) });
 const correctionSchema = z.strictObject({
   periodMonth: z.string().regex(/^\d{4}-\d{2}$/),
-  orderId: z.coerce.number().int().positive(),
+  orderId: postgresBigintIdSchema,
   eventType: z.enum(["revenue_change", "pause", "restart", "first_include"]),
   occurredOn: z.iso.date(),
   reason: z.string().trim().min(1).max(500),
@@ -21,13 +22,13 @@ const correctionSchema = z.strictObject({
   customerUnit: z.string().trim().min(1).max(300),
   analysisDimensionEvidence: z.string().trim().min(1).max(1000),
 });
-const idSchema = z.object({ id: z.coerce.number().int().positive() });
+const idSchema = z.object({ id: postgresBigintIdSchema });
 const correctionListSchema = z.object({
   status: z.enum(["pending", "approved", "rejected", "consumed", "revoked"]).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(30),
 });
 const reviewSchema = z.strictObject({
-  orderId: z.coerce.number().int().positive(),
+  orderId: postgresBigintIdSchema,
   lifecycleState: z.enum(["active", "paused", "zero"]),
   currentRevenue: z.number().finite().min(0).max(99_999_999_999.99),
   conclusion: z.string().trim().min(1).max(500),
@@ -98,7 +99,7 @@ export async function assertAccountingPeriodOpen(client: QueryClient, month: str
   if (period.status === "closed") throw new AccountingPeriodError(`记账期间已关闭：${month.slice(0, 7)}`);
 }
 
-export async function lockApprovedCorrection(client: PoolClient, correctionRequestId: number, orderId: number, eventType: string, actorPersonId: string, now: Date): Promise<ApprovedCorrection> {
+export async function lockApprovedCorrection(client: PoolClient, correctionRequestId: string, orderId: string, eventType: string, actorPersonId: string, now: Date): Promise<ApprovedCorrection> {
   const result = await client.query<{
     id: string; period_month: string; occurred_on: string; status: string; expires_at: Date | null;
     reviewed_by_person_id: string | null; business_region_code: string | null;

@@ -1,4 +1,4 @@
-name: P0 quality gate
+name: SampleFlow quality gate
 
 on:
   pull_request:

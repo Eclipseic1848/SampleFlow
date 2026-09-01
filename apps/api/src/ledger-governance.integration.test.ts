@@ -52,13 +52,13 @@ test("正常调整由服务端确定操作日并按稳定顺序幂等追加不�
     const now=new Date("2026-09-01T01:02:03.000Z");
     await withTestApi(database.url,async(app)=>{
       const headers=await writeHeaders(app,"ledger_assistant");
-      const invalidBusinessRegion=await app.inject({method:"POST",url:"/api/performance/orders",headers,payload:{orderNo:"CHAIN-BAD-REGION",customerName:"错误区域客户",customerUnit:"测试单位",businessRegionSourceText:"未知区域原文",businessRegionCode:"CN-UNKNOWN",salespersonPersonId:Number(scenario.memberPersonId),sourceReceivedOn:"2026-08-15",amount:1,reason:"非法业务区域"}});
+      const invalidBusinessRegion=await app.inject({method:"POST",url:"/api/performance/orders",headers,payload:{orderNo:"CHAIN-BAD-REGION",customerName:"错误区域客户",customerUnit:"测试单位",businessRegionSourceText:"未知区域原文",businessRegionCode:"CN-UNKNOWN",salespersonPersonId:scenario.memberPersonId,sourceReceivedOn:"2026-08-15",amount:1,reason:"非法业务区域"}});
       assert.equal(invalidBusinessRegion.statusCode,400,invalidBusinessRegion.body);
-      const normalizedOrderNo=await app.inject({method:"POST",url:"/api/performance/orders",headers,payload:{orderNo:" CHAIN-NORMALIZED",customerName:"编号客户",customerUnit:"测试单位",businessRegionSourceText:"江苏线索",businessRegionCode:"CN-JS",salespersonPersonId:Number(scenario.memberPersonId),sourceReceivedOn:"2026-08-15",amount:1,reason:"编号不得清洗"}});
+      const normalizedOrderNo=await app.inject({method:"POST",url:"/api/performance/orders",headers,payload:{orderNo:" CHAIN-NORMALIZED",customerName:"编号客户",customerUnit:"测试单位",businessRegionSourceText:"江苏线索",businessRegionCode:"CN-JS",salespersonPersonId:scenario.memberPersonId,sourceReceivedOn:"2026-08-15",amount:1,reason:"编号不得清洗"}});
       assert.equal(normalizedOrderNo.statusCode,400,normalizedOrderNo.body);
-      const externalTrade=await app.inject({method:"POST",url:"/api/performance/orders",headers,payload:{orderNo:"CHAIN-EXTERNAL-TRADE",customerName:"外贸客户",customerUnit:"测试单位",businessRegionSourceText:"外贸线索",businessRegionCode:"EXT-TRADE",salespersonPersonId:Number(scenario.memberPersonId),sourceReceivedOn:"2026-08-15",amount:1,reason:"外贸区域"}});
+      const externalTrade=await app.inject({method:"POST",url:"/api/performance/orders",headers,payload:{orderNo:"CHAIN-EXTERNAL-TRADE",customerName:"外贸客户",customerUnit:"测试单位",businessRegionSourceText:"外贸线索",businessRegionCode:"EXT-TRADE",salespersonPersonId:scenario.memberPersonId,sourceReceivedOn:"2026-08-15",amount:1,reason:"外贸区域"}});
       assert.equal(externalTrade.statusCode,201,externalTrade.body);
-      const created=await app.inject({method:"POST",url:"/api/performance/orders",headers,payload:{orderNo:"CHAIN-110",customerName:"链路客户",customerUnit:"测试单位",businessRegionSourceText:"江苏原始线索",businessRegionCode:"CN-JS",salespersonPersonId:Number(scenario.memberPersonId),sourceReceivedOn:"2026-08-15",amount:110,reason:"首次录入"}});
+      const created=await app.inject({method:"POST",url:"/api/performance/orders",headers,payload:{orderNo:"CHAIN-110",customerName:"链路客户",customerUnit:"测试单位",businessRegionSourceText:"江苏原始线索",businessRegionCode:"CN-JS",salespersonPersonId:scenario.memberPersonId,sourceReceivedOn:"2026-08-15",amount:110,reason:"首次录入"}});
       assert.equal(created.statusCode,201,created.body);
       const orderId=created.json().id;
       const changedDimensions=new Client({connectionString:database.url});await changedDimensions.connect();
@@ -136,7 +136,7 @@ test("关闭期间仅允许经人事批准的单次范围更正且普通跨月�
       const leader=await writeHeaders(app,"ledger_assistant_leader");
       const hr=await writeHeaders(app,"ledger_hr");
       const create=async(orderNo:string)=>{
-        const response=await app.inject({method:"POST",url:"/api/performance/orders",headers:assistant,payload:{orderNo,customerName:"月结客户",customerUnit:"测试单位",businessRegionSourceText:"江苏原文",businessRegionCode:"CN-JS",salespersonPersonId:Number(scenario.memberPersonId),sourceReceivedOn:"2026-08-15",amount:100,reason:"八月入账"}});
+        const response=await app.inject({method:"POST",url:"/api/performance/orders",headers:assistant,payload:{orderNo,customerName:"月结客户",customerUnit:"测试单位",businessRegionSourceText:"江苏原文",businessRegionCode:"CN-JS",salespersonPersonId:scenario.memberPersonId,sourceReceivedOn:"2026-08-15",amount:100,reason:"八月入账"}});
         assert.equal(response.statusCode,201,response.body);return response.json().id as string;
       };
       const normalOrderId=await create("PERIOD-NORMAL");
@@ -155,24 +155,24 @@ test("关闭期间仅允许经人事批准的单次范围更正且普通跨月�
       assert.equal(sameActorClose.statusCode,409,sameActorClose.body);
       const closed=await app.inject({method:"POST",url:"/api/accounting-periods/2026-08/close",headers:hr,payload:{note:"人事关闭八月"}});
       assert.equal(closed.statusCode,200,closed.body);
-      const backfill=await app.inject({method:"POST",url:"/api/performance/orders",headers:assistant,payload:{orderNo:"PERIOD-BLOCKED",customerName:"禁止回填",customerUnit:"测试单位",businessRegionSourceText:"江苏原文",businessRegionCode:"CN-JS",salespersonPersonId:Number(scenario.memberPersonId),sourceReceivedOn:"2026-08-20",amount:50,reason:"关闭月补录"}});
+      const backfill=await app.inject({method:"POST",url:"/api/performance/orders",headers:assistant,payload:{orderNo:"PERIOD-BLOCKED",customerName:"禁止回填",customerUnit:"测试单位",businessRegionSourceText:"江苏原文",businessRegionCode:"CN-JS",salespersonPersonId:scenario.memberPersonId,sourceReceivedOn:"2026-08-20",amount:50,reason:"关闭月补录"}});
       assert.equal(backfill.statusCode,409,backfill.body);
       assert.match(backfill.body,/记账期间已关闭/);
 
       const paused=await app.inject({method:"POST",url:`/api/performance/orders/${normalOrderId}/events`,headers:assistant,payload:{type:"pause",reason:"九月正常暂停",idempotencyKey:"period-normal-pause"}});
       assert.equal(paused.statusCode,201,paused.body);
 
-      const requested=await app.inject({method:"POST",url:"/api/accounting-corrections",headers:leader,payload:{periodMonth:"2026-08",orderId:Number(correctionOrderId),eventType:"revenue_change",occurredOn:"2026-08-20",reason:"八月原金额核对有误",...CORRECTION_DIMENSIONS}});
+      const requested=await app.inject({method:"POST",url:"/api/accounting-corrections",headers:leader,payload:{periodMonth:"2026-08",orderId:correctionOrderId,eventType:"revenue_change",occurredOn:"2026-08-20",reason:"八月原金额核对有误",...CORRECTION_DIMENSIONS}});
       assert.equal(requested.statusCode,201,requested.body);
       const requestId=requested.json().id as string;
       const samePersonApproval=await app.inject({method:"POST",url:`/api/accounting-corrections/${requestId}/approve`,headers:leader,payload:{note:"多角色不能绕过职责分离"}});
       assert.equal(samePersonApproval.statusCode,409,samePersonApproval.body);
       const approved=await app.inject({method:"POST",url:`/api/accounting-corrections/${requestId}/approve`,headers:hr,payload:{note:"同意单笔更正"}});
       assert.equal(approved.statusCode,200,approved.body);
-      const forbidden=await app.inject({method:"POST",url:`/api/performance/orders/${correctionOrderId}/events`,headers:assistant,payload:{type:"revenue_change",newAmount:90,reason:"执行更正",idempotencyKey:"correction-once",correctionRequestId:Number(requestId)}});
+      const forbidden=await app.inject({method:"POST",url:`/api/performance/orders/${correctionOrderId}/events`,headers:assistant,payload:{type:"revenue_change",newAmount:90,reason:"执行更正",idempotencyKey:"correction-once",correctionRequestId:requestId}});
       assert.equal(forbidden.statusCode,403,forbidden.body);
 
-      const correctionPayload={type:"revenue_change",newAmount:90,reason:"执行更正",idempotencyKey:"correction-once",correctionRequestId:Number(requestId)};
+      const correctionPayload={type:"revenue_change",newAmount:90,reason:"执行更正",idempotencyKey:"correction-once",correctionRequestId:requestId};
       const reviewerExecution=await app.inject({method:"POST",url:`/api/performance/orders/${correctionOrderId}/events`,headers:hr,payload:correctionPayload});
       assert.equal(reviewerExecution.statusCode,409,reviewerExecution.body);
       const concurrent=await Promise.all([
@@ -287,7 +287,7 @@ test("更正申请被拒绝、撤销或批准超过二十四小时后均不能�
       let leader=await writeHeaders(app,"ledger_assistant_leader");
       const hr=await writeHeaders(app,"ledger_hr");
       const create=async(orderNo:string)=>{
-        const response=await app.inject({method:"POST",url:"/api/performance/orders",headers:assistant,payload:{orderNo,customerName:"更正治理客户",customerUnit:"测试单位",businessRegionSourceText:"江苏原文",businessRegionCode:"CN-JS",salespersonPersonId:Number(scenario.memberPersonId),sourceReceivedOn:"2026-08-15",amount:100,reason:"八月入账"}});
+        const response=await app.inject({method:"POST",url:"/api/performance/orders",headers:assistant,payload:{orderNo,customerName:"更正治理客户",customerUnit:"测试单位",businessRegionSourceText:"江苏原文",businessRegionCode:"CN-JS",salespersonPersonId:scenario.memberPersonId,sourceReceivedOn:"2026-08-15",amount:100,reason:"八月入账"}});
         assert.equal(response.statusCode,201,response.body);return response.json().id as string;
       };
       const rejectedOrder=await create("CORRECTION-REJECTED");
@@ -297,10 +297,10 @@ test("更正申请被拒绝、撤销或批准超过二十四小时后均不能�
       assert.equal((await app.inject({method:"POST",url:"/api/accounting-periods/2026-08/close",headers:hr,payload:{note:"八月关账"}})).statusCode,200);
 
       const request=async(orderId:string,reason:string)=>{
-        const response=await app.inject({method:"POST",url:"/api/accounting-corrections",headers:leader,payload:{periodMonth:"2026-08",orderId:Number(orderId),eventType:"revenue_change",occurredOn:"2026-08-20",reason,...CORRECTION_DIMENSIONS}});
+        const response=await app.inject({method:"POST",url:"/api/accounting-corrections",headers:leader,payload:{periodMonth:"2026-08",orderId,eventType:"revenue_change",occurredOn:"2026-08-20",reason,...CORRECTION_DIMENSIONS}});
         assert.equal(response.statusCode,201,response.body);return response.json().id as string;
       };
-      const execute=async(orderId:string,requestId:string,key:string)=>app.inject({method:"POST",url:`/api/performance/orders/${orderId}/events`,headers:leader,payload:{type:"revenue_change",newAmount:90,reason:"执行更正",idempotencyKey:key,correctionRequestId:Number(requestId)}});
+      const execute=async(orderId:string,requestId:string,key:string)=>app.inject({method:"POST",url:`/api/performance/orders/${orderId}/events`,headers:leader,payload:{type:"revenue_change",newAmount:90,reason:"执行更正",idempotencyKey:key,correctionRequestId:requestId}});
 
       const rejectedId=await request(rejectedOrder,"申请后拒绝");
       assert.equal((await app.inject({method:"POST",url:`/api/accounting-corrections/${rejectedId}/reject`,headers:hr,payload:{note:"证据不足"}})).statusCode,200);
@@ -364,7 +364,7 @@ test("历史待核订单保留原始事件语义并经组长核对和人事批�
 
       const requested=await app.inject({
         method:"POST",url:"/api/historical-order-reviews",headers:leader,
-        payload:{orderId:Number(orderId),lifecycleState:"active",currentRevenue:80,conclusion:"核对为当前有效订单",evidence:"轻流订单详情及客户回款凭证",reason:"历史来源缺少初始入账行"},
+        payload:{orderId,lifecycleState:"active",currentRevenue:80,conclusion:"核对为当前有效订单",evidence:"轻流订单详情及客户回款凭证",reason:"历史来源缺少初始入账行"},
       });
       assert.equal(requested.statusCode,201,requested.body);
       const reviewId=requested.json().id as string;

@@ -52,10 +52,10 @@ const analysisDrilldownQuerySchema = z.discriminatedUnion("level", [
   }),
 ]);
 const groupAchievementQuerySchema = dashboardQuerySchema.extend({
-  groupId: z.coerce.number().int().positive(),
+  groupId: postgresBigintIdSchema,
 });
 const departmentAchievementQuerySchema = dashboardQuerySchema.extend({
-  departmentId: z.coerce.number().int().positive(),
+  departmentId: postgresBigintIdSchema,
 });
 const ORDER_PAGE_SIZE = 50;
 const ANALYSIS_CUSTOMER_PAGE_SIZE = 50;
@@ -150,7 +150,7 @@ const createOrderSchema = z.strictObject({
   customerUnit: z.string().trim().min(1).max(300),
   businessRegionSourceText: z.string().trim().min(1).max(100),
   businessRegionCode: z.string().refine((value) => standardBusinessRegionName(value) !== undefined, "必须选择标准业务区域"),
-  salespersonPersonId: z.coerce.number().int().positive(),
+  salespersonPersonId: postgresBigintIdSchema,
   serviceType: z.string().trim().max(200).optional().default(""),
   sourceReceivedOn: dateSchema,
   amount: moneySchema,
@@ -160,7 +160,7 @@ const createOrderSchema = z.strictObject({
 const eventBase = {
   reason: z.string().trim().min(1).max(500),
   idempotencyKey: z.string().trim().min(8).max(100),
-  correctionRequestId: z.coerce.number().int().positive().optional(),
+  correctionRequestId: postgresBigintIdSchema.optional(),
 };
 const eventSchema = z.discriminatedUnion("type", [
   z.strictObject({ type: z.literal("revenue_change"), newAmount: moneySchema, ...eventBase }),
@@ -932,7 +932,7 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
 
   app.get("/api/performance/formal-reports/:goalId", async (request, reply) => {
     if (!request.currentUser) return reply.code(401).send({ message: "尚未登录" });
-    const params = z.object({ goalId: z.coerce.number().int().positive() }).safeParse(request.params);
+    const params = z.object({ goalId: postgresBigintIdSchema }).safeParse(request.params);
     if (!params.success) return reply.code(400).send({ message: "目标标识无效" });
     const result = await loadFormalReport(db, request.currentUser, params.data.goalId, businessDate(clock()));
     if (!result.ok) return reply.code(result.statusCode).send(result.body);
@@ -1454,7 +1454,7 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
     if (!request.currentUser) return reply.code(401).send({ message: "尚未登录" });
     const access = await resolvePerformanceAccess(db, request.currentUser);
     if (!canReadPerformance(access)) return reply.code(403).send({ message: "当前角色没有业务查看权限" });
-    const params = z.object({ id: z.coerce.number().int().positive() }).safeParse(request.params);
+    const params = z.object({ id: postgresBigintIdSchema }).safeParse(request.params);
     if (!params.success) return reply.code(400).send({ message: "订单标识无效" });
     const result = await db.query(
       `select e.id::text, e.event_type as "eventType", e.delta_amount::text as "deltaAmount",
@@ -1546,7 +1546,7 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
 
   app.post("/api/performance/orders/:id/events", async (request, reply) => {
     if (!request.currentUser) return reply.code(401).send({ message: "尚未登录" });
-    const params = z.object({ id: z.coerce.number().int().positive() }).safeParse(request.params);
+    const params = z.object({ id: postgresBigintIdSchema }).safeParse(request.params);
     const parsed = eventSchema.safeParse(request.body);
     if (!params.success || !parsed.success) return reply.code(400).send({ message: "调整信息不完整或格式无效" });
     if (parsed.data.correctionRequestId) {

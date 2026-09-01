@@ -23,6 +23,13 @@ function dateCell(value: unknown): string {
   return textCell(value);
 }
 
+function bigintIdCell(value: unknown): string | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (typeof value === "string") return value;
+  if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) return String(value);
+  return "";
+}
+
 export function mapImportWorksheetRows(data: readonly (readonly unknown[])[], layout: ImportLayout): ImportSourceRow[] {
   const header = data[0];
   if (!header) throw new ImportWorkbookError(`“${layout.sheetName}”工作表为空`);
@@ -46,11 +53,12 @@ export function mapImportWorksheetRows(data: readonly (readonly unknown[])[], la
       : undefined;
     const rawBusinessSequence = layout.columnMapping.businessSequence ? value(row, "businessSequence") : undefined;
     const rawCorrectionRequestId = layout.columnMapping.correctionRequestId ? value(row, "correctionRequestId") : undefined;
+    const correctionRequestId = bigintIdCell(rawCorrectionRequestId);
     return [{
       sheet: layout.sheetName,
       rowNumber,
       ...(typeof rawBusinessSequence === "number" ? { businessSequence: rawBusinessSequence } : {}),
-      ...(typeof rawCorrectionRequestId === "number" ? { correctionRequestId: rawCorrectionRequestId } : {}),
+      ...(correctionRequestId === undefined ? {} : { correctionRequestId }),
       ...(sourceRecordId ? { sourceRecordId } : {}),
       orderNo: textCell(value(row, "orderNo")),
       occurredOn: dateCell(value(row, "occurredOn")),

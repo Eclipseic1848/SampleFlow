@@ -15,7 +15,25 @@ export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {})
     const csrfToken = readCsrfToken();
     if (csrfToken) headers.set("x-csrf-token", csrfToken);
   }
-  return fetch(input, { ...init, headers });
+  const response = await fetch(input, { ...init, headers });
+  if (response.status === 401 && !String(input).startsWith("/api/auth/login")) {
+    window.dispatchEvent(new Event("sampleflow:session-expired"));
+  }
+  return response;
+}
+
+export async function downloadApiFile(input: RequestInfo | URL): Promise<boolean> {
+  const response = await apiFetch(input);
+  if (response.status === 401) return false;
+  if (!response.ok) throw new Error("导出失败，请重试。");
+  const filename = /filename="?([^";]+)"?/i.exec(response.headers.get("content-disposition") ?? "")?.[1] ?? "sampleflow-export.csv";
+  const objectUrl = URL.createObjectURL(await response.blob());
+  const link = document.createElement("a");
+  link.href = objectUrl;
+  link.download = filename;
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+  return true;
 }
 
 export async function readResponseJson<T>(response:Response,fallback:string):Promise<T>{

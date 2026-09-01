@@ -26,6 +26,9 @@ test("账号弹窗约束键盘焦点，并在写入失败后保留输入安全�
     roleCode: "system_admin",
     roleName: "系统管理员",
   });
+  const setup=new Client({connectionString:database.url});await setup.connect();
+  await setup.query("insert into people(display_name,identity_source,source_key) values('E2E 精确标识人员','e2e','precise-id-person')");
+  await setup.end();
   await page.goto("/?page=accounts");
   await login(page, "e2e_access_admin");
 
@@ -45,11 +48,13 @@ test("账号弹窗约束键盘焦点，并在写入失败后保留输入安全�
   await expect(trigger).toBeFocused();
 
   let createMode: "known-failure" | "pass" | "uncertain" = "known-failure";
+  let createBody:Record<string,unknown>|null=null;
   let releaseKnownFailure!: () => void;
   const knownFailureGate = new Promise<void>((resolve) => { releaseKnownFailure = resolve; });
   await page.route("**/api/admin/users", async (route) => {
     if (route.request().method() === "POST" && createMode === "known-failure") {
       createMode = "pass";
+      createBody=route.request().postDataJSON() as Record<string,unknown>;
       await knownFailureGate;
       await route.fulfill({ status: 503, contentType: "text/plain", body: "Service unavailable" });
       return;
@@ -67,6 +72,7 @@ test("账号弹窗约束键盘焦点，并在写入失败后保留输入安全�
   const retryDialog = page.getByRole("dialog", { name: "创建系统账号" });
   await retryDialog.getByLabel("登录账号").fill("e2e_access_created");
   await retryDialog.getByLabel("账号显示姓名").fill("E2E 重试保留输入");
+  await retryDialog.getByLabel("绑定已有人员（可选）").selectOption({label:"E2E 精确标识人员"});
   const retrySubmit = retryDialog.locator('button[type="submit"]');
   await retrySubmit.click();
   await expect(retrySubmit).toHaveAttribute("aria-busy", "true");
@@ -77,6 +83,7 @@ test("账号弹窗约束键盘焦点，并在写入失败后保留输入安全�
   await expect(retryDialog).toBeVisible();
   releaseKnownFailure();
   await expect(retryDialog.getByRole("alert")).toHaveText("创建账号失败，请重试。");
+  expect(typeof createBody?.personId).toBe("string");
   await expect(retryDialog.getByLabel("登录账号")).toHaveValue("e2e_access_created");
   await expect(retryDialog.getByLabel("账号显示姓名")).toHaveValue("E2E 重试保留输入");
   await retryDialog.getByRole("button", { name: "创建账号" }).click();

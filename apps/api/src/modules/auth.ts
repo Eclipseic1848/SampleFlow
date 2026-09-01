@@ -34,6 +34,10 @@ const loginSchema = z.object({
   password: z.string().min(1).max(200),
 });
 const changePasswordSchema = z.object({ currentPassword: z.string().min(1).max(200), newPassword: z.string().min(1).max(1000) });
+const DUMMY_PASSWORD = {
+  hash: "42fe09efa347ecde1818568d440c7d6f709c8fd290227dfa5c59ba329a5778b9dd72134df9bad00fe2bc24debf21fb1cd9474b9774528f30d88b7048a3061d6c",
+  salt: "00000000000000000000000000000000",
+};
 
 async function auditLogin(db: Database, request: FastifyRequest, action: string, accountKey: string, userId?: string) {
   await db.query(
@@ -114,7 +118,12 @@ async function recordLoginFailure(db: Database, accountKey: string, ipAddress: s
   }
 }
 
-export async function registerAuth(app: FastifyInstance, db: Database, clock: () => Date = () => new Date()) {
+export async function registerAuth(
+  app: FastifyInstance,
+  db: Database,
+  clock: () => Date = () => new Date(),
+  passwordVerifier: typeof verifyPassword = verifyPassword,
+) {
   app.decorateRequest("currentUser", null);
 
   app.addHook("preHandler", async (request, reply) => {
@@ -228,10 +237,11 @@ export async function registerAuth(app: FastifyInstance, db: Database, clock: ()
       recordOperation(request, "auth.login", "failure", "LOGIN_RATE_LIMITED");
       return reply.code(429).send({ code: "LOGIN_RATE_LIMITED", message: "登录尝试过多，请稍后再试" });
     }
-    const valid = user?.is_active
-      ? await verifyPassword(parsed.data.password, user.password_hash, user.password_salt)
-      : false;
-    if (!user || !valid) {
+    const credentials = user?.is_active
+      ? { hash: user.password_hash, salt: user.password_salt }
+      : DUMMY_PASSWORD;
+    const valid = await passwordVerifier(parsed.data.password, credentials.hash, credentials.salt);
+    if (!user?.is_active || !valid) {
       await recordLoginFailure(db, accountKey, request.ip, now);
       await auditLogin(db, request, "auth.login_failed", accountKey, user?.id);
       recordOperation(request, "auth.login", "failure", "INVALID_CREDENTIALS");
@@ -342,7 +352,12 @@ export async function registerAuth(app: FastifyInstance, db: Database, clock: ()
     const client = await db.connect();
     try {
       await client.query("begin");
-      await client.query("update users set password_hash=$2,password_salt=$3,must_change_password=false,temporary_password_expires_at=null,updated_at=now() where id=$1", [request.currentUser.id,secured.hash,secured.salt]);
+      const changed = await client.query(
+        `update users set password_hash=$2,password_salt=$3,must_change_password=false,temporary_password_expires_at=null,updated_at=now()
+         where id=$1 and password_hash=$4 and password_salt=$5 returning id`,
+        [request.currentUser.id,secured.hash,secured.salt,user.password_hash,user.password_salt],
+      );
+      if(!changed.rowCount){await client.query("rollback");return reply.code(401).send({message:"当前密码错误"});}
       await client.query("update sessions set revoked_at=now() where user_id=$1 and token_hash<>$2 and revoked_at is null", [request.currentUser.id,currentHash]);
       await client.query(`insert into audit_logs(actor_user_id,action,entity_type,entity_id,ip_address) values($1,'auth.password_changed','user',$3,$2)`, [request.currentUser.id,request.ip,request.currentUser.id]);
       await client.query("commit");

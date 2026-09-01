@@ -132,6 +132,9 @@ test("业绩分析页显示事件快照地区、外贸、客户单位和待补�
   await expect(drilldown.getByRole("heading", { name: "2026年8月订单与事件" })).toBeVisible();
   await expect(drilldown.getByRole("row", { name: /E2E-ANALYSIS.*E2E 分析客户.*1.*¥100\.00/ })).toBeVisible();
   await expect(drilldown.getByRole("row", { name: /第 1 条.*首次录入.*¥100\.00.*江苏省.*客户单位甲/ })).toBeVisible();
+  expect(Object.fromEntries(new URL(page.url()).searchParams)).toMatchObject({analysisMonth:"2026-08",analysisRegion:"CN-JS",analysisCustomer:"客户单位甲",analysisEventMonth:"2026-08"});
+  await page.reload();
+  await expect(analysis.getByRole("region", { name: "分析穿透" }).getByRole("heading", { name: "2026年8月订单与事件" })).toBeVisible();
 
   let failSeptemberEvents = true;
   await page.route("**/api/performance/analysis/drilldown?*", async (route) => {
@@ -182,4 +185,64 @@ test("业绩分析页显示事件快照地区、外贸、客户单位和待补�
     releaseResponse();
   }
   await expect(analysis.locator(".metric").filter({ hasText: "授权范围总账" }).getByText("¥7.00", { exact: true })).toBeVisible();
+});
+
+test("第二批客户穿透可通过刷新和浏览器历史恢复", async ({ database, page }) => {
+  await seedTestUser(database.url, {
+    username: "e2e_analysis_restore",
+    displayName: "E2E 分析恢复",
+    password: "Analysis@123",
+    roleCode: "sales_assistant",
+    roleName: "销售助理",
+  });
+  await page.route("**/api/performance/analysis?*", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+      month: "2026-08",
+      ledger: { eventCount: 0, totalAmount: "0.00" },
+      mapped: { eventCount: 0, totalAmount: "0.00" },
+      pending: { eventCount: 0, totalAmount: "0.00" },
+      reconciled: true,
+      provinces: [{ regionCode: "CN-JS", regionName: "江苏省", eventCount: 0, totalAmount: "0.00" }],
+      foreignTrade: { regionCode: "EXT-TRADE", regionName: "外贸", eventCount: 0, totalAmount: "0.00" },
+      customers: [],
+    }) });
+  });
+  let customerRequests = 0;
+  await page.route("**/api/performance/analysis/drilldown?*", async (route) => {
+    const url = new URL(route.request().url());
+    const level = url.searchParams.get("level");
+    if (level === "customers") {
+      customerRequests += 1;
+      const secondPage = url.searchParams.get("cursor") === "page-2";
+      const customers = secondPage
+        ? [{ customerUnit: "客户51", eventCount: 0, totalAmount: "0.00" }]
+        : Array.from({ length: 50 }, (_, index) => ({ customerUnit: `客户${String(index + 1).padStart(2, "0")}`, eventCount: 0, totalAmount: "0.00" }));
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ level, regionCode: "CN-JS", regionName: "江苏省", month: "2026-08", eventCount: 0, totalAmount: "0.00", customerCount: 51, nextCursor: secondPage ? null : "page-2", pageSize: 50, customers }) });
+      return;
+    }
+    if (level === "months") {
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ level, regionCode: "CN-JS", regionName: "江苏省", customerUnit: url.searchParams.get("customerUnit"), year: "2026", eventCount: 0, totalAmount: "0.00", months: [{ month: "2026-08", eventCount: 0, totalAmount: "0.00" }] }) });
+      return;
+    }
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ level: "events", regionCode: "CN-JS", regionName: "江苏省", customerUnit: url.searchParams.get("customerUnit"), month: "2026-08", eventCount: 0, totalAmount: "0.00", nextCursor: null, pageSize: 100, orders: [] }) });
+  });
+
+  await page.goto(`/?${new URLSearchParams({ page: "analysis", analysisMonth: "2026-08", analysisRegion: "CN-JS", analysisCustomer: "客户51", analysisEventMonth: "2026-08" })}`);
+  await page.getByLabel("账号").fill("e2e_analysis_restore");
+  await page.getByLabel("密码", { exact: true }).fill("Analysis@123");
+  await page.getByRole("button", { name: "进入 SampleFlow" }).click();
+  await expect(page.getByRole("heading", { name: "客户51月度趋势" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "2026年8月订单与事件" })).toBeVisible();
+  expect(customerRequests).toBeGreaterThanOrEqual(2);
+
+  customerRequests = 0;
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "2026年8月订单与事件" })).toBeVisible();
+  expect(customerRequests).toBeGreaterThanOrEqual(2);
+  await page.getByRole("button", { name: "查看客户01月份趋势" }).click();
+  await expect(page.getByRole("heading", { name: "客户01月度趋势" })).toBeVisible();
+  await page.goBack();
+  await expect(page.getByRole("heading", { name: "2026年8月订单与事件" })).toBeVisible();
+  await page.goForward();
+  await expect(page.getByRole("heading", { name: "客户01月度趋势" })).toBeVisible();
 });

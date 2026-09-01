@@ -424,6 +424,7 @@ test("关闭期间导入必须锁定并消费匹配的一次性更正授权", as
       await confirmImportBatch(context.pool, initial.batchId, context.actorUserId, []);
       const order = await context.pool.query<{ id: string }>("select id::text from performance_orders where qingflow_order_no='001-A'");
       await context.pool.query("update accounting_periods set status='closed' where period_month='2026-03-01'");
+      await context.pool.query("select setval(pg_get_serial_sequence('accounting_correction_requests','id'),$1,true)",["9007199254740992"]);
       const correction = await context.pool.query<{ id: string }>(
         `insert into accounting_correction_requests(period_month,order_id,event_type,occurred_on,reason,
            business_region_code,business_region_source_text,customer_unit,analysis_dimension_evidence,
@@ -438,14 +439,14 @@ test("关闭期间导入必须锁定并消费匹配的一次性更正授权", as
       const mismatch = await preflightImportRows(context.pool, {
         actorUserId: context.actorUserId, configId: context.configId,
         sourceFileName: "closed-mismatch.xlsx", sourceBytes: Buffer.from("closed-mismatch"),
-        rows: [row({ rowNumber: 2, sourceRecordId: "SRC-MISMATCH", occurredOn: "2026-03-06", eventType: "revenue_change", amount: 90, customerUnit:"不匹配单位", correctionRequestId: Number(correction.rows[0]!.id) })],
+        rows: [row({ rowNumber: 2, sourceRecordId: "SRC-MISMATCH", occurredOn: "2026-03-06", eventType: "revenue_change", amount: 90, customerUnit:"不匹配单位", correctionRequestId: correction.rows[0]!.id })],
       });
       assert.equal(mismatch.status,"blocked");
       assert.ok(mismatch.issues.some((issue)=>issue.code==="CORRECTION_ANALYSIS_DIMENSIONS_MISMATCH"));
       const adjustment = await preflightImportRows(context.pool, {
         actorUserId: context.actorUserId, configId: context.configId,
         sourceFileName: "closed-adjustment.xlsx", sourceBytes: Buffer.from("closed-adjustment"),
-        rows: [row({ rowNumber: 2, sourceRecordId: "SRC-002", occurredOn: "2026-03-06", eventType: "revenue_change", amount: 90, correctionRequestId: Number(correction.rows[0]!.id) })],
+        rows: [row({ rowNumber: 2, sourceRecordId: "SRC-002", occurredOn: "2026-03-06", eventType: "revenue_change", amount: 90, correctionRequestId: correction.rows[0]!.id })],
       });
       assert.equal(adjustment.status, "preflight_ready");
       await confirmImportBatch(context.pool, adjustment.batchId, context.actorUserId, []);

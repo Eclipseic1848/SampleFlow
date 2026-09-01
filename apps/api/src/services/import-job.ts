@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { PoolClient } from "pg";
 import type { Database } from "../db.js";
+import { postgresBigintIdSchema } from "../validation.js";
 import { businessDate } from "../domain/business-time.js";
 import { AccountingPeriodError, accountingMonth, consumeApprovedCorrection, lockApprovedCorrection } from "../modules/accounting-periods.js";
 import type { OrganizationSnapshot } from "../modules/organization.js";
@@ -13,7 +14,7 @@ export type ImportSourceRow = Readonly<{
   sheet: string;
   rowNumber: number;
   businessSequence?: number;
-  correctionRequestId?: number;
+  correctionRequestId?: string;
   sourceRecordId?: string;
   orderNo: string;
   occurredOn: string;
@@ -437,7 +438,7 @@ function normalizeRow(
   if (row.businessSequence !== undefined && (!Number.isInteger(row.businessSequence) || row.businessSequence < 1)) {
     addIssue(issues, row, "BUSINESS_SEQUENCE_INVALID", "业务顺序必须是从 1 开始的正整数");
   }
-  if (row.correctionRequestId !== undefined && (!Number.isInteger(row.correctionRequestId) || row.correctionRequestId < 1)) {
+  if (row.correctionRequestId !== undefined && !postgresBigintIdSchema.safeParse(row.correctionRequestId).success) {
     addIssue(issues, row, "CORRECTION_REQUEST_INVALID", "更正授权标识必须是正整数");
   }
   if (!row.orderNo || row.orderNo.length > 100 || row.orderNo !== row.orderNo.trim() || /[\u0000-\u001f\u007f]/.test(row.orderNo)) {
@@ -846,7 +847,7 @@ export async function preflightImportRows(database: Database, input: Readonly<{
       [correctionIds, input.actorUserId],
     )
     : { rows: [] };
-  const correctionsById = new Map(corrections.rows.map((correction) => [Number(correction.id), correction]));
+  const correctionsById = new Map(corrections.rows.map((correction) => [correction.id, correction]));
   for (const row of rowsRequiringPeriodCheck) {
     const month = accountingMonth(row.occurredOn);
     const closed = closedMonths.has(month);
@@ -858,7 +859,7 @@ export async function preflightImportRows(database: Database, input: Readonly<{
       addIssue(issues, row, "CLOSED_PERIOD_AUTHORIZATION_REQUIRED", "关闭期间导入必须提供匹配的一次性历史更正授权");
       continue;
     }
-    const correction = correctionsById.get(row.correctionRequestId);
+    const correction = correctionsById.get(String(row.correctionRequestId));
     if (!correction || correction.order_no !== row.orderNo || correction.event_type !== row.eventType
       || String(correction.occurred_on).slice(0, 10) !== row.occurredOn || String(correction.period_month).slice(0, 10) !== month) {
       addIssue(issues, row, "CLOSED_PERIOD_AUTHORIZATION_INVALID", "历史更正授权不存在、已失效或与订单事件日期不匹配");
@@ -1495,7 +1496,7 @@ export async function confirmImportBatch(database: Database, batchId: string, ac
       for (const row of orderRows) {
         let correction = null;
         if (row.correctionRequestId !== undefined) {
-          correction = await lockApprovedCorrection(client, row.correctionRequestId, Number(orderId), row.eventType, actorPersonId, now);
+          correction = await lockApprovedCorrection(client, row.correctionRequestId, orderId, row.eventType, actorPersonId, now);
           if (correction.periodMonth !== accountingMonth(row.occurredOn) || String(correction.occurredOn).slice(0, 10) !== row.occurredOn) {
             throw new ImportJobError(`第 ${row.rowNumber} 行更正授权与发生日期不匹配`);
           }

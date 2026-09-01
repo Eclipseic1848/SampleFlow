@@ -13,9 +13,9 @@ type GoalLevel = z.infer<typeof levelSchema>;
 const createSchema = z.object({
   periodMonth: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/),
   level: levelSchema,
-  ownerPersonId: z.coerce.number().int().positive(),
-  orgUnitId: z.coerce.number().int().positive().nullable().optional(),
-  parentGoalId: z.coerce.number().int().positive().nullable().optional(),
+  ownerPersonId: postgresBigintIdSchema,
+  orgUnitId: postgresBigintIdSchema.nullable().optional(),
+  parentGoalId: postgresBigintIdSchema.nullable().optional(),
   amount: z.number().finite().min(0).max(99_999_999_999.99),
   changeReason: z.string().trim().min(1).max(500).optional().default("目标下达"),
 });
@@ -40,13 +40,13 @@ const linkageSchema = z.object({
   reason: z.string().trim().min(1).max(500),
   newAmount: z.number().finite().min(0).max(99_999_999_999.99).optional(),
 });
-const idSchema = z.object({ id: z.coerce.number().int().positive() });
+const idSchema = z.object({ id: postgresBigintIdSchema });
 const versionIdSchema = z.strictObject({ id: postgresBigintIdSchema });
 const listSchema = z.object({ pendingOnly: z.stringbool().optional().default(false) });
 const optionsSchema = z.object({
   periodMonth: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/),
   level: levelSchema,
-  parentGoalId: z.coerce.number().int().positive().optional(),
+  parentGoalId: postgresBigintIdSchema.optional(),
 });
 
 const editorRoles: Record<GoalLevel, readonly string[]> = {
@@ -145,7 +145,7 @@ async function audit(
   );
 }
 
-async function loadGoal(client: PoolClient, goalId: number | string, lock = false): Promise<GoalContext | undefined> {
+async function loadGoal(client: PoolClient, goalId: string, lock = false): Promise<GoalContext | undefined> {
   const result = await client.query<GoalContext>(
     `select id::text,to_char(period_month,'YYYY-MM-DD') as period_month,goal_level as level,
             owner_person_id::text,owner_user_id::text,org_unit_id::text,parent_goal_id::text
@@ -158,8 +158,8 @@ async function loadGoal(client: PoolClient, goalId: number | string, lock = fals
 async function assertOwnerIsEligible(
   client: PoolClient,
   level: GoalLevel,
-  ownerPersonId: number,
-  orgUnitId: number | null,
+  ownerPersonId: string,
+  orgUnitId: string | null,
   parent: GoalContext | undefined,
   effectiveDate: string,
 ) {
@@ -246,7 +246,7 @@ async function assertCreationHierarchy(
   return { parent, ownerUserId: owner.user_id };
 }
 
-async function decisionVersion(client: PoolClient, goalId: number, versionId: string): Promise<PendingVersion | undefined> {
+async function decisionVersion(client: PoolClient, goalId: string, versionId: string): Promise<PendingVersion | undefined> {
   const result = await client.query<PendingVersion>(
     `select v.id::text,v.goal_id::text,v.version_no::text,v.status,g.goal_level as level,
             g.owner_person_id::text,g.parent_goal_id::text,v.created_by_person_id::text,v.signed_by_person_id::text
@@ -291,7 +291,7 @@ async function invalidatePendingChangeRequests(
   }
 }
 
-async function assertGoalReadable(database: Database, user: CurrentUser, goalId: number) {
+async function assertGoalReadable(database: Database, user: CurrentUser, goalId: string) {
   const access = await resolveGoalAccess(database, user);
   const result = await database.query(
     "select 1 from goals where id=$1 and ($2::boolean or owner_person_id=any($3::bigint[]))",

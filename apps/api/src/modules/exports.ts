@@ -5,6 +5,7 @@ import { Query } from "pg";
 import type { Database } from "../db.js";
 import { businessDate } from "../domain/business-time.js";
 import { standardBusinessRegionName } from "../domain/business-regions.js";
+import { postgresBigintIdSchema } from "../validation.js";
 import { canReadGoals, canReadPerformance, performanceScopeSql, performanceScopeValues, resolveGoalAccess, resolvePerformanceAccess } from "./authorization.js";
 import { loadFormalReport } from "./formal-reports.js";
 import { latestOrderEventJoinSql, normalizeOrderFilters, orderFilterQuerySchema, orderFilterSql, orderFilterValues, type OrderFilters } from "./order-query.js";
@@ -12,7 +13,7 @@ import { latestOrderEventJoinSql, normalizeOrderFilters, orderFilterQuerySchema,
 function csvCell(value:unknown):string{if(value===null||value===undefined)return "";if(typeof value==="number"){if(!Number.isFinite(value))throw new Error("CSV 数值无效");return String(value);}let text=String(value);if(/^[\s\p{Cc}]*[=+\-@]/u.test(text))text=`'${text}`;return `"${text.replaceAll('"','""')}"`;}
 function csvLine(row:unknown[]):string{return row.map(csvCell).join(",");}
 function csv(rows:unknown[][]):string{return "\ufeff"+rows.map((row)=>row.map(csvCell).join(",")).join("\r\n");}
-async function auditFormalReportExport(db:Database,input:{actorUserId:string;goalId:number;filterSummary:Record<string,string>;rowCount:number;status:"completed"|"blocked";requestId:string;fileSha256:string|null;failureCode?:string},ipAddress:string){
+async function auditFormalReportExport(db:Database,input:{actorUserId:string;goalId:string;filterSummary:Record<string,string>;rowCount:number;status:"completed"|"blocked";requestId:string;fileSha256:string|null;failureCode?:string},ipAddress:string){
   await db.query(
     `insert into audit_logs(actor_user_id,action,entity_type,entity_id,after_data,ip_address)
      values($1,'performance.formal_report_export','goal',$2,$3,$4)`,
@@ -32,8 +33,9 @@ const orderExportHeader=["订单编号","客户","客户单位","业务员","部
 export async function registerExports(app:FastifyInstance,db:Database,clock:()=>Date=()=>new Date()){
   app.get("/api/exports/formal-reports/:goalId.csv",async(request,reply)=>{
     if(!request.currentUser)return reply.code(401).send({message:"尚未登录"});
-    const goalId=Number((request.params as {goalId?:string}).goalId);
-    if(!Number.isSafeInteger(goalId)||goalId<=0)return reply.code(400).send({message:"目标标识无效"});
+    const parsedGoalId=postgresBigintIdSchema.safeParse((request.params as {goalId?:string}).goalId);
+    if(!parsedGoalId.success)return reply.code(400).send({message:"目标标识无效"});
+    const goalId=parsedGoalId.data;
     const result=await loadFormalReport(db,request.currentUser,goalId,businessDate(clock()));
     if(!result.ok){
       const failureCode=result.body.code??(result.statusCode===403?"ACCESS_DENIED":result.statusCode===404?"REPORT_NOT_FOUND":"REPORT_BLOCKED");

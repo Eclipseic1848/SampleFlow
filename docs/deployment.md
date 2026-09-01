@@ -37,11 +37,22 @@ curl --fail http://127.0.0.1:${WEB_PORT:-8080}/api/ready
 
 `admin-bootstrap` 只显示一次临时密码；立即放入批准的秘密管理系统，并用浏览器完成真实登录和改密。首次部署还须人工确认 HTTPS、入口层不能绕过 Web、正式 Secure Cookie、监控采集和告警通知。
 
+## 周期维护
+
+由公司批准的外部调度器每天执行一次维护作业；Compose 只提供可重复执行的一次性任务，不内置调度：
+
+```sh
+docker compose --profile operations run --rm maintenance-cleanup
+```
+
+作业删除过期或撤销后已保留 30 天的会话，以及最后更新超过 30 天且已不再封禁的登录限流记录。运维负责人须监控退出状态与清理数量，并按公司安全策略批准保留期变更；不得用宿主机脚本直接删除数据库记录。
+
 ## 备份
 
 备份要求 Web/API 已停止，防止业务写入穿过一致性检查。每次使用新的文件名；作业拒绝覆盖已有备份。
 
 ```sh
+set -e
 export BACKUP_DIRECTORY=/srv/sampleflow/backups
 export BACKUP_FILE_NAME=sampleflow-$(date -u +%Y%m%dT%H%M%SZ).dump
 mkdir -p "$BACKUP_DIRECTORY"
@@ -51,9 +62,11 @@ ls -l "$BACKUP_DIRECTORY/$BACKUP_FILE_NAME" \
   "$BACKUP_DIRECTORY/$BACKUP_FILE_NAME.sha256" \
   "$BACKUP_DIRECTORY/$BACKUP_FILE_NAME.summary" \
   "$BACKUP_DIRECTORY/$BACKUP_FILE_NAME.summary.sha256"
+docker compose up -d --wait api web
+curl --fail http://127.0.0.1:${WEB_PORT:-8080}/api/ready
 ```
 
-四个文件必须一起保留：PostgreSQL custom archive、archive SHA-256、稳定业务摘要、摘要 SHA-256。随后由批准的备份系统加密复制到异机位置，并按公司确定的 RPO、RTO 和保留期管理；这些生产参数不能由仓库默认值代替。
+四个文件必须一起保留：PostgreSQL custom archive、archive SHA-256、稳定业务摘要、摘要 SHA-256。随后由批准的备份系统加密复制到异机位置，并按公司确定的 RPO、RTO 和保留期管理；这些生产参数不能由仓库默认值代替。备份和校验完成前任一步失败时，`set -e` 会让 Web/API 保持停止。若启动或 readiness 检查失败，立即执行 `docker compose stop web api`，告警并保全现场，再由负责人决定恢复路径。
 
 ## 升级
 

@@ -435,6 +435,37 @@ test("首次登录用户看到密码强度并完成改密", async ({ database, p
       await expect(page.getByRole("heading", { name: "业绩账本总览" })).toBeVisible();
 });
 
+test("首次改密延迟失败时禁止重复提交并保留表单", async ({ database, page }) => {
+  await seedTestUser(database.url, {
+    username: "e2e_password_pending",
+    displayName: "E2E 首次改密锁",
+    password: "Before@123",
+    mustChangePassword: true,
+    roleCode: "sales_assistant",
+    roleName: "销售助理",
+  });
+  await page.goto("/");
+  await page.getByLabel("账号").fill("e2e_password_pending");
+  await page.getByLabel("密码", { exact: true }).fill("Before@123");
+  await page.getByRole("button", { name: "进入 SampleFlow" }).click();
+  await page.getByLabel("当前密码", { exact: true }).fill("Before@123");
+  await page.getByLabel("新密码", { exact: true }).fill("After@123");
+
+  let requests=0;
+  let release!:()=>void;
+  const held=new Promise<void>((resolve)=>{release=resolve;});
+  await page.route("**/api/auth/change-password",async(route)=>{requests+=1;await held;await route.fulfill({status:503,contentType:"application/json",body:'{"message":"改密服务暂不可用"}'});});
+  const submit=page.getByRole("button",{name:"保存新密码"});
+  await submit.click();
+  await expect(page.getByRole("button",{name:"正在保存…"})).toBeDisabled();
+  await page.getByRole("button",{name:"正在保存…"}).dispatchEvent("click");
+  release();
+  await expect(page.getByRole("alert")).toHaveText("改密服务暂不可用");
+  await expect(page.getByLabel("当前密码", { exact: true })).toHaveValue("Before@123");
+  await expect(page.getByLabel("新密码", { exact: true })).toHaveValue("After@123");
+  expect(requests).toBe(1);
+});
+
 test("系统管理员在账号管理页查看只读角色权限说明", async ({ database, page }) => {
     await seedTestUser(database.url, {
       username: "e2e_system_admin",
@@ -561,7 +592,12 @@ test("销售经理可从选择器创建顶层目标并完成总经理到人事�
       await expect(page.getByLabel("目标责任人")).toHaveValue(/\d+/);
       await page.getByLabel("目标金额").fill("1000");
       await page.getByLabel("下达原因").fill("公司十一月目标");
+      let releaseGoal!:()=>void;const heldGoal=new Promise<void>((resolve)=>{releaseGoal=resolve;});
+      await page.route("**/api/goals",async(route)=>{if(route.request().method()!=="POST"){await route.continue();return;}await heldGoal;await route.continue();});
       await page.getByRole("button",{name:"提交待确认"}).click();
+      const createGoalDialog=page.getByRole("dialog",{name:"下达目标"});
+      await expect(createGoalDialog.getByRole("button",{name:"正在提交…"})).toBeDisabled();
+      await page.keyboard.press("Escape");await expect(createGoalDialog).toBeVisible();releaseGoal();
       const topRow=page.getByRole("row").filter({hasText:"2026-11"}).filter({hasText:"销售经理总目标"});
       await expect(topRow).toContainText("待责任人确认");
       await topRow.getByRole("button",{name:"确认目标"}).click();
@@ -739,7 +775,10 @@ test("系统管理员通过页面办理组织异动并保留前后有效期", as
       await assignmentDialog.getByRole("combobox").nth(2).selectOption({label:"E2E 原小组"});
       await assignmentDialog.getByRole("combobox").nth(3).selectOption({label:"E2E 异动组长（e2e_org_leader）"});
       await assignmentDialog.getByRole("combobox").nth(4).selectOption({label:"E2E 异动主管（e2e_org_supervisor）"});
+      const assignmentRequest=page.waitForRequest((request)=>request.url().endsWith("/api/admin/organization/assignments")&&request.method()==="POST");
       await page.getByRole("button",{name:"保存任职"}).click();
+      const assignmentBody=(await assignmentRequest).postDataJSON() as Record<string,unknown>;
+      for(const key of ["personId","departmentId","groupId","leaderPersonId","supervisorPersonId"])expect(typeof assignmentBody[key]).toBe("string");
 
       await expect(page.getByRole("button",{name:"办理组织异动"})).toBeVisible({timeout:1_000});
       await page.getByRole("button",{name:"办理组织异动"}).click();
@@ -769,7 +808,11 @@ test("系统管理员通过页面办理组织异动并保留前后有效期", as
       await newAssignment.getByRole("button",{name:"关闭任职"}).click();
       const closeDialog=page.getByRole("dialog",{name:"关闭人员任职"});
       await closeDialog.getByLabel("离任生效日期").fill("2026-10-01");
+      let releaseClose!:()=>void;const heldClose=new Promise<void>((resolve)=>{releaseClose=resolve;});
+      await page.route("**/api/admin/organization/memberships/*/close",async(route)=>{await heldClose;await route.continue();});
       await closeDialog.getByRole("button",{name:"确认关闭"}).click();
+      await expect(closeDialog.getByRole("button",{name:"正在关闭…"})).toBeDisabled();
+      await page.keyboard.press("Escape");await expect(closeDialog).toBeVisible();releaseClose();
       await expect(newAssignment).toContainText("2026-08-01 至 2026-09-30");
       await expect(page.getByRole("alert")).toHaveText("任职已关闭，但组织列表刷新失败，请刷新页面重试。");
       await expect(newAssignment.getByRole("button",{name:"关闭任职"})).toHaveCount(0);
@@ -779,7 +822,11 @@ test("系统管理员通过页面办理组织异动并保留前后有效期", as
       const successorDialog=page.getByRole("dialog",{name:"更换负责人"});
       await successorDialog.getByLabel("继任负责人").selectOption({label:"E2E 继任组长（e2e_org_successor）"});
       await successorDialog.getByLabel("继任生效日期").fill("2026-09-01");
+      let releaseSuccessor!:()=>void;const heldSuccessor=new Promise<void>((resolve)=>{releaseSuccessor=resolve;});
+      await page.route("**/api/admin/organization/responsibilities/*/replace",async(route)=>{await heldSuccessor;await route.continue();});
       await successorDialog.getByRole("button",{name:"确认继任"}).click();
+      await expect(successorDialog.getByRole("button",{name:"正在更换…"})).toBeDisabled();
+      await page.keyboard.press("Escape");await expect(successorDialog).toBeVisible();releaseSuccessor();
       await expect(page.locator(".responsibility-list > div").filter({hasText:"E2E 新小组"}).filter({hasText:"E2E 异动组长"})).toContainText("2026-08-01 至 2026-08-31");
       await expect(page.locator(".responsibility-list > div").filter({hasText:"E2E 新小组"}).filter({hasText:"E2E 继任组长"})).toContainText("2026-09-01 起");
 

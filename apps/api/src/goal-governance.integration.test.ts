@@ -58,7 +58,7 @@ test("四级目标只能由合法直属角色和同月父目标创建并按稳�
       const versionIdFor=async(actor:typeof manager,id:string)=>{const list=await app.inject({method:"GET",url:"/api/goals",headers:{cookie:actor.cookie}});return list.json().goals.find((goal:{id:string})=>goal.id===id).versionId as string;};
       const decide=async(actor:typeof manager,id:string,decision="approved",expectedVersionId?:string)=>app.inject({method:"POST",url:`/api/goals/${id}/decision`,headers:actor,payload:{expectedVersionId:expectedVersionId??await versionIdFor(actor,id),decision,comment:"审批意见"}});
 
-      const top=await create(manager,{periodMonth:"2026-09",level:"sales_manager",ownerPersonId:Number(scenario.personIds.manager),orgUnitId:null,parentGoalId:null,amount:1000,changeReason:"公司目标"});
+      const top=await create(manager,{periodMonth:"2026-09",level:"sales_manager",ownerPersonId:scenario.personIds.manager,orgUnitId:null,parentGoalId:null,amount:1000,changeReason:"公司目标"});
       assert.equal(top.statusCode,201,top.body);const topId=top.json().id as string;
       const preciseMissingVersion=await app.inject({method:"POST",url:"/api/goal-versions/9007199254740993/confirm",headers:manager,payload:{}});
       assert.equal(preciseMissingVersion.statusCode,404,preciseMissingVersion.body);
@@ -131,7 +131,7 @@ test("四级目标只能由合法直属角色和同月父目标创建并按稳�
       assert.equal(replayAfterApproval.json().changed,false);
       assert.equal((await decide(hr,topId)).statusCode,409,"同一终审节点不能重复审批");
 
-      const raced=await create(manager,{periodMonth:"2026-12",level:"sales_manager",ownerPersonId:Number(scenario.personIds.manager),orgUnitId:null,parentGoalId:null,amount:1200,changeReason:"版本竞态目标"});
+      const raced=await create(manager,{periodMonth:"2026-12",level:"sales_manager",ownerPersonId:scenario.personIds.manager,orgUnitId:null,parentGoalId:null,amount:1200,changeReason:"版本竞态目标"});
       assert.equal(raced.statusCode,201,raced.body);const racedGoalId=raced.json().id as string;const staleVersionId=raced.json().versionId as string;
       assert.equal((await sign(manager,racedGoalId,staleVersionId)).statusCode,200);
       const replacementClient=new Client({connectionString:database.url});await replacementClient.connect();
@@ -155,17 +155,17 @@ test("四级目标只能由合法直属角色和同月父目标创建并按稳�
         assert.deepEqual(untouched.rows[0],{status:"pending_gm",approvals:"0"});
       }catch(error){await replacementClient.query("rollback");throw error;}finally{await replacementClient.end();}
 
-      const missingParent=await create(manager,{periodMonth:"2026-09",level:"department",ownerPersonId:Number(scenario.personIds.supervisor),orgUnitId:Number(scenario.departmentId),parentGoalId:null,amount:800,changeReason:"缺父目标"});
+      const missingParent=await create(manager,{periodMonth:"2026-09",level:"department",ownerPersonId:scenario.personIds.supervisor,orgUnitId:scenario.departmentId,parentGoalId:null,amount:800,changeReason:"缺父目标"});
       assert.equal(missingParent.statusCode,400,missingParent.body);
-      const unknownParent=await create(manager,{periodMonth:"2026-09",level:"department",ownerPersonId:Number(scenario.personIds.supervisor),orgUnitId:Number(scenario.departmentId),parentGoalId:999999,amount:800,changeReason:"不存在父目标"});
+      const unknownParent=await create(manager,{periodMonth:"2026-09",level:"department",ownerPersonId:scenario.personIds.supervisor,orgUnitId:scenario.departmentId,parentGoalId:"999999",amount:800,changeReason:"不存在父目标"});
       assert.equal(unknownParent.statusCode,404,unknownParent.body);
       assert.doesNotMatch(unknownParent.body,/constraint|foreign key/i);
-      const wrongOwner=await create(manager,{periodMonth:"2026-09",level:"department",ownerPersonId:Number(scenario.personIds.hr),orgUnitId:Number(scenario.departmentId),parentGoalId:Number(topId),amount:800,changeReason:"错误责任人"});
+      const wrongOwner=await create(manager,{periodMonth:"2026-09",level:"department",ownerPersonId:scenario.personIds.hr,orgUnitId:scenario.departmentId,parentGoalId:topId,amount:800,changeReason:"错误责任人"});
       assert.equal(wrongOwner.statusCode,409,wrongOwner.body);
 
-      const department=await create(manager,{periodMonth:"2026-09",level:"department",ownerPersonId:Number(scenario.personIds.supervisor),orgUnitId:Number(scenario.departmentId),parentGoalId:Number(topId),amount:800,changeReason:"部门目标"});
+      const department=await create(manager,{periodMonth:"2026-09",level:"department",ownerPersonId:scenario.personIds.supervisor,orgUnitId:scenario.departmentId,parentGoalId:topId,amount:800,changeReason:"部门目标"});
       assert.equal(department.statusCode,201,department.body);const departmentId=department.json().id as string;
-      const wrongMonth=await create(manager,{periodMonth:"2026-10",level:"department",ownerPersonId:Number(scenario.personIds.supervisor),orgUnitId:Number(scenario.departmentId),parentGoalId:Number(topId),amount:800,changeReason:"跨月父目标"});
+      const wrongMonth=await create(manager,{periodMonth:"2026-10",level:"department",ownerPersonId:scenario.personIds.supervisor,orgUnitId:scenario.departmentId,parentGoalId:topId,amount:800,changeReason:"跨月父目标"});
       assert.equal(wrongMonth.statusCode,409,wrongMonth.body);
       assert.equal((await sign(outsider,departmentId,department.json().versionId)).statusCode,403);
       assert.equal((await sign(supervisor,departmentId)).statusCode,200);
@@ -174,10 +174,10 @@ test("四级目标只能由合法直属角色和同月父目标创建并按稳�
       assert.equal((await decide(manager,departmentId)).statusCode,409,"下达人即使兼任人事也不能审批");
       assert.equal((await decide(hr,departmentId)).statusCode,200);
 
-      const group=await create(supervisor,{periodMonth:"2026-09",level:"group",ownerPersonId:Number(scenario.personIds.leader),orgUnitId:Number(scenario.groupId),parentGoalId:Number(departmentId),amount:600,changeReason:"小组目标"});
+      const group=await create(supervisor,{periodMonth:"2026-09",level:"group",ownerPersonId:scenario.personIds.leader,orgUnitId:scenario.groupId,parentGoalId:departmentId,amount:600,changeReason:"小组目标"});
       assert.equal(group.statusCode,201,group.body);const groupId=group.json().id as string;
       assert.equal((await sign(leader,groupId)).statusCode,200);assert.equal((await decide(hr,groupId)).statusCode,200);
-      const personal=await create(leader,{periodMonth:"2026-09",level:"personal",ownerPersonId:Number(scenario.personIds.salesperson),orgUnitId:null,parentGoalId:Number(groupId),amount:400,changeReason:"个人目标"});
+      const personal=await create(leader,{periodMonth:"2026-09",level:"personal",ownerPersonId:scenario.personIds.salesperson,orgUnitId:null,parentGoalId:groupId,amount:400,changeReason:"个人目标"});
       assert.equal(personal.statusCode,201,personal.body);const personalId=personal.json().id as string;
       assert.equal((await sign(salesperson,personalId)).statusCode,200);assert.equal((await decide(hr,personalId)).statusCode,200);
 
@@ -191,6 +191,38 @@ test("四级目标只能由合法直属角色和同月父目标创建并按稳�
   });
 });
 
+test("目标与正式报表的 bigint 标识全链路保持十进制字符串",async()=>{
+  await withMigratedTestDatabase(async(database)=>{
+    const highId="9007199254740993";
+    const client=new Client({connectionString:database.url});await client.connect();
+    try{
+      await client.query("select setval(pg_get_serial_sequence('people','id'),$1,true)",["9007199254740992"]);
+      await client.query("select setval(pg_get_serial_sequence('goals','id'),$1,true)",["9007199254740992"]);
+      await client.query("select setval(pg_get_serial_sequence('goal_versions','id'),$1,true)",["9007199254740992"]);
+    }finally{await client.end();}
+    await seedTestUser(database.url,{username:"goal_bigint",displayName:"目标大整数",password:"Goal@123",roleCode:"sales_manager",roleName:"销售经理"});
+    await withTestApi(database.url,async(app)=>{
+      const actor=await headers(app,"goal_bigint");
+      const numericAlias=await app.inject({method:"POST",url:"/api/goals",headers:actor,payload:{periodMonth:"2026-08",level:"sales_manager",ownerPersonId:Number(highId),orgUnitId:null,parentGoalId:null,amount:1000,changeReason:"数字别名必须拒绝"}});
+      assert.equal(numericAlias.statusCode,400,numericAlias.body);
+      const created=await app.inject({method:"POST",url:"/api/goals",headers:actor,payload:{periodMonth:"2026-08",level:"sales_manager",ownerPersonId:highId,orgUnitId:null,parentGoalId:null,amount:1000,changeReason:"字符串标识"}});
+      assert.equal(created.statusCode,201,created.body);
+      assert.deepEqual([created.json().id,created.json().versionId],[highId,highId]);
+
+      const activation=new Client({connectionString:database.url});await activation.connect();
+      try{await activation.query("update goal_versions set status='active' where id=$1",[highId]);}finally{await activation.end();}
+      const history=await app.inject({method:"GET",url:`/api/goals/${highId}/history`,headers:{cookie:actor.cookie}});
+      assert.equal(history.statusCode,200,history.body);
+      const report=await app.inject({method:"GET",url:`/api/performance/formal-reports/${highId}`,headers:{cookie:actor.cookie}});
+      assert.equal(report.statusCode,200,report.body);
+      assert.equal(report.json().goalId,highId);
+      const exported=await app.inject({method:"GET",url:`/api/exports/formal-reports/${highId}.csv`,headers:{cookie:actor.cookie}});
+      assert.equal(exported.statusCode,200,exported.body);
+      assert.match(String(exported.headers["content-disposition"]),new RegExp(`${highId}\\.csv`));
+    });
+  });
+});
+
 test("目标修改申请可重试、直属上级处理、责任人重新确认、人事审批并触发联动选择",async()=>{
   await withMigratedTestDatabase(async(database)=>{
     const scenario=await seedGoalScenario(database.url);
@@ -200,10 +232,10 @@ test("目标修改申请可重试、直属上级处理、责任人重新确认�
       const sign=async(who:GoalActor,id:string)=>{const list=await app.inject({method:"GET",url:"/api/goals",headers:{cookie:actor[who].cookie}});const versionId=list.json().goals.find((goal:{id:string})=>goal.id===id).versionId;const response=await app.inject({method:"POST",url:`/api/goal-versions/${versionId}/confirm`,headers:actor[who],payload:{}});assert.equal(response.statusCode,200,response.body);};
       const versionIdFor=async(who:GoalActor,id:string)=>{const list=await app.inject({method:"GET",url:"/api/goals",headers:{cookie:actor[who].cookie}});return list.json().goals.find((goal:{id:string})=>goal.id===id).versionId as string;};
       const approve=async(who:GoalActor,id:string)=>{const response=await app.inject({method:"POST",url:`/api/goals/${id}/decision`,headers:actor[who],payload:{expectedVersionId:await versionIdFor(who,id),decision:"approved",comment:"同意"}});assert.equal(response.statusCode,200,response.body);};
-      const top=await create("manager",{periodMonth:"2026-09",level:"sales_manager",ownerPersonId:Number(scenario.personIds.manager),parentGoalId:null,orgUnitId:null,amount:1000,changeReason:"顶层"});await sign("manager",top);await approve("gm",top);await approve("hr",top);
-      const department=await create("manager",{periodMonth:"2026-09",level:"department",ownerPersonId:Number(scenario.personIds.supervisor),parentGoalId:Number(top),orgUnitId:Number(scenario.departmentId),amount:800,changeReason:"部门"});await sign("supervisor",department);await approve("hr",department);
-      const group=await create("supervisor",{periodMonth:"2026-09",level:"group",ownerPersonId:Number(scenario.personIds.leader),parentGoalId:Number(department),orgUnitId:Number(scenario.groupId),amount:600,changeReason:"小组"});await sign("leader",group);await approve("hr",group);
-      const personal=await create("leader",{periodMonth:"2026-09",level:"personal",ownerPersonId:Number(scenario.personIds.salesperson),parentGoalId:Number(group),orgUnitId:null,amount:400,changeReason:"个人"});await sign("salesperson",personal);await approve("hr",personal);
+      const top=await create("manager",{periodMonth:"2026-09",level:"sales_manager",ownerPersonId:scenario.personIds.manager,parentGoalId:null,orgUnitId:null,amount:1000,changeReason:"顶层"});await sign("manager",top);await approve("gm",top);await approve("hr",top);
+      const department=await create("manager",{periodMonth:"2026-09",level:"department",ownerPersonId:scenario.personIds.supervisor,parentGoalId:top,orgUnitId:scenario.departmentId,amount:800,changeReason:"部门"});await sign("supervisor",department);await approve("hr",department);
+      const group=await create("supervisor",{periodMonth:"2026-09",level:"group",ownerPersonId:scenario.personIds.leader,parentGoalId:department,orgUnitId:scenario.groupId,amount:600,changeReason:"小组"});await sign("leader",group);await approve("hr",group);
+      const personal=await create("leader",{periodMonth:"2026-09",level:"personal",ownerPersonId:scenario.personIds.salesperson,parentGoalId:group,orgUnitId:null,amount:400,changeReason:"个人"});await sign("salesperson",personal);await approve("hr",personal);
 
       const requested=await app.inject({method:"POST",url:`/api/goals/${personal}/change-requests`,headers:actor.salesperson,payload:{requestedAmount:450,reason:"业务调整"}});
       assert.equal(requested.statusCode,201,requested.body);const requestId=requested.json().id as string;
@@ -307,10 +339,10 @@ test("个人、组、部门变更可逐级递归且顶层调整必须明确填�
       const accept=async(who:GoalActor,requestId:string,newAmount:number)=>{const response=await app.inject({method:"POST",url:`/api/goal-change-requests/${requestId}/accept`,headers:actor[who],payload:{newAmount,comment:"明确调整金额"}});assert.equal(response.statusCode,200,response.body);};
       const linkage=async(who:GoalActor,parentGoalId:string)=>{const response=await app.inject({method:"GET",url:"/api/goal-workflows",headers:{cookie:actor[who].cookie}});assert.equal(response.statusCode,200,response.body);const item=response.json().linkageDecisions.find((candidate:{parentGoalId:string;status:string})=>candidate.parentGoalId===parentGoalId&&candidate.status==="pending");assert.ok(item);return item.id as string;};
 
-      const top=await create("manager",{periodMonth:"2026-10",level:"sales_manager",ownerPersonId:Number(scenario.personIds.manager),parentGoalId:null,orgUnitId:null,amount:1000,changeReason:"顶层"});await sign("manager",top);await approve("gm",top);await approve("hr",top);
-      const department=await create("manager",{periodMonth:"2026-10",level:"department",ownerPersonId:Number(scenario.personIds.supervisor),parentGoalId:Number(top),orgUnitId:Number(scenario.departmentId),amount:800,changeReason:"部门"});await sign("supervisor",department);await approve("hr",department);
-      const group=await create("supervisor",{periodMonth:"2026-10",level:"group",ownerPersonId:Number(scenario.personIds.leader),parentGoalId:Number(department),orgUnitId:Number(scenario.groupId),amount:600,changeReason:"小组"});await sign("leader",group);await approve("hr",group);
-      const personal=await create("leader",{periodMonth:"2026-10",level:"personal",ownerPersonId:Number(scenario.personIds.salesperson),parentGoalId:Number(group),orgUnitId:null,amount:400,changeReason:"个人"});await sign("salesperson",personal);await approve("hr",personal);
+      const top=await create("manager",{periodMonth:"2026-10",level:"sales_manager",ownerPersonId:scenario.personIds.manager,parentGoalId:null,orgUnitId:null,amount:1000,changeReason:"顶层"});await sign("manager",top);await approve("gm",top);await approve("hr",top);
+      const department=await create("manager",{periodMonth:"2026-10",level:"department",ownerPersonId:scenario.personIds.supervisor,parentGoalId:top,orgUnitId:scenario.departmentId,amount:800,changeReason:"部门"});await sign("supervisor",department);await approve("hr",department);
+      const group=await create("supervisor",{periodMonth:"2026-10",level:"group",ownerPersonId:scenario.personIds.leader,parentGoalId:department,orgUnitId:scenario.groupId,amount:600,changeReason:"小组"});await sign("leader",group);await approve("hr",group);
+      const personal=await create("leader",{periodMonth:"2026-10",level:"personal",ownerPersonId:scenario.personIds.salesperson,parentGoalId:group,orgUnitId:null,amount:400,changeReason:"个人"});await sign("salesperson",personal);await approve("hr",personal);
 
       const personalRequest=await app.inject({method:"POST",url:`/api/goals/${personal}/change-requests`,headers:actor.salesperson,payload:{reason:"个人目标变化"}});assert.equal(personalRequest.statusCode,201,personalRequest.body);
       await accept("leader",personalRequest.json().id,450);await sign("salesperson",personal);await approve("hr",personal);
