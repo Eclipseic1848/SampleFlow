@@ -9,6 +9,19 @@ x-api-runtime: &api-runtime
   mem_limit: 512m
   logging: *default-logging
 
+x-database-operation: &database-operation
+  image: postgres:16
+  user: "${DATABASE_OPERATION_UID:?请设置数据库作业 UID}:${DATABASE_OPERATION_GID:?请设置数据库作业 GID}"
+  profiles: ["operations"]
+  restart: "no"
+  cpus: 1.0
+  mem_limit: 512m
+  logging: *default-logging
+  networks: [backend]
+  depends_on:
+    db:
+      condition: service_healthy
+
 services:
   db:
     image: postgres:16
@@ -100,6 +113,55 @@ services:
       db:
         condition: service_healthy
     command: ["node", "apps/api/dist/cli/provision-database-roles.js"]
+
+  db-backup:
+    <<: *database-operation
+    environment:
+      SOURCE_DB_HOST: db
+      SOURCE_DB_PORT: 5432
+      SOURCE_DB_NAME: ${POSTGRES_DB:-sampleflow}
+      SOURCE_DB_USER: ${DB_BACKUP_USER:?请设置 DB_BACKUP_USER}
+      SOURCE_DB_PASSWORD: ${DB_BACKUP_PASSWORD:?请设置 DB_BACKUP_PASSWORD}
+      BACKUP_FILE: /backups/${BACKUP_FILE_NAME:-sampleflow.dump}
+    volumes:
+      - type: bind
+        source: ./scripts/database-operations.sh
+        target: /operations/database-operations.sh
+        read_only: true
+      - type: bind
+        source: ${BACKUP_DIRECTORY:-./.sampleflow/backups}
+        target: /backups
+    command: ["bash", "/operations/database-operations.sh", "backup"]
+
+  db-restore-new:
+    <<: *database-operation
+    environment:
+      SOURCE_DB_HOST: db
+      SOURCE_DB_PORT: 5432
+      SOURCE_DB_NAME: ${POSTGRES_DB:-sampleflow}
+      SOURCE_DB_USER: ${DB_BACKUP_USER:?请设置 DB_BACKUP_USER}
+      SOURCE_DB_PASSWORD: ${DB_BACKUP_PASSWORD:?请设置 DB_BACKUP_PASSWORD}
+      BACKUP_FILE: /backups/${BACKUP_FILE_NAME:-sampleflow.dump}
+      TARGET_DB_HOST: db
+      TARGET_DB_PORT: 5432
+      TARGET_DB_ADMIN_NAME: postgres
+      TARGET_DB_ADMIN_USER: ${POSTGRES_USER:-sampleflow}
+      TARGET_DB_ADMIN_PASSWORD: ${POSTGRES_PASSWORD}
+      TARGET_DB_NAME: ${RESTORE_DB_NAME:-}
+      TARGET_DB_OWNER: ${DB_MIGRATION_USER:?请设置 DB_MIGRATION_USER}
+      TARGET_DB_OWNER_PASSWORD: ${DB_MIGRATION_PASSWORD:?请设置 DB_MIGRATION_PASSWORD}
+      TARGET_DB_APP_USER: ${DB_APP_USER:?请设置 DB_APP_USER}
+      TARGET_DB_BACKUP_USER: ${DB_BACKUP_USER:?请设置 DB_BACKUP_USER}
+    volumes:
+      - type: bind
+        source: ./scripts/database-operations.sh
+        target: /operations/database-operations.sh
+        read_only: true
+      - type: bind
+        source: ${BACKUP_DIRECTORY:-./.sampleflow/backups}
+        target: /backups
+        read_only: true
+    command: ["bash", "/operations/database-operations.sh", "restore-new"]
 
   admin-bootstrap:
     <<: *api-runtime
