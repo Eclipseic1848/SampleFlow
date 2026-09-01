@@ -2,12 +2,13 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { Database } from "../db.js";
 import { generateTemporaryPassword, hashPassword, TEMPORARY_PASSWORD_TTL_MS } from "../security/password.js";
+import { postgresBigintIdSchema } from "../validation.js";
 import { hasAnyRole } from "./auth.js";
 import { BUSINESS_DATE_SQL, canReadPerformance, resolveGoalAccess, resolvePerformanceAccess, ROLE_PERMISSION_MATRIX } from "./authorization.js";
 
 const createUserSchema = z.strictObject({ username:z.string().trim().min(2).max(100), displayName:z.string().trim().min(1).max(100), roles:z.array(z.string().trim().min(1)).min(1), personId:z.coerce.number().int().positive().nullable().optional() });
 const accountListQuerySchema = z.strictObject({ search:z.string().trim().max(100).optional().default(""), cursor:z.string().max(2048).optional() });
-const accountCursorSchema = z.strictObject({ version:z.literal(1), userId:z.string().regex(/^\d+$/), search:z.string().max(100), id:z.string().regex(/^\d+$/), cutoffId:z.string().regex(/^\d+$/) });
+const accountCursorSchema = z.strictObject({ version:z.literal(1), userId:postgresBigintIdSchema, search:z.string().max(100), id:postgresBigintIdSchema, cutoffId:postgresBigintIdSchema });
 const roleUpdateSchema = z.strictObject({ roles:z.array(z.string().trim().min(1)).min(1) });
 const statusSchema = z.object({ isActive:z.boolean() });
 const resetSchema = z.strictObject({});
@@ -29,8 +30,12 @@ export async function registerAdmin(app:FastifyInstance,db:Database){
     const parsed=accountListQuerySchema.safeParse(request.query);if(!parsed.success)return reply.code(400).send({message:"账号查询条件无效"});
     const cursor=parsed.data.cursor?decodeAccountCursor(parsed.data.cursor):null;
     if(parsed.data.cursor&&(!cursor||cursor.userId!==request.currentUser!.id||cursor.search!==parsed.data.search))return reply.code(400).send({message:"账号分页游标无效或已不适用于当前查询"});
-    const result=await db.query<{cutoffId:string|null;users:Array<{id:string;username:string;displayName:string;isActive:boolean;mustChangePassword:boolean;roles:string[]}>}>(
-      `with cutoff as (select coalesce($3::bigint,max(id)) as id from users), page as (
+    const client=await db.connect();
+    try{
+      await client.query("begin transaction isolation level repeatable read read only");
+      if(!cursor)await client.query("lock table users in share mode");
+      const result=await client.query<{cutoffId:string|null;users:Array<{id:string;username:string;displayName:string;isActive:boolean;mustChangePassword:boolean;roles:string[]}>}>(
+        `with cutoff as (select coalesce($3::bigint,max(id)) as id from users), page as (
          select u.id as "__id",u.id::text,u.username,u.display_name as "displayName",u.is_active as "isActive",u.must_change_password as "mustChangePassword",
                 coalesce(array_agg(ur.role_code order by ur.role_code) filter(where ur.role_code is not null),'{}') as roles
          from users u left join user_roles ur on ur.user_id=u.id cross join cutoff
@@ -41,10 +46,12 @@ export async function registerAdmin(app:FastifyInstance,db:Database){
        select cutoff.id::text as "cutoffId",
               coalesce(jsonb_agg(to_jsonb(page)-'__id' order by page."__id") filter(where page."__id" is not null),'[]'::jsonb) as users
        from cutoff left join page on true group by cutoff.id`,
-      [parsed.data.search,cursor?.id??null,cursor?.cutoffId??null,ADMIN_USER_PAGE_SIZE+1],
-    );
-    const row=result.rows[0]!;const hasNext=row.users.length>ADMIN_USER_PAGE_SIZE;const users=row.users.slice(0,ADMIN_USER_PAGE_SIZE);const last=users.at(-1);
-    return{users,roles:fixedRoles,permissionMatrix:ROLE_PERMISSION_MATRIX,pageSize:ADMIN_USER_PAGE_SIZE,nextCursor:hasNext&&last&&row.cutoffId?encodeAccountCursor({version:1,userId:request.currentUser!.id,search:parsed.data.search,id:last.id,cutoffId:row.cutoffId}):null};
+        [parsed.data.search,cursor?.id??null,cursor?.cutoffId??null,ADMIN_USER_PAGE_SIZE+1],
+      );
+      await client.query("commit");
+      const row=result.rows[0]!;const hasNext=row.users.length>ADMIN_USER_PAGE_SIZE;const users=row.users.slice(0,ADMIN_USER_PAGE_SIZE);const last=users.at(-1);
+      return{users,roles:fixedRoles,permissionMatrix:ROLE_PERMISSION_MATRIX,pageSize:ADMIN_USER_PAGE_SIZE,nextCursor:hasNext&&last&&row.cutoffId?encodeAccountCursor({version:1,userId:request.currentUser!.id,search:parsed.data.search,id:last.id,cutoffId:row.cutoffId}):null};
+    }catch(error){await client.query("rollback");throw error;}finally{client.release();}
   });
   app.get("/api/admin/people",async(request,reply)=>{const denied=requireAdmin(request,reply);if(denied)return denied;const result=await db.query(`select p.id::text,p.display_name as "displayName",u.username from people p left join users u on u.id=p.user_id order by p.display_name,p.id`);return{people:result.rows};});
   app.post("/api/admin/users",async(request,reply)=>{

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { Database } from "../db.js";
+import { postgresBigintIdSchema } from "../validation.js";
 import { businessDate } from "../domain/business-time.js";
 import {
   decidePerformanceEvent,
@@ -59,9 +60,6 @@ const departmentAchievementQuerySchema = dashboardQuerySchema.extend({
 const ORDER_PAGE_SIZE = 50;
 const ANALYSIS_CUSTOMER_PAGE_SIZE = 50;
 const ANALYSIS_EVENT_PAGE_SIZE = 100;
-const postgresBigintIdSchema = z.string().refine(
-  (value) => /^[1-9]\d*$/.test(value) && BigInt(value) <= 9_223_372_036_854_775_807n,
-);
 const orderListQuerySchema = orderFilterQuerySchema.extend({
   cursor: z.string().min(1).max(2048).optional(),
 });

@@ -1194,8 +1194,16 @@ test("账号管理使用稳定搜索分页并审计固定角色组合变更", as
   await withMigratedTestDatabase(async (database) => {
     const scenario = await seedAuthorizationScenario(database.url);
     const setup = new Client({ connectionString: database.url });
+    const writer = new Client({ connectionString: database.url });
     await setup.connect();
+    await writer.connect();
     try {
+      await writer.query("begin");
+      const pending = await writer.query<{ id: string }>(
+        `insert into users(username,display_name,password_hash,password_salt,must_change_password)
+         select 'account_page_pending','分页账号 00',password_hash,password_salt,false from users where id=$1 returning id::text`,
+        [scenario.users.admin],
+      );
       const inserted = await setup.query<{ id: string }>(
         `insert into users(username,display_name,password_hash,password_salt,must_change_password)
          select 'account_page_'||lpad(series::text,2,'0'),'分页账号 '||lpad(series::text,2,'0'),source.password_hash,source.password_salt,false
@@ -1213,7 +1221,23 @@ test("账号管理使用稳定搜索分页并审计固定角色组合变更", as
       await withTestApi(database.url, async (app) => {
         const adminHeaders = await loginWriteHeaders(app, "scope_admin");
         const search = encodeURIComponent("分页账号");
-        const first = await app.inject({ method: "GET", url: `/api/admin/users?search=${search}`, headers: adminHeaders });
+        const firstRequest = app.inject({ method: "GET", url: `/api/admin/users?search=${search}`, headers: adminHeaders });
+        try {
+          for (let attempt = 0; attempt < 100; attempt += 1) {
+            const waiting = await setup.query<{ waiting: boolean }>(
+              `select exists(
+                 select 1 from pg_locks locks join pg_class relation on relation.oid=locks.relation
+                 where relation.relname='users' and locks.mode='ShareLock' and not locks.granted
+               ) as waiting`,
+            );
+            if (waiting.rows[0]!.waiting) break;
+            if (attempt === 99) assert.fail("账号首屏必须等待在途账号写入提交后再冻结分页快照");
+            await new Promise((resolve) => setTimeout(resolve, 10));
+          }
+        } finally {
+          await writer.query("commit");
+        }
+        const first = await firstRequest;
         assert.equal(first.statusCode, 200, first.body);
         assert.equal(first.json().users.length, 50);
         assert.equal(first.json().pageSize, 50);
@@ -1233,10 +1257,11 @@ test("账号管理使用稳定搜索分页并审计固定角色组合变更", as
           headers: adminHeaders,
         });
         assert.equal(second.statusCode, 200, second.body);
-        assert.equal(second.json().users.length, 10);
+        assert.equal(second.json().users.length, 11);
         assert.equal(second.json().nextCursor, null);
         const ids = [...first.json().users, ...second.json().users].map((user: { id: string }) => user.id);
-        assert.equal(new Set(ids).size, 60);
+        assert.equal(new Set(ids).size, 61);
+        assert.equal(ids.includes(pending.rows[0]!.id), true);
         assert.equal(ids.includes(late.rows[0]!.id), false);
 
         const mismatchedCursor = await app.inject({
@@ -1245,6 +1270,9 @@ test("账号管理使用稳定搜索分页并审计固定角色组合变更", as
           headers: adminHeaders,
         });
         assert.equal(mismatchedCursor.statusCode, 400, mismatchedCursor.body);
+        const overflowCursor = Buffer.from(JSON.stringify({ version: 1, userId: scenario.users.admin, search: "分页账号", id: "9223372036854775808", cutoffId: "9223372036854775808" }), "utf8").toString("base64url");
+        const overflow = await app.inject({ method: "GET", url: `/api/admin/users?search=${search}&cursor=${overflowCursor}`, headers: adminHeaders });
+        assert.equal(overflow.statusCode, 400, overflow.body);
         const empty = await app.inject({ method: "GET", url: "/api/admin/users?search=不存在的账号", headers: adminHeaders });
         assert.equal(empty.statusCode, 200, empty.body);
         assert.deepEqual(empty.json().users, []);
@@ -1291,6 +1319,8 @@ test("账号管理使用稳定搜索分页并审计固定角色组合变更", as
         assert.equal(selfRemoval.statusCode, 409, selfRemoval.body);
       });
     } finally {
+      await writer.query("rollback");
+      await writer.end();
       await setup.end();
     }
   });

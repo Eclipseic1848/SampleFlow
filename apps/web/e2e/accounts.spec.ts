@@ -100,9 +100,13 @@ test("系统管理员搜索分页账号并审计固定角色组合变更", async
     await expect(page.getByText("正在查询…", { exact: true })).toBeVisible();
     await expect(page.getByText("没有符合条件的账号。", { exact: true })).toBeVisible();
 
+    await page.getByLabel("搜索账号").fill("e2e_role_target");
+    await page.getByRole("button", { name: "搜索账号" }).click();
+    await expect(targetRow).toBeVisible();
     await page.getByLabel("搜索账号").fill("失败");
     await page.getByRole("button", { name: "搜索账号" }).click();
     await expect(page.getByRole("alert")).toHaveText("账号服务暂不可用");
+    await expect(targetRow).not.toBeVisible();
     await page.getByRole("button", { name: "重试查询" }).click();
     await expect(page.getByText("没有符合条件的账号。", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "清除账号搜索" }).click();
