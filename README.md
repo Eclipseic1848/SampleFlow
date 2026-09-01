@@ -1,11 +1,11 @@
 # SampleFlow
 
-[![P0 quality gate](https://github.com/Eclipseic1848/SampleFlow/actions/workflows/ci.yml/badge.svg)](https://github.com/Eclipseic1848/SampleFlow/actions/workflows/ci.yml)
+[![SampleFlow quality gate](https://github.com/Eclipseic1848/SampleFlow/actions/workflows/ci.yml/badge.svg)](https://github.com/Eclipseic1848/SampleFlow/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-SampleFlow 是面向销售到样业务的业绩与目标管理 Web 系统。它将角色权限、带生效日期的组织任职、不可变业绩事件、目标签名审批和受控 Excel 导入放在同一套可审计流程中。
+SampleFlow 是面向销售到样业务的业绩与目标管理 Web 系统。它将角色权限、带生效日期的组织任职、不可变业绩事件、目标实名确认与审批和受控 Excel 导入放在同一套可审计流程中。
 
-> 当前成熟度：P0 工程与功能门禁已完成，可用于隔离的内部功能验收；尚未完成真实组织数据落库、业务 UAT 或公司服务器生产部署，不能视为生产系统。
+> 当前成熟度：P0 已完成，P1 桌面 Web 与仓库生产准备正在做审查加固；尚未完成真实组织数据落库、业务 UAT 或公司服务器生产部署，不能视为生产系统。
 
 ## 核心能力
 
@@ -19,10 +19,10 @@ SampleFlow 是面向销售到样业务的业绩与目标管理 Web 系统。它�
 
 ## 项目状态
 
-- GitHub Issue #1—#9 的 P0 工作已关闭。
+- GitHub Issue #1—#9 的 P0 工作已关闭；P1 当前状态以 `handoff.md` 与 Roadmap #18 为准。
 - `main` 受保护，Pull Request 必须通过 `Typecheck, test, build and audit`。
 - 真实历史工作簿已在隔离临时数据库完成功能核对；原文件和行级业务数据不在仓库中。
-- P1 产品化与部署工作由 [Roadmap #18](https://github.com/Eclipseic1848/SampleFlow/issues/18) 跟踪。
+- P1 产品化、审查加固与部署工作由 [Roadmap #18](https://github.com/Eclipseic1848/SampleFlow/issues/18) 跟踪；当前产品仅验收 1024px/1280px 桌面 Web，移动端 #57 已取消。
 - 当前事实、数据边界和接手步骤以 [`handoff.md`](handoff.md) 为准。
 
 ## 技术栈

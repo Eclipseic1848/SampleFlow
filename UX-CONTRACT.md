@@ -80,10 +80,10 @@
 
 ## Navigation and responsive behavior
 
-- Route document title policy: 当前单页应用使用 `SampleFlow`；引入正式路由时采用“页面 — SampleFlow”。
+- Route document title policy: 八个主要页面使用稳定 URL，并采用“页面 — SampleFlow”。
 - Route error / 403 page behavior: API 403 显示明确权限边界，不把无权限伪装为空数据。
-- Breadcrumb/tab/route-state policy: 当前侧栏是单页视图切换；搜索状态使用 URL 参数。
-- Sidebar/drawer/bottom-sheet transformation: 桌面侧栏在窄屏收为图标栏并保留可访问名称。
+- Breadcrumb/tab/route-state policy: 当前侧栏驱动稳定 URL；筛选、分页和穿透状态按页面合同写入查询参数。
+- Sidebar/drawer/bottom-sheet transformation: 当前产品只验收桌面 Web；不把移动端抽屉或底部操作区作为发布门禁。
 - Responsive table strategy: 保留原生表格和横向滚动，不静默丢列。
 - Truncation/full-value access: 关键订单号、原因和事件值允许换行或进入详情查看。
 - Focus restoration and sticky-obstruction policy: 模态关闭回到触发点；焦点不得被侧栏或模态标题遮挡。
@@ -129,7 +129,7 @@
 ## Verification
 
 - Required static commands: Web/API 类型检查、Web 构建、项目测试、premium strict audit。
-- Browser/device/locale/theme matrix: Chromium 桌面与 390px 窄屏、`zh-CN`、当前主题。
+- Browser/device/locale/theme matrix: Chromium 1024px/1280px 桌面、`zh-CN`、当前主题；移动端 #57 已取消。
 - Accessibility checks: 键盘搜索、清除、模态焦点循环/Escape、语义表格和可访问名称。
 - Component-state/visual regression coverage: 项目当前无 Storybook；关键状态由 Playwright E2E 覆盖。
 - Canonical sibling flow used for comparison: 账号管理列表与共享 `Modal` 表单。
