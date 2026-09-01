@@ -2,28 +2,65 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { Database } from "../db.js";
 import { generateTemporaryPassword, hashPassword, TEMPORARY_PASSWORD_TTL_MS } from "../security/password.js";
+import { postgresBigintIdSchema } from "../validation.js";
 import { hasAnyRole } from "./auth.js";
 import { BUSINESS_DATE_SQL, canReadPerformance, resolveGoalAccess, resolvePerformanceAccess, ROLE_PERMISSION_MATRIX } from "./authorization.js";
 
 const createUserSchema = z.strictObject({ username:z.string().trim().min(2).max(100), displayName:z.string().trim().min(1).max(100), roles:z.array(z.string().trim().min(1)).min(1), personId:z.coerce.number().int().positive().nullable().optional() });
+const accountListQuerySchema = z.strictObject({ search:z.string().trim().max(100).optional().default(""), cursor:z.string().max(2048).optional() });
+const accountCursorSchema = z.strictObject({ version:z.literal(1), userId:postgresBigintIdSchema, search:z.string().max(100), id:postgresBigintIdSchema, cutoffId:postgresBigintIdSchema });
+const roleUpdateSchema = z.strictObject({ roles:z.array(z.string().trim().min(1)).min(1) });
 const statusSchema = z.object({ isActive:z.boolean() });
 const resetSchema = z.strictObject({});
 const unitSchema = z.object({ name:z.string().trim().min(1).max(100), unitType:z.enum(["department","group"]), parentId:z.coerce.number().int().positive().nullable().optional() });
 const assignmentSchema = z.strictObject({ personId:z.coerce.number().int().positive(), departmentId:z.coerce.number().int().positive(), groupId:z.coerce.number().int().positive(), leaderPersonId:z.coerce.number().int().positive(), supervisorPersonId:z.coerce.number().int().positive(), effectiveFrom:z.iso.date(), effectiveTo:z.iso.date().nullable().optional(), closePrevious:z.boolean().optional().default(false) });
+const ADMIN_USER_PAGE_SIZE=50;
+const fixedRoles=ROLE_PERMISSION_MATRIX.map(({code,name})=>({code,name}));
+const fixedRoleCodes=new Set(fixedRoles.map(({code})=>code));
+
+function normalizedFixedRoles(roles:string[]):string[]|null{const normalized=[...new Set(roles)].sort();return normalized.every((role)=>fixedRoleCodes.has(role))?normalized:null;}
+function encodeAccountCursor(value:z.infer<typeof accountCursorSchema>):string{return Buffer.from(JSON.stringify(value),"utf8").toString("base64url");}
+function decodeAccountCursor(value:string):z.infer<typeof accountCursorSchema>|null{try{const parsed=accountCursorSchema.safeParse(JSON.parse(Buffer.from(value,"base64url").toString("utf8")));return parsed.success?parsed.data:null;}catch{return null;}}
 
 function requireAdmin(request:{currentUser:import("./auth.js").CurrentUser|null},reply:{code:(status:number)=>{send:(body:unknown)=>unknown}}){if(!request.currentUser)return reply.code(401).send({message:"尚未登录"});if(!hasAnyRole(request.currentUser,["system_admin"]))return reply.code(403).send({message:"仅系统管理员可执行此操作"});return null;}
 
 export async function registerAdmin(app:FastifyInstance,db:Database){
-  app.get("/api/admin/users",async(request,reply)=>{const denied=requireAdmin(request,reply);if(denied)return denied;const [users,roles]=await Promise.all([db.query(`select u.id::text,u.username,u.display_name as "displayName",u.is_active as "isActive",u.must_change_password as "mustChangePassword",coalesce(array_agg(ur.role_code) filter(where ur.role_code is not null),'{}') as roles from users u left join user_roles ur on ur.user_id=u.id group by u.id order by u.display_name`),db.query(`select code,name from roles order by code`)]);return{users:users.rows,roles:roles.rows,permissionMatrix:ROLE_PERMISSION_MATRIX};});
+  app.get("/api/admin/users",async(request,reply)=>{
+    const denied=requireAdmin(request,reply);if(denied)return denied;
+    const parsed=accountListQuerySchema.safeParse(request.query);if(!parsed.success)return reply.code(400).send({message:"账号查询条件无效"});
+    const cursor=parsed.data.cursor?decodeAccountCursor(parsed.data.cursor):null;
+    if(parsed.data.cursor&&(!cursor||cursor.userId!==request.currentUser!.id||cursor.search!==parsed.data.search))return reply.code(400).send({message:"账号分页游标无效或已不适用于当前查询"});
+    const client=await db.connect();
+    try{
+      await client.query("begin transaction isolation level repeatable read read only");
+      if(!cursor)await client.query("lock table users in share mode");
+      const result=await client.query<{cutoffId:string|null;users:Array<{id:string;username:string;displayName:string;isActive:boolean;mustChangePassword:boolean;roles:string[]}>}>(
+        `with cutoff as (select coalesce($3::bigint,max(id)) as id from users), page as (
+         select u.id as "__id",u.id::text,u.username,u.display_name as "displayName",u.is_active as "isActive",u.must_change_password as "mustChangePassword",
+                coalesce(array_agg(ur.role_code order by ur.role_code) filter(where ur.role_code is not null),'{}') as roles
+         from users u left join user_roles ur on ur.user_id=u.id cross join cutoff
+         where u.id<=cutoff.id and u.id>coalesce($2::bigint,0)
+           and (position(lower($1) in lower(u.username))>0 or position(lower($1) in lower(u.display_name))>0)
+         group by u.id order by u.id limit $4
+       )
+       select cutoff.id::text as "cutoffId",
+              coalesce(jsonb_agg(to_jsonb(page)-'__id' order by page."__id") filter(where page."__id" is not null),'[]'::jsonb) as users
+       from cutoff left join page on true group by cutoff.id`,
+        [parsed.data.search,cursor?.id??null,cursor?.cutoffId??null,ADMIN_USER_PAGE_SIZE+1],
+      );
+      await client.query("commit");
+      const row=result.rows[0]!;const hasNext=row.users.length>ADMIN_USER_PAGE_SIZE;const users=row.users.slice(0,ADMIN_USER_PAGE_SIZE);const last=users.at(-1);
+      return{users,roles:fixedRoles,permissionMatrix:ROLE_PERMISSION_MATRIX,pageSize:ADMIN_USER_PAGE_SIZE,nextCursor:hasNext&&last&&row.cutoffId?encodeAccountCursor({version:1,userId:request.currentUser!.id,search:parsed.data.search,id:last.id,cutoffId:row.cutoffId}):null};
+    }catch(error){await client.query("rollback");throw error;}finally{client.release();}
+  });
   app.get("/api/admin/people",async(request,reply)=>{const denied=requireAdmin(request,reply);if(denied)return denied;const result=await db.query(`select p.id::text,p.display_name as "displayName",u.username from people p left join users u on u.id=p.user_id order by p.display_name,p.id`);return{people:result.rows};});
   app.post("/api/admin/users",async(request,reply)=>{
     const denied=requireAdmin(request,reply);if(denied)return denied;
     const parsed=createUserSchema.safeParse(request.body);if(!parsed.success)return reply.code(400).send({message:"账号信息不完整或格式无效"});
+    const roles=normalizedFixedRoles(parsed.data.roles);if(!roles)return reply.code(400).send({message:"包含不存在的固定角色"});
     const temporaryPassword=generateTemporaryPassword();const temporaryPasswordExpiresAt=new Date(Date.now()+TEMPORARY_PASSWORD_TTL_MS);const client=await db.connect();
     try{
       await client.query("begin");
-      const valid=await client.query<{code:string}>("select code from roles where code=any($1::text[])",[parsed.data.roles]);
-      if(valid.rowCount!==new Set(parsed.data.roles).size){await client.query("rollback");return reply.code(400).send({message:"包含不存在的角色"});}
       if(parsed.data.personId){
         const person=await client.query<{user_id:string|null}>("select user_id::text from people where id=$1 for update",[parsed.data.personId]);
         if(!person.rows[0]){await client.query("rollback");return reply.code(404).send({message:"待绑定人员身份不存在"});}
@@ -35,11 +72,35 @@ export async function registerAdmin(app:FastifyInstance,db:Database){
         await client.query("delete from people where user_id=$1 and source_key=$2",[user.rows[0]!.id,`user:${user.rows[0]!.id}`]);
         await client.query("update people set user_id=$2 where id=$1",[parsed.data.personId,user.rows[0]!.id]);
       }
-      for(const role of parsed.data.roles)await client.query(`insert into user_roles(user_id,role_code,assigned_by) values($1,$2,$3)`,[user.rows[0]!.id,role,request.currentUser!.id]);
-      await client.query(`insert into audit_logs(actor_user_id,action,entity_type,entity_id,after_data,ip_address) values($1,'auth.account_created','user',$2,jsonb_build_object('roles',$3::text[],'personId',$4::bigint),$5)`,[request.currentUser!.id,user.rows[0]!.id,parsed.data.roles,parsed.data.personId??null,request.ip]);
+      for(const role of roles)await client.query(`insert into user_roles(user_id,role_code,assigned_by) values($1,$2,$3)`,[user.rows[0]!.id,role,request.currentUser!.id]);
+      await client.query(`insert into audit_logs(actor_user_id,action,entity_type,entity_id,after_data,ip_address) values($1,'auth.account_created','user',$2,jsonb_build_object('roles',$3::text[],'personId',$4::bigint),$5)`,[request.currentUser!.id,user.rows[0]!.id,roles,parsed.data.personId??null,request.ip]);
       await client.query("commit");
       return reply.code(201).send({id:user.rows[0]!.id,temporaryPassword,temporaryPasswordExpiresAt:temporaryPasswordExpiresAt.toISOString()});
     }catch(error){await client.query("rollback");if((error as{code?:string}).code==="23505")return reply.code(409).send({message:"账号名已存在"});throw error;}finally{client.release();}
+  });
+  app.patch("/api/admin/users/:id/roles",async(request,reply)=>{
+    const denied=requireAdmin(request,reply);if(denied)return denied;
+    const params=z.object({id:z.coerce.number().int().positive()}).safeParse(request.params);const parsed=roleUpdateSchema.safeParse(request.body);
+    if(!params.success||!parsed.success)return reply.code(400).send({message:"角色信息无效"});
+    const roles=normalizedFixedRoles(parsed.data.roles);if(!roles)return reply.code(400).send({message:"包含不存在的固定角色"});
+    if(String(params.data.id)===request.currentUser!.id&&!roles.includes("system_admin"))return reply.code(409).send({message:"不能移除当前登录账号的系统管理员角色"});
+    const client=await db.connect();
+    try{
+      await client.query("begin");
+      const user=await client.query("select id from users where id=$1 for update",[params.data.id]);
+      if(!user.rowCount){await client.query("rollback");return reply.code(404).send({message:"账号不存在"});}
+      const before=await client.query<{role_code:string}>("select role_code from user_roles where user_id=$1 order by role_code for update",[params.data.id]);
+      const previous=before.rows.map((row)=>row.role_code);
+      if(previous.length===roles.length&&previous.every((role,index)=>role===roles[index])){await client.query("commit");return{ok:true,changed:false};}
+      await client.query("delete from user_roles where user_id=$1",[params.data.id]);
+      await client.query("insert into user_roles(user_id,role_code,assigned_by) select $1,unnest($2::text[]),$3",[params.data.id,roles,request.currentUser!.id]);
+      await client.query(
+        `insert into audit_logs(actor_user_id,action,entity_type,entity_id,before_data,after_data,ip_address)
+         values($1,'auth.account_roles_changed','user',$2,$3::jsonb,$4::jsonb,$5)`,
+        [request.currentUser!.id,String(params.data.id),JSON.stringify({roles:previous}),JSON.stringify({roles,result:"succeeded"}),request.ip],
+      );
+      await client.query("commit");return{ok:true,changed:true};
+    }catch(error){await client.query("rollback");throw error;}finally{client.release();}
   });
   app.patch("/api/admin/users/:id/status",async(request,reply)=>{
     const denied=requireAdmin(request,reply);if(denied)return denied;
