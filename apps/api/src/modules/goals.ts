@@ -21,6 +21,7 @@ const createSchema = z.object({
 const confirmationSchema = z.strictObject({});
 const GOAL_CONFIRMATION_STATEMENT = "本人已核对并确认承担本目标版本。";
 const decisionSchema = z.object({
+  expectedVersionId: postgresBigintIdSchema,
   decision: z.enum(["approved", "rejected"]),
   comment: z.string().trim().min(1).max(500),
 });
@@ -235,14 +236,14 @@ async function assertCreationHierarchy(
   return { parent, ownerUserId: owner.user_id };
 }
 
-async function latestPendingVersion(client: PoolClient, goalId: number, lock = false): Promise<PendingVersion | undefined> {
+async function decisionVersion(client: PoolClient, goalId: number, versionId: string): Promise<PendingVersion | undefined> {
   const result = await client.query<PendingVersion>(
     `select v.id::text,v.goal_id::text,v.version_no::text,v.status,g.goal_level as level,
             g.owner_person_id::text,g.parent_goal_id::text,v.created_by_person_id::text,v.signed_by_person_id::text
      from goal_versions v join goals g on g.id=v.goal_id
-     where g.id=$1 and v.status in ('pending_signature','pending_gm','pending_hr')
-     order by v.version_no desc limit 1${lock ? " for update of v" : ""}`,
-    [goalId],
+     where g.id=$1 and v.id=$2
+     for update of v`,
+    [goalId, versionId],
   );
   return result.rows[0];
 }
@@ -526,8 +527,8 @@ export async function registerGoals(app: FastifyInstance, db: Database) {
     const client = await db.connect();
     try {
       await client.query("begin");
-      const version = await latestPendingVersion(client, params.data.id, true);
-      if (!version || !["pending_gm", "pending_hr"].includes(version.status)) throw new GoalError(409, "GOAL_NOT_PENDING_APPROVAL", "目标当前不在待审批状态");
+      const version = await decisionVersion(client, params.data.id, parsed.data.expectedVersionId);
+      if (!version || !["pending_gm", "pending_hr"].includes(version.status)) throw new GoalError(409, "GOAL_VERSION_CHANGED", "目标版本已变化，请重新核对后处理");
       const isGm = version.status === "pending_gm" && version.level === "sales_manager" && hasAnyRole(request.currentUser, ["general_manager"]);
       const isHr = version.status === "pending_hr" && hasAnyRole(request.currentUser, ["hr"]);
       if (!isGm && !isHr) throw new GoalError(403, "GOAL_APPROVAL_FORBIDDEN", "当前角色无权处理此审批节点");
@@ -707,7 +708,6 @@ export async function registerGoals(app: FastifyInstance, db: Database) {
   app.get("/api/goal-workflows", async (request, reply) => {
     if (!request.currentUser) return reply.code(401).send({ message: "尚未登录" });
     try {
-      const all = hasAnyRole(request.currentUser, ["hr"]);
       const changeRequests = await db.query(
        `select request_row.id::text,request_row.goal_id::text as "goalId",goal.goal_level as level,
                 owner.display_name as "ownerName",request_row.requested_amount::text as "requestedAmount",
@@ -717,16 +717,17 @@ export async function registerGoals(app: FastifyInstance, db: Database) {
                 case when created_version.id is null then null
                      else (created_version.amount-base_version.amount)::text end as "amountDifference",
                 requester.display_name as "requestedByName",handler.display_name as "handledByName",
-                (request_row.status='pending' and parent.owner_person_id=$2) as "canHandle",
-                (request_row.status='pending' and request_row.requested_by_person_id=$2) as "canWithdraw"
+                (parent.owner_person_id=$1) as "canHandle",
+                (request_row.requested_by_person_id=$1) as "canWithdraw"
          from goal_change_requests request_row join goals goal on goal.id=request_row.goal_id
          join people owner on owner.id=goal.owner_person_id join people requester on requester.id=request_row.requested_by_person_id
          left join people handler on handler.id=request_row.handled_by_person_id left join goals parent on parent.id=goal.parent_goal_id
          left join goal_versions base_version on base_version.id=request_row.requested_against_version_id
          left join goal_versions created_version on created_version.id=request_row.created_version_id
-         where $1::boolean or request_row.requested_by_person_id=$2 or request_row.handled_by_person_id=$2 or parent.owner_person_id=$2
+         where request_row.status='pending'
+           and (request_row.requested_by_person_id=$1 or parent.owner_person_id=$1)
          order by request_row.created_at desc,request_row.id desc`,
-        [all, request.currentUser.personId],
+        [request.currentUser.personId],
       );
       const linkageDecisions = await db.query(
         `select linkage.id::text,linkage.parent_goal_id::text as "parentGoalId",
@@ -735,14 +736,14 @@ export async function registerGoals(app: FastifyInstance, db: Database) {
                 child_goal.id::text as "childGoalId",child_owner.display_name as "childOwnerName",
                 child_version.amount::text as "childAmount",linkage.decided_at as "decidedAt",
                 parent.goal_level as "parentLevel",parent_version.amount::text as "parentAmount",
-                (linkage.status='pending' and parent.owner_person_id=$2) as "canDecide"
+                true as "canDecide"
          from goal_linkage_decisions linkage join goal_versions child_version on child_version.id=linkage.triggering_child_version_id
          join goals child_goal on child_goal.id=child_version.goal_id join people child_owner on child_owner.id=child_goal.owner_person_id
          join goals parent on parent.id=linkage.parent_goal_id
          join goal_versions parent_version on parent_version.goal_id=parent.id and parent_version.status='active'
-         where $1::boolean or parent.owner_person_id=$2
+         where linkage.status='pending' and parent.owner_person_id=$1
          order by linkage.id desc`,
-        [all, request.currentUser.personId],
+        [request.currentUser.personId],
       );
       return { changeRequests: changeRequests.rows, linkageDecisions: linkageDecisions.rows };
     } catch (error) { return unexpectedGoalError(request, reply, error); }

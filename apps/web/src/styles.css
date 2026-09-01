@@ -370,6 +370,14 @@ th { color: #68778a; background: #fafbfc; font-weight: 600; }
 .modal-actions { margin-top: 24px; display: flex; justify-content: flex-end; gap: 10px; }
 .modal-actions button { width: auto; height: 40px; margin: 0; border: 1px solid var(--line); border-radius: 6px; color: #39495d; background: #fff; }
 .modal-actions button[type="submit"] { border-color: var(--blue); color: #fff; background: var(--blue); }
+.approval-evidence { margin-bottom: 20px; display: grid; gap: 14px; }
+.approval-evidence h3, .approval-evidence h4 { margin: 0; color: var(--navy); font-size: 14px; }
+.approval-facts { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+.approval-facts p, .approval-confirmation, .approval-opinions { margin: 0; padding: 12px 14px; border: 1px solid #e2e7ed; background: #fafbfc; }
+.approval-facts p { color: var(--muted); font-size: 12px; }
+.approval-facts strong { margin-top: 5px; color: var(--navy); display: block; font-size: 13px; }
+.approval-confirmation p, .approval-opinions p { margin: 7px 0 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
+.approval-evidence > button { width: fit-content; min-height: 36px; padding: 0 12px; border: 1px solid var(--line); border-radius: 6px; color: #39495d; background: #fff; cursor: pointer; }
 .import-form { display: grid; gap: 18px; }
 .import-mode { margin: 0; padding: 0; border: 0; display: flex; gap: 18px; } .import-mode legend { margin-bottom: 8px; color: var(--muted); font-size: 12px; } .import-mode label { display: flex; align-items: center; gap: 7px; color: var(--navy); font-size: 13px; font-weight: 700; cursor: pointer; } .import-mode input { width: 16px; height: 16px; }
 .import-guidance { padding: 12px 14px; border-left: 3px solid var(--blue); background: #edf4ff; display: grid; gap: 5px; }
@@ -520,6 +528,7 @@ th { color: #68778a; background: #fafbfc; font-weight: 600; }
   .sidebar-brand, .sidebar nav button { justify-content: center; }
   .sidebar-brand { padding: 0; }
   .sidebar-brand img { width: 52px; }
+  .approval-facts { grid-template-columns: 1fr 1fr; }
   .sidebar-user { grid-template-columns: 1fr; justify-items: center; }
   .dashboard { padding: 24px 18px 40px; }
   .dashboard > header { align-items: flex-start; gap: 16px; }
