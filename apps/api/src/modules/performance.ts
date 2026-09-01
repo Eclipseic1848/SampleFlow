@@ -32,6 +32,24 @@ const dateSchema = z.iso.date();
 const dashboardQuerySchema = z.object({
   month: z.string().regex(/^[1-9]\d{3}-(0[1-9]|1[0-2])$/).optional(),
 });
+const analysisProvinceSchema = z.string().refine((value) => value.startsWith("CN-") && standardBusinessRegionName(value) !== undefined);
+const analysisMonthSchema = z.string().regex(/^[1-9]\d{3}-(0[1-9]|1[0-2])$/);
+const analysisDrilldownQuerySchema = z.discriminatedUnion("level", [
+  z.strictObject({ level: z.literal("customers"), regionCode: analysisProvinceSchema, month: analysisMonthSchema, cursor: z.string().min(1).max(2048).optional() }),
+  z.strictObject({
+    level: z.literal("months"),
+    regionCode: analysisProvinceSchema,
+    customerUnit: z.string().trim().min(1).max(300),
+    year: z.string().regex(/^[1-9]\d{3}$/),
+  }),
+  z.strictObject({
+    level: z.literal("events"),
+    regionCode: analysisProvinceSchema,
+    customerUnit: z.string().trim().min(1).max(300),
+    month: analysisMonthSchema,
+    cursor: z.string().min(1).max(2048).optional(),
+  }),
+]);
 const groupAchievementQuerySchema = dashboardQuerySchema.extend({
   groupId: z.coerce.number().int().positive(),
 });
@@ -39,6 +57,8 @@ const departmentAchievementQuerySchema = dashboardQuerySchema.extend({
   departmentId: z.coerce.number().int().positive(),
 });
 const ORDER_PAGE_SIZE = 50;
+const ANALYSIS_CUSTOMER_PAGE_SIZE = 50;
+const ANALYSIS_EVENT_PAGE_SIZE = 100;
 const postgresBigintIdSchema = z.string().refine(
   (value) => /^[1-9]\d*$/.test(value) && BigInt(value) <= 9_223_372_036_854_775_807n,
 );
@@ -56,6 +76,26 @@ const orderCursorSchema = z.strictObject({
   userId: postgresBigintIdSchema,
 });
 type OrderCursor = z.infer<typeof orderCursorSchema>;
+const analysisCursorBase = {
+  version: z.literal(1),
+  queryDigest: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+  userId: postgresBigintIdSchema,
+};
+const analysisCustomerCursorSchema = z.strictObject({
+  ...analysisCursorBase,
+  cutoffEventId: postgresBigintIdSchema,
+  cutoffDimensionSequence: postgresBigintIdSchema,
+  totalAmount: z.string().regex(/^-?\d+\.\d{2}$/),
+  customerUnit: z.string().min(1).max(300),
+});
+const analysisEventCursorSchema = z.strictObject({
+  ...analysisCursorBase,
+  cutoffEventId: postgresBigintIdSchema,
+  cutoffDimensionSequence: postgresBigintIdSchema,
+  eventId: postgresBigintIdSchema,
+});
+type AnalysisCustomerCursor = z.infer<typeof analysisCustomerCursorSchema>;
+type AnalysisEventCursor = z.infer<typeof analysisEventCursorSchema>;
 
 function orderFilterDigest(filters: OrderFilters): string {
   return createHash("sha256").update(JSON.stringify(filters), "utf8").digest("base64url");
@@ -73,6 +113,31 @@ function decodeOrderCursor(value: string): OrderCursor | null {
   } catch {
     return null;
   }
+}
+
+function analysisQueryDigest(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value), "utf8").digest("base64url");
+}
+
+function encodeAnalysisCursor(value: AnalysisCustomerCursor | AnalysisEventCursor): string {
+  return Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
+}
+
+function decodeAnalysisCursor<T>(value: string, schema: z.ZodType<T>): T | null {
+  if (!/^[A-Za-z0-9_-]+$/.test(value)) return null;
+  try {
+    const parsed = schema.safeParse(JSON.parse(Buffer.from(value, "base64url").toString("utf8")));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+}
+
+function resultingLifecycleStateSql(alias: string): string {
+  return `case when ${alias}.event_type='legacy_adjustment' then null
+    when ${alias}.event_type='pause' then 'paused'
+    when ${alias}.event_type in ('restart','first_include') then 'active'
+    when ${alias}.resulting_current_revenue>0 then 'active' else 'zero' end`;
 }
 
 const DEPARTMENT_ACHIEVEMENT_ROLES = ["sales_supervisor", "sales_manager", "hr", "general_manager"] as const;
@@ -157,6 +222,53 @@ type PerformanceAnalysisRow = Readonly<{
   event_count: string;
   total_amount: string;
   reconciled: boolean;
+}>;
+
+type AnalysisCustomersRow = Readonly<{
+  event_count: string;
+  total_amount: string;
+  customer_count: string;
+  cutoff_event_id: string | null;
+  cutoff_dimension_sequence: string | null;
+  customers: Array<{ customerUnit: string; eventCount: number; totalAmount: string }>;
+}>;
+
+type AnalysisMonthsRow = Readonly<{
+  event_count: string;
+  total_amount: string;
+  months: Array<{ month: string; eventCount: number; totalAmount: string }>;
+}>;
+
+type AnalysisEventRow = Readonly<{
+  id: string;
+  orderId: string;
+  orderNo: string;
+  customerName: string;
+  eventType: string;
+  deltaAmount: string;
+  resultingCurrentRevenue: string;
+  resultingCountedAmount: string;
+  resultingLifecycleState: "active" | "paused" | "zero" | null;
+  accountingMonth: string;
+  occurredOn: string;
+  reason: string | null;
+  salespersonName: string;
+  departmentName: string | null;
+  groupName: string | null;
+  sequence: number;
+  businessRegionCode: string;
+  businessRegionSourceText: string;
+  customerUnit: string;
+  orderEventCount: string;
+  orderTotalAmount: string;
+}>;
+
+type AnalysisEventsPageRow = Readonly<{
+  eventCount: string;
+  totalAmount: string;
+  cutoffEventId: string | null;
+  cutoffDimensionSequence: string | null;
+  events: AnalysisEventRow[];
 }>;
 
 function timeProgressRate(periodMonth: string, today: string): string | null {
@@ -251,10 +363,7 @@ async function loadPersonalAchievementEvents(database: QueryDatabase, personId: 
               'sequence',event.order_sequence,
               'reason',event.reason,
               'resultingCountedAmount',event.resulting_counted_amount::numeric(14,2)::text,
-              'resultingLifecycleState',case when event.event_type='legacy_adjustment' then null
-                when event.event_type='pause' then 'paused'
-                when event.event_type in ('restart','first_include') then 'active'
-                when event.resulting_current_revenue>0 then 'active' else 'zero' end,
+              'resultingLifecycleState',${resultingLifecycleStateSql("event")},
               'departmentName',event.department_name,
               'groupName',event.group_name
             ) order by event.occurred_on desc,event.order_sequence desc,event.id desc)
@@ -426,10 +535,7 @@ async function loadGroupAchievementDetails(database: QueryDatabase, groupId: str
               'sequence',event.order_sequence,
               'reason',event.reason,
               'resultingCountedAmount',event.resulting_counted_amount::numeric(14,2)::text,
-              'resultingLifecycleState',case when event.event_type='legacy_adjustment' then null
-                when event.event_type='pause' then 'paused'
-                when event.event_type in ('restart','first_include') then 'active'
-                when event.resulting_current_revenue>0 then 'active' else 'zero' end,
+              'resultingLifecycleState',${resultingLifecycleStateSql("event")},
               'departmentName',event.department_name,
                'groupName',event.group_name,
                'salespersonPersonId',event.salesperson_person_id::text,
@@ -771,10 +877,7 @@ export const ORGANIZATION_ACHIEVEMENT_SQL =
                 'sequence',event.order_sequence,
                 'reason',event.reason,
                 'resultingCountedAmount',event.resulting_counted_amount::numeric(14,2)::text,
-                'resultingLifecycleState',case when event.event_type='legacy_adjustment' then null
-                  when event.event_type='pause' then 'paused'
-                  when event.event_type in ('restart','first_include') then 'active'
-                  when event.resulting_current_revenue>0 then 'active' else 'zero' end,
+                'resultingLifecycleState',${resultingLifecycleStateSql("event")},
                 'departmentName',event.department_name,
                 'groupName',event.group_name,
                 'departmentKey',event.department_key,
@@ -925,6 +1028,209 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
           eventCount: Number(row.event_count),
           totalAmount: row.total_amount,
         })),
+      };
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
+  });
+
+  app.get("/api/performance/analysis/drilldown", async (request, reply) => {
+    if (!request.currentUser) return reply.code(401).send({ message: "尚未登录" });
+    const parsed = analysisDrilldownQuerySchema.safeParse(request.query);
+    if (!parsed.success) return reply.code(400).send({ code: "ANALYSIS_DRILLDOWN_INVALID", message: "分析穿透条件无效" });
+    const queryDigest = analysisQueryDigest({ ...parsed.data, cursor: undefined });
+    const customerCursor = parsed.data.level === "customers" && parsed.data.cursor
+      ? decodeAnalysisCursor(parsed.data.cursor, analysisCustomerCursorSchema)
+      : null;
+    const eventCursor = parsed.data.level === "events" && parsed.data.cursor
+      ? decodeAnalysisCursor(parsed.data.cursor, analysisEventCursorSchema)
+      : null;
+    if ((parsed.data.level === "customers" && parsed.data.cursor && (!customerCursor || customerCursor.queryDigest !== queryDigest || customerCursor.userId !== request.currentUser.id))
+      || (parsed.data.level === "events" && parsed.data.cursor && (!eventCursor || eventCursor.queryDigest !== queryDigest || eventCursor.userId !== request.currentUser.id))) {
+      return reply.code(400).send({ code: "ANALYSIS_CURSOR_INVALID", message: "分析分页游标无效或已不适用于当前查询" });
+    }
+    const client = await db.connect();
+    try {
+      const access = await resolvePerformanceAccess(client, request.currentUser);
+      if (!canReadPerformance(access)) {
+        return reply.code(403).send({ message: "当前角色没有业务查看权限" });
+      }
+      await client.query("begin transaction isolation level repeatable read read only");
+      if ((parsed.data.level === "customers" && !customerCursor) || (parsed.data.level === "events" && !eventCursor)) {
+        await client.query("lock table performance_event_analysis_dimensions in share mode");
+      }
+      if (parsed.data.level === "customers") {
+        const result = await client.query<AnalysisCustomersRow>(
+          `with dimension_cutoff as (
+             select coalesce($10::bigint,max(dimension_sequence)) as sequence from performance_event_analysis_dimensions
+           ), raw_scoped_analysis as materialized (
+             select e.id as event_id,e.delta_amount,dimensions.customer_unit
+             from performance_events e
+             join performance_event_analysis_dimensions dimensions on dimensions.event_id=e.id
+             cross join dimension_cutoff
+             where e.accounting_month=$1::date and dimensions.business_region_code=$2
+               and dimensions.dimension_sequence<=dimension_cutoff.sequence
+               and ${performanceScopeSql("e", 3)}
+           ), cutoff as (
+             select coalesce($9::bigint,max(event_id)) as event_id from raw_scoped_analysis
+           ), scoped_analysis as materialized (
+             select raw.delta_amount,raw.customer_unit
+             from raw_scoped_analysis raw cross join cutoff where raw.event_id<=cutoff.event_id
+           ), customers as (
+             select customer_unit,count(*)::bigint as event_count,sum(delta_amount) as total_amount
+             from scoped_analysis group by customer_unit
+           ), summary as (
+             select count(*)::bigint as event_count,coalesce(sum(delta_amount),0.00) as total_amount from scoped_analysis
+           ), page as (
+             select customer_unit,event_count,total_amount from customers
+             where ($7::numeric is null or total_amount<$7::numeric or (total_amount=$7::numeric and customer_unit>$8))
+             order by total_amount desc,customer_unit
+             limit $11
+           )
+           select summary.event_count::text,summary.total_amount::text,
+                  (select count(*)::text from customers) as customer_count,
+                  cutoff.event_id::text as cutoff_event_id,
+                  dimension_cutoff.sequence::text as cutoff_dimension_sequence,
+                  coalesce(jsonb_agg(jsonb_build_object(
+                    'customerUnit',page.customer_unit,
+                    'eventCount',page.event_count::integer,
+                    'totalAmount',page.total_amount::text
+                  ) order by page.total_amount desc,page.customer_unit)
+                  filter(where page.customer_unit is not null),'[]'::jsonb) as customers
+           from summary cross join cutoff cross join dimension_cutoff left join page on true
+           group by summary.event_count,summary.total_amount,cutoff.event_id,dimension_cutoff.sequence`,
+          [`${parsed.data.month}-01`, parsed.data.regionCode, ...performanceScopeValues(access), customerCursor?.totalAmount ?? null, customerCursor?.customerUnit ?? null, customerCursor?.cutoffEventId ?? null, customerCursor?.cutoffDimensionSequence ?? null, ANALYSIS_CUSTOMER_PAGE_SIZE + 1],
+        );
+        await client.query("commit");
+        const row = result.rows[0]!;
+        const hasNextPage = row.customers.length > ANALYSIS_CUSTOMER_PAGE_SIZE;
+        const customers = row.customers.slice(0, ANALYSIS_CUSTOMER_PAGE_SIZE);
+        const last = customers.at(-1);
+        return {
+          level: "customers",
+          regionCode: parsed.data.regionCode,
+          regionName: standardBusinessRegionName(parsed.data.regionCode)!,
+          month: parsed.data.month,
+          eventCount: Number(row.event_count),
+          totalAmount: row.total_amount,
+          customerCount: Number(row.customer_count),
+          nextCursor: hasNextPage && last && row.cutoff_event_id && row.cutoff_dimension_sequence ? encodeAnalysisCursor({ version: 1, queryDigest, userId: request.currentUser.id, cutoffEventId: row.cutoff_event_id, cutoffDimensionSequence: row.cutoff_dimension_sequence, totalAmount: last.totalAmount, customerUnit: last.customerUnit }) : null,
+          pageSize: ANALYSIS_CUSTOMER_PAGE_SIZE,
+          customers,
+        };
+      }
+      if (parsed.data.level === "months") {
+        const result = await client.query<AnalysisMonthsRow>(
+          `with scoped_analysis as materialized (
+             select to_char(e.accounting_month,'YYYY-MM') as month,e.delta_amount
+             from performance_events e
+             join performance_event_analysis_dimensions dimensions on dimensions.event_id=e.id
+             where e.accounting_month >= $1::date and e.accounting_month < $1::date + interval '1 year'
+               and dimensions.business_region_code=$2 and dimensions.customer_unit=$3
+               and ${performanceScopeSql("e", 4)}
+           ), months as (
+             select month,count(*)::bigint as event_count,sum(delta_amount) as total_amount
+             from scoped_analysis group by month
+           ), summary as (
+             select count(*)::bigint as event_count,coalesce(sum(delta_amount),0.00) as total_amount from scoped_analysis
+           )
+           select summary.event_count::text,summary.total_amount::text,
+                  coalesce(jsonb_agg(jsonb_build_object(
+                    'month',months.month,
+                    'eventCount',months.event_count::integer,
+                    'totalAmount',months.total_amount::text
+                  ) order by months.month)
+                  filter(where months.month is not null),'[]'::jsonb) as months
+           from summary left join months on true
+           group by summary.event_count,summary.total_amount`,
+          [`${parsed.data.year}-01-01`, parsed.data.regionCode, parsed.data.customerUnit, ...performanceScopeValues(access)],
+        );
+        await client.query("commit");
+        const row = result.rows[0]!;
+        return {
+          level: "months",
+          regionCode: parsed.data.regionCode,
+          regionName: standardBusinessRegionName(parsed.data.regionCode)!,
+          customerUnit: parsed.data.customerUnit,
+          year: parsed.data.year,
+          eventCount: Number(row.event_count),
+          totalAmount: row.total_amount,
+          months: row.months,
+        };
+      }
+      const result = await client.query<AnalysisEventsPageRow>(
+        `with dimension_cutoff as (
+           select coalesce($10::bigint,max(dimension_sequence)) as sequence from performance_event_analysis_dimensions
+         ), raw_scoped_analysis as materialized (
+           select e.id as "__eventId",e.id::text,e.order_id::text as "orderId",orders.qingflow_order_no as "orderNo",
+                  orders.customer_name as "customerName",e.event_type as "eventType",e.delta_amount::text as "deltaAmount",
+                  e.resulting_current_revenue::text as "resultingCurrentRevenue",
+                  e.resulting_counted_amount::text as "resultingCountedAmount",
+                  ${resultingLifecycleStateSql("e")} as "resultingLifecycleState",
+                  e.accounting_month::text as "accountingMonth",e.occurred_on::text as "occurredOn",e.reason,
+                  e.salesperson_name as "salespersonName",e.department_name as "departmentName",e.group_name as "groupName",
+                  e.order_sequence as sequence,dimensions.business_region_code as "businessRegionCode",
+                  dimensions.business_region_source_text as "businessRegionSourceText",dimensions.customer_unit as "customerUnit"
+           from performance_events e
+           join performance_event_analysis_dimensions dimensions on dimensions.event_id=e.id
+           join performance_orders orders on orders.id=e.order_id
+           cross join dimension_cutoff
+           where e.accounting_month=$1::date and dimensions.business_region_code=$2 and dimensions.customer_unit=$3
+             and dimensions.dimension_sequence<=dimension_cutoff.sequence
+             and ${performanceScopeSql("e", 4)}
+         ), cutoff as (
+           select coalesce($9::bigint,max("__eventId")) as event_id from raw_scoped_analysis
+         ), scoped_analysis as materialized (
+           select raw.*,count(*) over(partition by "orderId")::text as "orderEventCount",
+                  sum("deltaAmount"::numeric) over(partition by "orderId")::text as "orderTotalAmount"
+           from raw_scoped_analysis raw cross join cutoff where raw."__eventId"<=cutoff.event_id
+         ), page as (
+           select * from scoped_analysis where ($8::bigint is null or "__eventId">$8::bigint)
+           order by "__eventId" limit $11
+         ), summary as (
+           select count(*)::bigint as event_count,coalesce(sum("deltaAmount"::numeric),0.00) as total_amount from scoped_analysis
+         )
+         select summary.event_count::text as "eventCount",summary.total_amount::text as "totalAmount",
+                cutoff.event_id::text as "cutoffEventId",
+                dimension_cutoff.sequence::text as "cutoffDimensionSequence",
+                coalesce(jsonb_agg(to_jsonb(page)-'__eventId' order by page."__eventId")
+                  filter(where page."__eventId" is not null),'[]'::jsonb) as events
+         from summary cross join cutoff cross join dimension_cutoff left join page on true
+         group by summary.event_count,summary.total_amount,cutoff.event_id,dimension_cutoff.sequence`,
+        [`${parsed.data.month}-01`, parsed.data.regionCode, parsed.data.customerUnit, ...performanceScopeValues(access), eventCursor?.eventId ?? null, eventCursor?.cutoffEventId ?? null, eventCursor?.cutoffDimensionSequence ?? null, ANALYSIS_EVENT_PAGE_SIZE + 1],
+      );
+      await client.query("commit");
+      const row = result.rows[0]!;
+      const hasNextPage = row.events.length > ANALYSIS_EVENT_PAGE_SIZE;
+      const pageEvents = row.events.slice(0, ANALYSIS_EVENT_PAGE_SIZE);
+      const orders = new Map<string, {
+        orderId: string; orderNo: string; customerName: string; eventCount: number; totalAmount: string;
+        events: Array<Omit<AnalysisEventRow, "orderId" | "orderNo" | "customerName" | "orderEventCount" | "orderTotalAmount">>;
+      }>();
+      for (const eventRow of pageEvents) {
+        let order = orders.get(eventRow.orderId);
+        if (!order) {
+          order = { orderId: eventRow.orderId, orderNo: eventRow.orderNo, customerName: eventRow.customerName, eventCount: Number(eventRow.orderEventCount), totalAmount: eventRow.orderTotalAmount, events: [] };
+          orders.set(eventRow.orderId, order);
+        }
+        const { orderId: _orderId, orderNo: _orderNo, customerName: _customerName, orderEventCount: _orderEventCount, orderTotalAmount: _orderTotalAmount, ...event } = eventRow;
+        order.events.push(event);
+      }
+      const last = pageEvents.at(-1);
+      return {
+        level: "events",
+        regionCode: parsed.data.regionCode,
+        regionName: standardBusinessRegionName(parsed.data.regionCode)!,
+        customerUnit: parsed.data.customerUnit,
+        month: parsed.data.month,
+        eventCount: Number(row.eventCount),
+        totalAmount: row.totalAmount,
+        nextCursor: hasNextPage && last && row.cutoffEventId && row.cutoffDimensionSequence ? encodeAnalysisCursor({ version: 1, queryDigest, userId: request.currentUser.id, cutoffEventId: row.cutoffEventId, cutoffDimensionSequence: row.cutoffDimensionSequence, eventId: last.id }) : null,
+        pageSize: ANALYSIS_EVENT_PAGE_SIZE,
+        orders: [...orders.values()],
       };
     } catch (error) {
       await client.query("rollback");
@@ -1164,10 +1470,7 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
               dimensions.customer_unit as "customerUnit",
               actor.display_name as "actorName", e.created_at as "createdAt",
               o.lifecycle_state as "lifecycleState",
-              case when e.event_type='legacy_adjustment' then null
-                   when e.event_type='pause' then 'paused'
-                   when e.event_type in ('restart','first_include') then 'active'
-                   when e.resulting_current_revenue>0 then 'active' else 'zero' end as "resultingLifecycleState"
+              ${resultingLifecycleStateSql("e")} as "resultingLifecycleState"
        from performance_events e join performance_orders o on o.id=e.order_id
        left join performance_event_analysis_dimensions dimensions on dimensions.event_id=e.id
        left join users actor on actor.id=e.created_by

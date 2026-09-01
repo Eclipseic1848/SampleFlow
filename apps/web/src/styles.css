@@ -276,6 +276,38 @@ form button:disabled { cursor: wait; opacity: .72; }
 .analysis-card { min-width: 0; border-top: 1px solid var(--line); }
 .analysis-card + .analysis-card { border-left: 1px solid var(--line); }
 .analysis-card h3 { padding: 18px 22px; }
+.analysis-map-layout { border-top: 1px solid var(--line); display: grid; grid-template-columns: minmax(360px,1.1fr) minmax(320px,.9fr); }
+.analysis-map-layout .analysis-card { border-top: 0; }
+.analysis-map-card h3, .analysis-province-ranking h3, .analysis-customer-summary h3 { margin: 0; }
+.analysis-map-wrap { padding: 0 22px 18px; }
+.analysis-map { width: 100%; max-height: 420px; display: block; }
+.analysis-map path { vector-effect: non-scaling-stroke; }
+.analysis-map-empty { fill: #edf1f5; stroke: #fff; stroke-width: 1; }
+.analysis-map-region { fill: var(--blue); stroke: #fff; stroke-width: 1; cursor: pointer; transition: fill .15s ease, stroke .15s ease; }
+.analysis-map-region.negative { fill: #b83a3a; }
+.analysis-map-region:hover, .analysis-map-region:focus-visible, .analysis-map-region.selected { stroke: var(--navy); stroke-width: 3; }
+.analysis-map-wrap p { margin: 10px 0 4px; color: var(--muted); font-size: 11px; }
+.analysis-map-wrap small { color: var(--muted); font-size: 10px; }
+.analysis-map-wrap a { color: var(--blue); }
+.analysis-link { width: auto; margin: 0; padding: 3px 0; border: 0; color: var(--blue); background: transparent; cursor: pointer; font: inherit; font-weight: 700; }
+.analysis-link:hover, .analysis-link[aria-pressed="true"] { text-decoration: underline; text-underline-offset: 3px; }
+.analysis-customer-summary { border-top: 1px solid var(--line); }
+.analysis-drilldown { border-top: 3px solid var(--blue); background: #fbfcfe; }
+.analysis-drilldown > header, .analysis-drilldown-stage > header { min-height: 70px; padding: 17px 22px; display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+.analysis-drilldown header h3 { margin: 0; color: var(--navy); font-size: 16px; }
+.analysis-drilldown header p { margin: 3px 0 0; color: var(--muted); font-size: 12px; text-align: right; }
+.analysis-drilldown-stage { border-top: 1px solid var(--line); background: #fff; }
+.analysis-drilldown .table-action[aria-pressed="true"] { border-color: var(--blue); color: #fff; background: var(--blue); }
+.analysis-months { padding: 0 22px 22px; display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 9px; }
+.analysis-months > div { min-width: 0; }
+.analysis-months button { width: 100%; min-width: 0; min-height: 86px; margin: 0; padding: 11px; border: 1px solid var(--line); border-radius: 7px; color: var(--navy); background: #fff; cursor: pointer; display: grid; justify-items: start; gap: 5px; text-align: left; }
+.analysis-months button:hover { border-color: #8fa9cc; background: #f5f8fd; }
+.analysis-months button.selected { border-color: var(--blue); box-shadow: inset 0 0 0 1px var(--blue); background: #eef4ff; }
+.analysis-months span { color: var(--muted); font-size: 11px; }
+.analysis-months strong { max-width: 100%; overflow-wrap: anywhere; font-size: 13px; }
+.analysis-months small { color: var(--muted); font-size: 10px; }
+.analysis-drilldown .orders-table-wrap + .orders-table-wrap { border-top: 1px solid var(--line); }
+.analysis-drilldown table { min-width: 680px; }
 .analysis-foreign { min-height: 72px; padding: 14px 22px; border-top: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .analysis-foreign div { display: grid; gap: 4px; }
 .analysis-foreign strong, .analysis-foreign b { font-size: 13px; }
@@ -491,6 +523,9 @@ th { color: #68778a; background: #fafbfc; font-weight: 600; }
   .analysis-header { align-items: flex-start; }
   .analysis-grid { grid-template-columns: 1fr; }
   .analysis-card + .analysis-card { border-left: 0; }
+  .analysis-map-layout { grid-template-columns: 1fr; }
+  .analysis-map-layout .analysis-province-ranking { border-top: 1px solid var(--line); border-left: 0; }
+  .analysis-months { grid-template-columns: repeat(3,minmax(0,1fr)); }
   .org-grid { grid-template-columns: 1fr; }
   .governance-grid, .governance-lists { grid-template-columns: 1fr; }
   .events-panel { max-width: 100%; }

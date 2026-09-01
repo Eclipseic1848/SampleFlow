@@ -23,7 +23,7 @@ test("桌面总览显示事件快照地区、外贸、客户单位和待补齐�
          (qingflow_order_no,customer_name,customer_unit,business_region_source_text,business_region_code,
           salesperson_person_id,salesperson_name,source_received_on,original_amount,current_revenue,counted_amount,lifecycle_state,posted_at)
        values('E2E-ANALYSIS','E2E 分析客户','订单当前单位','广东当前值','CN-GD',$1,'E2E 分析助理',
-              '2026-08-01',155,155,155,'active',now()) returning id::text`,
+              '2026-08-01',155,162,162,'active',now()) returning id::text`,
       [person.rows[0]!.id],
     );
     const events = await client.query<{ id: string }>(
@@ -33,7 +33,8 @@ test("桌面总览显示事件快照地区、外贸、客户单位和待补齐�
        values($1,'initial',100,100,100,'2026-08-01','2026-08-01','地区分析',$2,'E2E 分析助理','E2E 部','E2E 组'),
              ($1,'legacy_adjustment',-25,75,75,'2026-08-01','2026-08-02','外贸分析',$2,'E2E 分析助理','E2E 部','E2E 组'),
              ($1,'legacy_adjustment',50,125,125,'2026-08-01','2026-08-03','地区分析',$2,'E2E 分析助理','E2E 部','E2E 组'),
-             ($1,'legacy_adjustment',30,155,155,'2026-08-01','2026-08-04','待补齐分析',$2,'E2E 分析助理','E2E 部','E2E 组')
+             ($1,'legacy_adjustment',30,155,155,'2026-08-01','2026-08-04','待补齐分析',$2,'E2E 分析助理','E2E 部','E2E 组'),
+             ($1,'legacy_adjustment',7,162,162,'2026-09-01','2026-09-01','月份穿透',$2,'E2E 分析助理','E2E 部','E2E 组')
        returning id::text`,
       [order.rows[0]!.id, person.rows[0]!.id],
     );
@@ -59,8 +60,9 @@ test("桌面总览显示事件快照地区、外贸、客户单位和待补齐�
     await client.query("delete from performance_event_analysis_dimensions where event_id=any($1::bigint[])", [events.rows.map((row) => row.id)]);
     await client.query(
       `insert into performance_event_analysis_dimensions(event_id,business_region_code,business_region_source_text,customer_unit)
-       values($1,'CN-JS','江苏来源','客户单位甲'),($2,'EXT-TRADE','外贸','客户单位乙'),($3,'CN-ZJ','浙江来源','客户单位甲')`,
-      [events.rows[0]!.id, events.rows[1]!.id, events.rows[2]!.id],
+       values($1,'CN-JS','江苏来源','客户单位甲'),($2,'EXT-TRADE','外贸','客户单位乙'),
+             ($3,'CN-ZJ','浙江来源','客户单位甲'),($4,'CN-JS','江苏来源','客户单位甲')`,
+      [events.rows[0]!.id, events.rows[1]!.id, events.rows[2]!.id, events.rows[4]!.id],
     );
     await client.query("set session_replication_role=origin");
   } finally {
@@ -91,6 +93,67 @@ test("桌面总览显示事件快照地区、外贸、客户单位和待补齐�
   await expect(customers.getByRole("row", { name: /江苏省.*大额客户.*101.*¥100,999,999,999,998\.99/ })).toBeVisible();
   await expect(customers.getByRole("row", { name: /外贸.*客户单位乙.*1.*-¥25\.00/ })).toBeVisible();
 
+  const map = analysis.getByRole("group", { name: "中国省份业绩地图" });
+  const jiangsu = map.getByRole("button", { name: "地图选择江苏省，102 条事件，金额 ¥101,000,000,000,098.99" });
+  const zhejiang = map.getByRole("button", { name: "地图选择浙江省，1 条事件，金额 ¥50.00" });
+  await expect(jiangsu).toBeVisible();
+  await page.route("**/api/performance/analysis/drilldown?*", async (route) => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.get("level") !== "customers" || url.searchParams.get("regionCode") !== "CN-JS") return route.continue();
+    const response = await route.fetch();
+    const body = await response.json();
+    await route.fulfill({ response, json: { ...body, eventCount: body.eventCount + 1 } });
+  });
+  await jiangsu.click();
+  const drilldown = analysis.getByRole("region", { name: "分析穿透" });
+  await expect(drilldown.getByRole("heading", { name: "江苏省客户单位" })).toBeVisible();
+  await expect(drilldown.getByText("客户合计与省份汇总不一致，请停止使用当前穿透结果。", { exact: true })).toBeVisible();
+  await page.unroute("**/api/performance/analysis/drilldown?*");
+  await zhejiang.click();
+  await expect(analysis.getByRole("region", { name: "分析穿透" }).getByRole("heading", { name: "浙江省客户单位" })).toBeVisible();
+  await jiangsu.click();
+  await expect(drilldown.getByRole("heading", { name: "江苏省客户单位" })).toBeVisible();
+  await expect(drilldown.getByText("¥101,000,000,000,098.99", { exact: true })).toBeVisible();
+  await drilldown.getByRole("button", { name: "查看客户单位甲月份趋势" }).click();
+  await expect(drilldown.getByRole("heading", { name: "客户单位甲月度趋势" })).toBeVisible();
+  await expect(drilldown.getByRole("button", { name: "查看2026年8月订单事件，1 条事件，金额 ¥100.00" })).toBeVisible();
+  await expect(drilldown.getByRole("button", { name: "查看2026年9月订单事件，1 条事件，金额 ¥7.00" })).toBeVisible();
+  await drilldown.getByRole("button", { name: "查看2026年8月订单事件，1 条事件，金额 ¥100.00" }).click();
+  await expect(drilldown.getByRole("heading", { name: "2026年8月订单与事件" })).toBeVisible();
+  await expect(drilldown.getByRole("row", { name: /E2E-ANALYSIS.*E2E 分析客户.*1.*¥100\.00/ })).toBeVisible();
+  await expect(drilldown.getByRole("row", { name: /第 1 条.*首次录入.*¥100\.00.*江苏省.*客户单位甲/ })).toBeVisible();
+
+  let failSeptemberEvents = true;
+  await page.route("**/api/performance/analysis/drilldown?*", async (route) => {
+    const url = new URL(route.request().url());
+    if (failSeptemberEvents && url.searchParams.get("level") === "events" && url.searchParams.get("month") === "2026-09") {
+      failSeptemberEvents = false;
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "穿透服务暂不可用" }) });
+      return;
+    }
+    await route.continue();
+  });
+  await drilldown.getByRole("button", { name: "查看2026年9月订单事件，1 条事件，金额 ¥7.00" }).click();
+  await expect(drilldown.getByRole("alert")).toHaveText("穿透服务暂不可用");
+  await drilldown.getByRole("button", { name: "重试订单事件" }).click();
+  await expect(drilldown.getByRole("row", { name: /E2E-ANALYSIS.*E2E 分析客户.*1.*¥7\.00/ })).toBeVisible();
+  await page.unroute("**/api/performance/analysis/drilldown?*");
+
+  await drilldown.getByRole("button", { name: "查看大额客户月份趋势" }).click();
+  await drilldown.getByRole("button", { name: "查看2026年8月订单事件，101 条事件，金额 ¥100,999,999,999,998.99" }).click();
+  await expect(drilldown.getByText("已加载 100 / 101 条事件", { exact: true })).toBeVisible();
+  await drilldown.getByRole("button", { name: "加载更多事件" }).click();
+  await expect(drilldown.getByText("已加载 101 / 101 条事件", { exact: true })).toBeVisible();
+  await expect(drilldown.getByRole("button", { name: "加载更多事件" })).toHaveCount(0);
+
+  await drilldown.getByRole("button", { name: "查看2026年1月订单事件，0 条事件，金额 ¥0.00" }).click();
+  await expect(drilldown.getByText("该月份没有订单事件。", { exact: true })).toBeVisible();
+  await zhejiang.focus();
+  await page.keyboard.press("Enter");
+  await expect(analysis.getByRole("region", { name: "分析穿透" }).getByRole("heading", { name: "浙江省客户单位" })).toBeVisible();
+  await page.setViewportSize({ width: 1024, height: 800 });
+  await expect(map).toBeVisible();
+
   let releaseResponse!: () => void;
   let markRequested!: () => void;
   const heldResponse = new Promise<void>((resolve) => { releaseResponse = resolve; });
@@ -108,5 +171,5 @@ test("桌面总览显示事件快照地区、外贸、客户单位和待补齐�
   } finally {
     releaseResponse();
   }
-  await expect(analysis.locator(".metric").filter({ hasText: "授权范围总账" }).getByText("¥0.00", { exact: true })).toBeVisible();
+  await expect(analysis.locator(".metric").filter({ hasText: "授权范围总账" }).getByText("¥7.00", { exact: true })).toBeVisible();
 });
