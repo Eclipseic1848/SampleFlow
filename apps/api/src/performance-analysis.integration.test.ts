@@ -23,7 +23,11 @@ function assertNoPerRowAnalysisScan(plan: Record<string, unknown>, baseline: str
       && node["Node Type"] === "Index Scan"
       && node["Index Name"] === "performance_event_analysis_dimensions_pkey"
       && Number(node["Actual Rows"] ?? 0) <= 1;
-    if (loops > 1 && (node["Parent Relationship"] === "SubPlan" || relation === "performance_events" || (relation === "performance_event_analysis_dimensions" && !boundedDimensionLookup))) repeatedNodes.push(node);
+    const boundedOrderLookup = relation === "performance_orders"
+      && node["Node Type"] === "Index Scan"
+      && node["Index Name"] === "performance_orders_pkey"
+      && Number(node["Actual Rows"] ?? 0) <= 1;
+    if (loops > 1 && (node["Parent Relationship"] === "SubPlan" || relation === "performance_events" || (relation === "performance_event_analysis_dimensions" && !boundedDimensionLookup) || (relation === "performance_orders" && !boundedOrderLookup))) repeatedNodes.push(node);
     for (const child of (node.Plans as Array<Record<string, unknown>> | undefined) ?? []) visit(child);
   };
   visit(plan);
@@ -125,6 +129,7 @@ test("地区与客户分析按事件快照对账且查询次数不随规模增�
       runtimeUrl.searchParams.set("application_name", "sampleflow-api-runtime");
       const pool = new Pool({ connectionString: runtimeUrl.toString() });
       let analysisReadCount = 0;
+      let analysisShareLockCount = 0;
       let analysisQuery: CapturedQuery | null = null;
       const patched = new WeakSet<pg.PoolClient>();
       pool.on("acquire", (client) => {
@@ -134,7 +139,8 @@ test("地区与客户分析按事件快照对账且查询次数不随规模增�
         client.query = ((...args: unknown[]) => {
           const statement = typeof args[0] === "string" ? args[0] : String((args[0] as { text?: string })?.text ?? "");
           if (/^\s*(select|with)\b/i.test(statement) && !/\bfrom sessions\b/i.test(statement)) analysisReadCount += 1;
-          if (/with scoped_analysis as materialized/i.test(statement)) {
+          if (/^\s*lock table performance_event_analysis_dimensions in share mode\s*$/i.test(statement)) analysisShareLockCount += 1;
+          if (/scoped_analysis as materialized/i.test(statement)) {
             const values = typeof args[0] === "string" ? args[1] : (args[0] as { values?: unknown[] }).values;
             analysisQuery = { statement, values: Array.isArray(values) ? [...values] : [] };
           }
@@ -173,6 +179,136 @@ test("地区与客户分析按事件快照对账且查询次数不随规模增�
         );
         assertNoPerRowAnalysisScan(smallExplain.rows[0]!["QUERY PLAN"][0]!.Plan, "小基线");
 
+        analysisReadCount = 0;
+        const customers = await app.inject({
+          method: "GET",
+          url: "/api/performance/analysis/drilldown?level=customers&regionCode=CN-JS&month=2026-08",
+          headers: { cookie: leaderCookie },
+        });
+        assert.equal(customers.statusCode, 200, customers.body);
+        assert.deepEqual(customers.json(), {
+          level: "customers",
+          regionCode: "CN-JS",
+          regionName: "江苏省",
+          month: "2026-08",
+          eventCount: 2,
+          totalAmount: "100.00",
+          customerCount: 1,
+          nextCursor: null,
+          pageSize: 50,
+          customers: [{ customerUnit: "客户单位甲", eventCount: 2, totalAmount: "100.00" }],
+        });
+        assert.ok(analysisReadCount <= 3, `省份客户穿透读取应不超过 3 次，实际 ${analysisReadCount} 次`);
+        const smallCustomersReadCount = analysisReadCount;
+        const smallCustomersQuery = requireCapturedQuery(analysisQuery);
+
+        analysisReadCount = 0;
+        const months = await app.inject({
+          method: "GET",
+          url: "/api/performance/analysis/drilldown?level=months&regionCode=CN-JS&customerUnit=%E5%AE%A2%E6%88%B7%E5%8D%95%E4%BD%8D%E7%94%B2&year=2026",
+          headers: { cookie: leaderCookie },
+        });
+        assert.equal(months.statusCode, 200, months.body);
+        assert.deepEqual(months.json(), {
+          level: "months",
+          regionCode: "CN-JS",
+          regionName: "江苏省",
+          customerUnit: "客户单位甲",
+          year: "2026",
+          eventCount: 3,
+          totalAmount: "107.00",
+          months: [
+            { month: "2026-08", eventCount: 2, totalAmount: "100.00" },
+            { month: "2026-09", eventCount: 1, totalAmount: "7.00" },
+          ],
+        });
+        assert.ok(analysisReadCount <= 3, `客户月份穿透读取应不超过 3 次，实际 ${analysisReadCount} 次`);
+        const smallMonthsReadCount = analysisReadCount;
+        const smallMonthsQuery = requireCapturedQuery(analysisQuery);
+
+        analysisReadCount = 0;
+        const events = await app.inject({
+          method: "GET",
+          url: "/api/performance/analysis/drilldown?level=events&regionCode=CN-JS&customerUnit=%E5%AE%A2%E6%88%B7%E5%8D%95%E4%BD%8D%E7%94%B2&month=2026-08",
+          headers: { cookie: leaderCookie },
+        });
+        assert.equal(events.statusCode, 200, events.body);
+        const eventsBody = events.json();
+        assert.deepEqual({
+          level: eventsBody.level,
+          regionCode: eventsBody.regionCode,
+          regionName: eventsBody.regionName,
+          customerUnit: eventsBody.customerUnit,
+          month: eventsBody.month,
+          eventCount: eventsBody.eventCount,
+          totalAmount: eventsBody.totalAmount,
+          nextCursor: eventsBody.nextCursor,
+          pageSize: eventsBody.pageSize,
+        }, {
+          level: "events",
+          regionCode: "CN-JS",
+          regionName: "江苏省",
+          customerUnit: "客户单位甲",
+          month: "2026-08",
+          eventCount: 2,
+          totalAmount: "100.00",
+          nextCursor: null,
+          pageSize: 100,
+        });
+        assert.deepEqual(eventsBody.orders.map((item: Record<string, unknown>) => ({ ...item, events: undefined })), [{
+          orderId: order.rows[0]!.id,
+          orderNo: "ANALYSIS-CROSS",
+          customerName: "跨维度客户",
+          eventCount: 2,
+          totalAmount: "100.00",
+          events: undefined,
+        }]);
+        assert.deepEqual(eventsBody.orders[0].events.map((item: Record<string, unknown>) => ({
+          id: item.id,
+          sequence: item.sequence,
+          eventType: item.eventType,
+          deltaAmount: item.deltaAmount,
+          accountingMonth: item.accountingMonth,
+          occurredOn: item.occurredOn,
+          reason: item.reason,
+          salespersonName: item.salespersonName,
+          departmentName: item.departmentName,
+          groupName: item.groupName,
+          businessRegionCode: item.businessRegionCode,
+          businessRegionSourceText: item.businessRegionSourceText,
+          customerUnit: item.customerUnit,
+        })), [
+          { id: eventIds[0], sequence: 1, eventType: "legacy_adjustment", deltaAmount: "100.00", accountingMonth: "2026-08-01", occurredOn: "2026-08-01", reason: "分析回归", salespersonName: "分析业务员", departmentName: "分析甲部", groupName: "分析甲组", businessRegionCode: "CN-JS", businessRegionSourceText: "江苏来源", customerUnit: "客户单位甲" },
+          { id: eventIds[3], sequence: 4, eventType: "legacy_adjustment", deltaAmount: "0.00", accountingMonth: "2026-08-01", occurredOn: "2026-08-01", reason: "分析回归", salespersonName: "分析业务员", departmentName: "分析甲部", groupName: "分析甲组", businessRegionCode: "CN-JS", businessRegionSourceText: "江苏来源", customerUnit: "客户单位甲" },
+        ]);
+        assert.ok(analysisReadCount <= 3, `订单事件穿透读取应不超过 3 次，实际 ${analysisReadCount} 次`);
+        const smallEventsReadCount = analysisReadCount;
+        const smallEventsQuery = requireCapturedQuery(analysisQuery);
+
+        for (const [name, captured] of [
+          ["省份客户", smallCustomersQuery],
+          ["客户月份", smallMonthsQuery],
+          ["订单事件", smallEventsQuery],
+        ] as const) {
+          const explain = await setup.query<{ "QUERY PLAN": Array<{ Plan: Record<string, unknown> }> }>(
+            `explain (analyze,format json) ${captured.statement}`,
+            captured.values,
+          );
+          assertNoPerRowAnalysisScan(explain.rows[0]!["QUERY PLAN"][0]!.Plan, `小基线${name}`);
+        }
+
+        const outOfScopeUrls = [
+          "/api/performance/analysis/drilldown?level=customers&regionCode=CN-BJ&month=2026-08",
+          "/api/performance/analysis/drilldown?level=months&regionCode=CN-BJ&customerUnit=%E8%8C%83%E5%9B%B4%E5%A4%96%E5%8D%95%E4%BD%8D&year=2026",
+          "/api/performance/analysis/drilldown?level=events&regionCode=CN-BJ&customerUnit=%E8%8C%83%E5%9B%B4%E5%A4%96%E5%8D%95%E4%BD%8D&month=2026-08",
+        ];
+        for (const url of outOfScopeUrls) {
+          const scoped = await app.inject({ method: "GET", url, headers: { cookie: leaderCookie } });
+          assert.equal(scoped.statusCode, 200, scoped.body);
+          assert.equal(scoped.json().eventCount, 0);
+          assert.equal(scoped.json().totalAmount, "0.00");
+        }
+
         const september = await app.inject({ method: "GET", url: "/api/performance/analysis?month=2026-09", headers: { cookie: leaderCookie } });
         assert.equal(september.statusCode, 200, september.body);
         assert.deepEqual(september.json().ledger, { eventCount: 1, totalAmount: "7.00" });
@@ -202,7 +338,9 @@ test("地区与客户分析按事件快照对账且查询次数不随规模增�
              returning id
            )
            insert into performance_event_analysis_dimensions(event_id,business_region_code,business_region_source_text,customer_unit)
-           select id,'CN-JS','江苏来源','客户单位甲' from new_events`,
+           select id,'CN-JS','江苏来源',case when id in (select id from new_events order by id desc limit 1696) then '客户单位甲'
+                                            else '规模单位'||lpad((((id-1)%60)+1)::text,2,'0') end
+           from new_events`,
           [alicePersonId, departmentA.rows[0]!.id, groupA.rows[0]!.id, leaderPersonId],
         );
         await setup.query("set session_replication_role=origin");
@@ -220,6 +358,147 @@ test("地区与客户分析按事件快照对账且查询次数不随规模增�
         assert.ok(analysisReadCount <= 4, `规模数据分析读取应不超过 4 次，实际 ${analysisReadCount} 次`);
         assert.ok(Math.abs(analysisReadCount - smallReadCount) <= 1, `规模增长前后读取次数差应不超过 1，实际 ${smallReadCount} -> ${analysisReadCount}`);
 
+        const insertConcurrentEvent = async (amount: number) => {
+          const id = await insertEvent(order.rows[0]!.id, amount, "2026-08-01", alicePersonId, departmentA.rows[0]!.id, "分析甲部", groupA.rows[0]!.id, "分析甲组");
+          await setup.query("set session_replication_role=replica");
+          await setup.query("delete from performance_event_analysis_dimensions where event_id=$1", [id]);
+          await setup.query(
+            "insert into performance_event_analysis_dimensions(event_id,business_region_code,business_region_source_text,customer_unit) values($1,'CN-JS','江苏来源','客户单位甲')",
+            [id],
+          );
+          await setup.query("set session_replication_role=origin");
+          return id;
+        };
+        const removeConcurrentEvent = async (id: string) => {
+          await setup.query("set session_replication_role=replica");
+          await setup.query("delete from performance_event_analysis_dimensions where event_id=$1", [id]);
+          await setup.query("delete from performance_events where id=$1", [id]);
+          await setup.query("set session_replication_role=origin");
+        };
+        const insertConcurrentDimension = async (customerUnit: string) => {
+          await setup.query(
+            "insert into performance_event_analysis_dimensions(event_id,business_region_code,business_region_source_text,customer_unit) values($1,'CN-JS','并发补齐来源',$2)",
+            [eventIds[4], customerUnit],
+          );
+        };
+        const removeConcurrentDimension = async () => {
+          await setup.query("set session_replication_role=replica");
+          await setup.query("delete from performance_event_analysis_dimensions where event_id=$1", [eventIds[4]]);
+          await setup.query("set session_replication_role=origin");
+        };
+        const waitForAnalysisShareLock = async () => {
+          for (let attempt = 0; attempt < 100; attempt += 1) {
+            const waiting = await setup.query<{ waiting: boolean }>(
+              `select exists(
+                 select 1 from pg_locks locks
+                 join pg_class relation on relation.oid=locks.relation
+                 join pg_stat_activity activity on activity.pid=locks.pid
+                 where relation.relname='performance_event_analysis_dimensions'
+                   and locks.mode='ShareLock' and not locks.granted
+                   and activity.application_name='sampleflow-api-runtime'
+               ) as waiting`,
+            );
+            if (waiting.rows[0]!.waiting) return;
+            await new Promise((resolve) => setTimeout(resolve, 10));
+          }
+          assert.fail("首屏分析必须等待在途维度写入提交后再冻结快照");
+        };
+        const scaledDrilldowns = [
+          { name: "省份客户", url: "/api/performance/analysis/drilldown?level=customers&regionCode=CN-JS&month=2026-08", baseline: smallCustomersReadCount },
+          { name: "客户月份", url: "/api/performance/analysis/drilldown?level=months&regionCode=CN-JS&customerUnit=%E5%AE%A2%E6%88%B7%E5%8D%95%E4%BD%8D%E7%94%B2&year=2026", baseline: smallMonthsReadCount },
+          { name: "订单事件", url: "/api/performance/analysis/drilldown?level=events&regionCode=CN-JS&customerUnit=%E5%AE%A2%E6%88%B7%E5%8D%95%E4%BD%8D%E7%94%B2&month=2026-08", baseline: smallEventsReadCount },
+        ];
+        const largeDrilldownQueries: CapturedQuery[] = [];
+        for (const drilldown of scaledDrilldowns) {
+          analysisReadCount = 0;
+          let heldEventId: string | null = null;
+          let result: Awaited<ReturnType<typeof app.inject>>;
+          if (drilldown.name === "省份客户") {
+            const writer = new Client({ connectionString: database.url });
+            await writer.connect();
+            try {
+              await writer.query("set session_replication_role=replica");
+              await writer.query("begin");
+              const heldEvent = await writer.query<{ id: string }>(
+                `insert into performance_events
+                  (order_id,event_type,delta_amount,resulting_current_revenue,resulting_counted_amount,accounting_month,occurred_on,reason,
+                   salesperson_person_id,salesperson_name,department_unit_id,department_name,group_unit_id,group_name,leader_person_id,leader_name,order_sequence)
+                 values($1,'legacy_adjustment',0,155,155,'2026-08-01','2026-08-01','乱序提交回归',$2,'分析业务员',$3,'分析甲部',$4,'分析甲组',$5,'分析组长',999)
+                 returning id::text`,
+                [order.rows[0]!.id, alicePersonId, departmentA.rows[0]!.id, groupA.rows[0]!.id, leaderPersonId],
+              );
+              heldEventId = heldEvent.rows[0]!.id;
+              await writer.query(
+                "insert into performance_event_analysis_dimensions(event_id,business_region_code,business_region_source_text,customer_unit) values($1,'CN-JS','乱序提交来源','客户单位甲')",
+                [heldEventId],
+              );
+              const pendingResult = app.inject({ method: "GET", url: drilldown.url, headers: { cookie: leaderCookie } });
+              try {
+                await waitForAnalysisShareLock();
+              } finally {
+                await writer.query("commit");
+              }
+              result = await pendingResult;
+            } finally {
+              await writer.end();
+            }
+          } else {
+            result = await app.inject({ method: "GET", url: drilldown.url, headers: { cookie: leaderCookie } });
+          }
+          assert.equal(result.statusCode, 200, result.body.slice(0, 1_000));
+          assert.ok(analysisReadCount <= 3, `规模数据${drilldown.name}穿透读取应不超过 3 次，实际 ${analysisReadCount} 次`);
+          assert.ok(Math.abs(analysisReadCount - drilldown.baseline) <= 1, `${drilldown.name}规模增长前后读取次数差应不超过 1，实际 ${drilldown.baseline} -> ${analysisReadCount}`);
+          largeDrilldownQueries.push(requireCapturedQuery(analysisQuery));
+          if (drilldown.name === "省份客户") {
+            const page = result.json();
+            assert.equal(page.customers.length, 50);
+            assert.equal(page.customerCount, 61);
+            assert.equal(page.eventCount, 4699);
+            assert.ok(page.nextCursor);
+            const firstUnits = new Set(page.customers.map((customer: { customerUnit: string }) => customer.customerUnit));
+            const concurrentEventId = await insertConcurrentEvent(-1_000_000_000);
+            await insertConcurrentDimension("并发补齐单位");
+            try {
+              const next = await app.inject({ method: "GET", url: `${drilldown.url}&cursor=${encodeURIComponent(page.nextCursor)}`, headers: { cookie: leaderCookie } });
+              assert.equal(next.statusCode, 200, next.body);
+              assert.equal(next.json().customers.length, 11);
+              assert.equal(next.json().customerCount, page.customerCount);
+              assert.equal(next.json().customers.some((customer: { customerUnit: string }) => firstUnits.has(customer.customerUnit)), false);
+              assert.equal(next.json().nextCursor, null);
+            } finally {
+              await removeConcurrentDimension();
+              await removeConcurrentEvent(concurrentEventId);
+              if (heldEventId) await removeConcurrentEvent(heldEventId);
+            }
+          }
+          if (drilldown.name === "订单事件") {
+            const page = result.json();
+            assert.equal(page.orders.flatMap((order: { events: unknown[] }) => order.events).length, 100);
+            assert.ok(page.nextCursor);
+            const ids = new Set(page.orders.flatMap((order: { events: Array<{ id: string }> }) => order.events.map((event) => event.id)));
+            const concurrentEventId = await insertConcurrentEvent(1);
+            await insertConcurrentDimension("客户单位甲");
+            try {
+              const next = await app.inject({ method: "GET", url: `${drilldown.url}&cursor=${encodeURIComponent(page.nextCursor)}`, headers: { cookie: leaderCookie } });
+              assert.equal(next.statusCode, 200, next.body.slice(0, 1_000));
+              assert.equal(next.json().eventCount, page.eventCount);
+              assert.equal(next.json().totalAmount, page.totalAmount);
+              assert.equal(next.json().orders.flatMap((order: { events: Array<{ id: string }> }) => order.events).some((event: { id: string }) => ids.has(event.id) || event.id === concurrentEventId || event.id === eventIds[4]), false);
+            } finally {
+              await removeConcurrentDimension();
+              await removeConcurrentEvent(concurrentEventId);
+            }
+          }
+        }
+
+        for (const [index, captured] of largeDrilldownQueries.entries()) {
+          const explain = await setup.query<{ "QUERY PLAN": Array<{ Plan: Record<string, unknown> }> }>(
+            `explain (analyze,format json) ${captured.statement}`,
+            captured.values,
+          );
+          assertNoPerRowAnalysisScan(explain.rows[0]!["QUERY PLAN"][0]!.Plan, `2,850 订单／4,701 事件基线${scaledDrilldowns[index]!.name}`);
+        }
+
         const largeExplain = await setup.query<{ "QUERY PLAN": Array<{ Plan: Record<string, unknown> }> }>(
           `explain (analyze,format json) ${capturedAnalysisQuery.statement}`,
           capturedAnalysisQuery.values,
@@ -229,8 +508,26 @@ test("地区与客户分析按事件快照对账且查询次数不随规模增�
         const adminCookie = await loginCookie(app, "analysis_admin");
         const forbidden = await app.inject({ method: "GET", url: "/api/performance/analysis?month=2026-08", headers: { cookie: adminCookie } });
         assert.equal(forbidden.statusCode, 403, forbidden.body);
+        analysisShareLockCount = 0;
+        for (const url of scaledDrilldowns.map((item) => item.url)) {
+          const drilldownForbidden = await app.inject({ method: "GET", url, headers: { cookie: adminCookie } });
+          assert.equal(drilldownForbidden.statusCode, 403, drilldownForbidden.body);
+        }
+        assert.equal(analysisShareLockCount, 0, "无业务查看权限的账号不得取得分析维度写阻塞锁");
+        const unauthenticated = await app.inject({ method: "GET", url: scaledDrilldowns[0]!.url });
+        assert.equal(unauthenticated.statusCode, 401, unauthenticated.body);
         const invalid = await app.inject({ method: "GET", url: "/api/performance/analysis?month=2026-13", headers: { cookie: leaderCookie } });
         assert.equal(invalid.statusCode, 400, invalid.body);
+        for (const url of [
+          "/api/performance/analysis/drilldown?level=unknown&regionCode=CN-JS&month=2026-08",
+          "/api/performance/analysis/drilldown?level=customers&regionCode=CN-UNKNOWN&month=2026-08",
+          "/api/performance/analysis/drilldown?level=customers&regionCode=CN-JS&month=2026-08&extra=true",
+          "/api/performance/analysis/drilldown?level=customers&regionCode=CN-JS&month=2026-08&cursor=invalid%25",
+          "/api/performance/analysis/drilldown?level=months&regionCode=CN-JS&customerUnit=%20%20&year=2026",
+        ]) {
+          const drilldownInvalid = await app.inject({ method: "GET", url, headers: { cookie: leaderCookie } });
+          assert.equal(drilldownInvalid.statusCode, 400, drilldownInvalid.body);
+        }
       } finally {
         await app.close();
         await pool.end();

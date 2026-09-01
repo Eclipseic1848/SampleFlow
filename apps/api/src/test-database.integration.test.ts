@@ -80,9 +80,75 @@ test("干净隔离数据库可应用全部现有迁移", async () => {
         "019_performance_order_cursor.sql",
         "020_event_analysis_dimensions.sql",
         "021_controlled_dimension_backfill.sql",
+        "022_freeze_analysis_dimension_pagination.sql",
       ]);
     } finally {
       await client.end();
+    }
+  });
+});
+
+test("既有分析维度升级后获得连续冻结序列", async () => {
+  await withTestDatabase(async (database) => {
+    const client = new Client({ connectionString: database.url });
+    await client.connect();
+    let eventId = "";
+    try {
+      await client.query("create table schema_migrations(name text primary key,applied_at timestamptz not null default now())");
+      const previousMigrations = (await readdir(migrationsRoot)).filter((name) => name.endsWith(".sql") && name < "022_").sort();
+      for (const name of previousMigrations) {
+        await client.query(await readFile(`${migrationsRoot}${name}`, "utf8"));
+        await client.query("insert into schema_migrations(name) values($1)", [name]);
+      }
+      const user = await client.query<{ id: string }>(
+        "insert into users(username,display_name,password_hash,password_salt,must_change_password) values('dimension_sequence_upgrade','维度序列升级','hash','salt',false) returning id::text",
+      );
+      const person = await client.query<{ id: string }>("select id::text from people where user_id=$1", [user.rows[0]!.id]);
+      const order = await client.query<{ id: string }>(
+        `insert into performance_orders
+          (qingflow_order_no,customer_name,customer_unit,business_region_source_text,business_region_code,
+           salesperson_person_id,salesperson_name,source_received_on,original_amount,current_revenue,counted_amount,lifecycle_state,created_by,posted_at)
+         values('DIMENSION-SEQUENCE-UPGRADE','维度序列客户','维度序列单位','江苏来源','CN-JS',$1,'维度序列升级','2026-08-01',1,1,1,'active',$2,now()) returning id::text`,
+        [person.rows[0]!.id, user.rows[0]!.id],
+      );
+      await client.query("begin");
+      const event = await client.query<{ id: string }>(
+        `insert into performance_events
+          (order_id,event_type,delta_amount,resulting_current_revenue,resulting_counted_amount,accounting_month,occurred_on,reason,
+           salesperson_person_id,salesperson_name,department_name,group_name,created_by)
+         values($1,'initial',1,1,1,'2026-08-01','2026-08-01','维度序列升级',$2,'维度序列升级','维度序列部门','维度序列小组',$3) returning id::text`,
+        [order.rows[0]!.id, person.rows[0]!.id, user.rows[0]!.id],
+      );
+      eventId = event.rows[0]!.id;
+      await client.query(
+        "insert into performance_event_analysis_dimensions(event_id,business_region_code,business_region_source_text,customer_unit) values($1,'CN-JS','江苏来源','维度序列单位')",
+        [eventId],
+      );
+      await client.query("commit");
+    } finally {
+      await client.end();
+    }
+
+    await execFileAsync(process.execPath, ["--import", "tsx", "src/cli/migrate.ts"], {
+      cwd: apiRoot,
+      env: { ...process.env, DATABASE_URL: database.url, NODE_ENV: "test" },
+      encoding: "utf8",
+    });
+
+    const verify = new Client({ connectionString: database.url });
+    await verify.connect();
+    try {
+      const existing = await verify.query<{ dimension_sequence: string }>(
+        "select dimension_sequence::text from performance_event_analysis_dimensions where event_id=$1",
+        [eventId],
+      );
+      assert.match(existing.rows[0]!.dimension_sequence, /^[1-9]\d*$/);
+      const next = await verify.query<{ dimension_sequence: string }>(
+        "select nextval(pg_get_serial_sequence('performance_event_analysis_dimensions','dimension_sequence'))::text as dimension_sequence",
+      );
+      assert.ok(BigInt(next.rows[0]!.dimension_sequence) > BigInt(existing.rows[0]!.dimension_sequence));
+    } finally {
+      await verify.end();
     }
   });
 });
