@@ -8,6 +8,7 @@ import { withTestApi } from "./test-support/test-api.js";
 import { withMigratedTestDatabase } from "./test-support/test-database.js";
 import { resolvePerformanceAccess } from "./modules/authorization.js";
 import { ORGANIZATION_ACHIEVEMENT_SQL } from "./modules/performance.js";
+import { businessDate } from "./domain/business-time.js";
 
 const { Client, Pool } = pg;
 const TEST_ORIGIN = "http://127.0.0.1:4174";
@@ -1542,7 +1543,8 @@ test("订单导出复用组合筛选、权限范围与安全审计", async () =>
         return originalQuery(...args as [string, unknown[]]);
       }) as typeof client.query;
     });
-    const app = await buildApp({ database: pool, logger: false, clock: () => new Date("2026-08-31T16:30:00Z") });
+    const exportNow = new Date();
+    const app = await buildApp({ database: pool, logger: false, clock: () => exportNow });
     try {
       const leaderCookie = await loginCookie(app, "scope_leader");
       const filters = new URLSearchParams({
@@ -1561,7 +1563,7 @@ test("订单导出复用组合筛选、权限范围与安全审计", async () =>
       assert.ok(exportReadCount <= 2, `排除会话认证后，订单导出权限与数据读取应不超过 2 次，实际 ${exportReadCount} 次`);
       const smallReadCount = exportReadCount;
       assert.match(String(response.headers["content-type"]), /^text\/csv; charset=utf-8/);
-      assert.match(String(response.headers["content-disposition"]), /sampleflow-orders-2026-09-01\.csv/);
+      assert.match(String(response.headers["content-disposition"]), new RegExp(`sampleflow-orders-${businessDate(exportNow)}\\.csv`));
       assert.equal(response.body.charCodeAt(0), 0xfeff);
       const lines = response.body.split("\r\n");
       assert.equal(lines.length, 52);

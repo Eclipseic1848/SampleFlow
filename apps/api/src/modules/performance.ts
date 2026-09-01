@@ -150,6 +150,15 @@ type AchievementRow = Readonly<{
   event_count: string;
 }>;
 
+type PerformanceAnalysisRow = Readonly<{
+  kind: "ledger" | "mapped" | "pending" | "province" | "foreign_trade" | "customer";
+  region_code: string | null;
+  customer_unit: string | null;
+  event_count: string;
+  total_amount: string;
+  reconciled: boolean;
+}>;
+
 function timeProgressRate(periodMonth: string, today: string): string | null {
   const currentMonth = today.slice(0, 7);
   if (periodMonth > currentMonth) return null;
@@ -827,6 +836,102 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
     const result = await loadFormalReport(db, request.currentUser, params.data.goalId, businessDate(clock()));
     if (!result.ok) return reply.code(result.statusCode).send(result.body);
     return result.report;
+  });
+
+  app.get("/api/performance/analysis", async (request, reply) => {
+    if (!request.currentUser) return reply.code(401).send({ message: "尚未登录" });
+    const parsed = dashboardQuerySchema.safeParse(request.query);
+    if (!parsed.success) return reply.code(400).send({ code: "MONTH_INVALID", message: "月份格式无效" });
+    const month = parsed.data.month ?? businessDate(clock()).slice(0, 7);
+    const client = await db.connect();
+    try {
+      await client.query("begin transaction isolation level repeatable read read only");
+      const access = await resolvePerformanceAccess(client, request.currentUser);
+      if (!canReadPerformance(access)) {
+        await client.query("rollback");
+        return reply.code(403).send({ message: "当前角色没有业务查看权限" });
+      }
+      const result = await client.query<PerformanceAnalysisRow>(
+        `with scoped_analysis as materialized (
+           select e.delta_amount,dimensions.event_id as dimensions_event_id,
+                  dimensions.business_region_code,dimensions.customer_unit
+           from performance_events e
+           left join performance_event_analysis_dimensions dimensions on dimensions.event_id=e.id
+           where e.accounting_month=$1::date and ${performanceScopeSql("e", 2)}
+         ), summary as (
+           select count(*)::bigint as ledger_count,
+                  coalesce(sum(delta_amount),0.00) as ledger_amount,
+                  count(*) filter(where dimensions_event_id is not null)::bigint as mapped_count,
+                  coalesce(sum(delta_amount) filter(where dimensions_event_id is not null),0.00) as mapped_amount,
+                  count(*) filter(where dimensions_event_id is null)::bigint as pending_count,
+                  coalesce(sum(delta_amount) filter(where dimensions_event_id is null),0.00) as pending_amount
+           from scoped_analysis
+         ), aggregates as (
+           select 'ledger'::text as kind,null::text as region_code,null::text as customer_unit,
+                  ledger_count as event_count,ledger_amount as total_amount from summary
+           union all
+           select 'mapped',null,null,mapped_count,mapped_amount from summary
+           union all
+           select 'pending',null,null,pending_count,pending_amount from summary
+           union all
+           select 'province',business_region_code,null,count(*)::bigint,sum(delta_amount)
+           from scoped_analysis where business_region_code like 'CN-%' group by business_region_code
+           union all
+           select 'foreign_trade','EXT-TRADE',null,count(*)::bigint,coalesce(sum(delta_amount),0.00)
+           from scoped_analysis where business_region_code='EXT-TRADE'
+           union all
+           select 'customer',business_region_code,customer_unit,count(*)::bigint,sum(delta_amount)
+           from scoped_analysis where dimensions_event_id is not null group by business_region_code,customer_unit
+         )
+         select aggregates.kind,aggregates.region_code,aggregates.customer_unit,
+                aggregates.event_count::text,aggregates.total_amount::text,
+                (summary.ledger_count=summary.mapped_count+summary.pending_count
+                 and summary.ledger_amount=summary.mapped_amount+summary.pending_amount) as reconciled
+         from aggregates cross join summary
+         order by case aggregates.kind when 'ledger' then 1 when 'mapped' then 2 when 'pending' then 3
+                  when 'province' then 4 when 'foreign_trade' then 5 else 6 end,
+                  aggregates.total_amount desc,aggregates.region_code,aggregates.customer_unit`,
+        [`${month}-01`, ...performanceScopeValues(access)],
+      );
+      await client.query("commit");
+      const summary = (kind: PerformanceAnalysisRow["kind"]) => {
+        const row = result.rows.find((item) => item.kind === kind)!;
+        return { eventCount: Number(row.event_count), totalAmount: row.total_amount };
+      };
+      const regions = result.rows.filter((row) => row.kind === "province");
+      const foreignTrade = result.rows.find((row) => row.kind === "foreign_trade")!;
+      return {
+        month,
+        ledger: summary("ledger"),
+        mapped: summary("mapped"),
+        pending: summary("pending"),
+        reconciled: result.rows[0]!.reconciled,
+        provinces: regions.map((row) => ({
+          regionCode: row.region_code!,
+          regionName: standardBusinessRegionName(row.region_code!) ?? row.region_code!,
+          eventCount: Number(row.event_count),
+          totalAmount: row.total_amount,
+        })),
+        foreignTrade: {
+          regionCode: "EXT-TRADE",
+          regionName: standardBusinessRegionName("EXT-TRADE")!,
+          eventCount: Number(foreignTrade.event_count),
+          totalAmount: foreignTrade.total_amount,
+        },
+        customers: result.rows.filter((row) => row.kind === "customer").map((row) => ({
+          regionCode: row.region_code!,
+          regionName: standardBusinessRegionName(row.region_code!) ?? row.region_code!,
+          customerUnit: row.customer_unit!,
+          eventCount: Number(row.event_count),
+          totalAmount: row.total_amount,
+        })),
+      };
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
   });
 
   app.get("/api/performance/dashboard", async (request, reply) => {
