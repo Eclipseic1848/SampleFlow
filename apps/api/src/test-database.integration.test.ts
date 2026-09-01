@@ -81,6 +81,7 @@ test("干净隔离数据库可应用全部现有迁移", async () => {
         "020_event_analysis_dimensions.sql",
         "021_controlled_dimension_backfill.sql",
         "022_freeze_analysis_dimension_pagination.sql",
+        "023_immutable_confirmations_and_audit.sql",
       ]);
     } finally {
       await client.end();

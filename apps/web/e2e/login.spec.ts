@@ -561,10 +561,11 @@ test("销售经理可从选择器创建顶层目标并完成总经理到人事�
       await page.getByLabel("下达原因").fill("公司十一月目标");
       await page.getByRole("button",{name:"提交待确认"}).click();
       const topRow=page.getByRole("row").filter({hasText:"2026-11"}).filter({hasText:"销售经理总目标"});
-      await expect(topRow).toContainText("待责任人签名");
-      await topRow.getByRole("button",{name:"确认签名"}).click();
-      await page.getByLabel("签名确认").fill("E2E 销售经理确认");
-      await page.getByRole("button",{name:"提交签名"}).click();
+      await expect(topRow).toContainText("待责任人确认");
+      await topRow.getByRole("button",{name:"确认目标"}).click();
+      await expect(page.getByText("本人已核对并确认承担本目标版本。")).toBeVisible();
+      await expect(page.getByRole("dialog").getByRole("textbox")).toHaveCount(0);
+      await page.getByRole("button",{name:"确认目标"}).click();
       await expect(topRow).toContainText("待总经理审批");
 
       await logout();await login("e2e_goal_gm");await page.getByRole("button",{name:"审批中心"}).click();
@@ -586,10 +587,10 @@ test("销售经理可从选择器创建顶层目标并完成总经理到人事�
       await page.getByLabel("目标责任人").selectOption({label:"E2E 业务主管 · E2E 目标部门"});
       await page.getByLabel("目标金额").fill("800");await page.getByLabel("下达原因").fill("部门十一月目标");
       await page.getByRole("button",{name:"提交待确认"}).click();
-      await expect(page.getByRole("row").filter({hasText:"E2E 业务主管"})).toContainText("待责任人签名");
+      await expect(page.getByRole("row").filter({hasText:"E2E 业务主管"})).toContainText("待责任人确认");
 });
 
-test("目标修改申请在审批中心完成填金额、重签、终审和联动选择",async({database,page})=>{
+test("目标修改申请在审批中心完成填金额、重新确认、终审和联动选择",async({database,page})=>{
   test.slow();
     const users={
       manager:await seedTestUser(database.url,{username:"e2e_change_manager",displayName:"E2E 变更经理",password:"Goal@123",roleCode:"sales_manager",roleName:"销售经理"}),
@@ -626,8 +627,8 @@ test("目标修改申请在审批中心完成填金额、重签、终审和联�
       await page.getByLabel("新目标金额").fill("450");await page.getByLabel("处理意见").fill("同意按客户结构调整");await page.getByRole("button",{name:"接受并创建新版本"}).click();
 
       await logout();await login("e2e_change_salesperson");await page.getByRole("button",{name:"目标管理"}).click();
-      const pendingRow=page.getByRole("row").filter({hasText:"E2E 变更业务员"});await expect(pendingRow).toContainText("¥450.00");await pendingRow.getByRole("button",{name:"确认签名"}).click();
-      await page.getByLabel("签名确认").fill("E2E 业务员重新确认");await page.getByRole("button",{name:"提交签名"}).click();
+      const pendingRow=page.getByRole("row").filter({hasText:"E2E 变更业务员"});await expect(pendingRow).toContainText("¥450.00");await pendingRow.getByRole("button",{name:"确认目标"}).click();
+      await page.getByRole("button",{name:"确认目标"}).click();
 
       await logout();await login("e2e_change_hr");await page.getByRole("button",{name:"审批中心"}).click();
       const approvalRow=page.getByRole("row").filter({hasText:"E2E 变更业务员"}).filter({hasText:"待人事审批"});await approvalRow.getByRole("button",{name:"批准"}).click();
@@ -648,8 +649,8 @@ test("目标修改申请在审批中心完成填金额、重签、终审和联�
       await page.getByLabel("新目标金额").fill("475");await page.getByLabel("处理意见").fill("接受第二次调整");await page.getByRole("button",{name:"接受并创建新版本"}).click();
 
       await logout();await login("e2e_change_salesperson");await page.getByRole("button",{name:"目标管理"}).click();
-      const secondPending=page.getByRole("row").filter({hasText:"E2E 变更业务员"});await secondPending.getByRole("button",{name:"确认签名"}).click();
-      await page.getByLabel("签名确认").fill("E2E 业务员第二次确认");await page.getByRole("button",{name:"提交签名"}).click();
+      const secondPending=page.getByRole("row").filter({hasText:"E2E 变更业务员"});await secondPending.getByRole("button",{name:"确认目标"}).click();
+      await page.getByRole("button",{name:"确认目标"}).click();
 
       await logout();await login("e2e_change_hr");await page.getByRole("button",{name:"审批中心"}).click();
       const secondApproval=page.getByRole("row").filter({hasText:"E2E 变更业务员"}).filter({hasText:"待人事审批"});await secondApproval.getByRole("button",{name:"批准"}).click();
