@@ -6,7 +6,7 @@ const { Client } = pg;
 
 test.use({ locale: "zh-CN", timezoneId: "Asia/Shanghai", viewport: { width: 1280, height: 800 } });
 
-test("桌面总览显示事件快照地区、外贸、客户单位和待补齐对账", async ({ database, page }) => {
+test("业绩分析页显示事件快照地区、外贸、客户单位和待补齐对账", async ({ database, page }) => {
   const userId = await seedTestUser(database.url, {
     username: "e2e_analysis_assistant",
     displayName: "E2E 分析助理",
@@ -73,6 +73,7 @@ test("桌面总览显示事件快照地区、外贸、客户单位和待补齐�
   await page.getByLabel("账号").fill("e2e_analysis_assistant");
   await page.getByLabel("密码", { exact: true }).fill("Analysis@123");
   await page.getByRole("button", { name: "进入 SampleFlow" }).click();
+  await page.getByRole("button", { name: "业绩分析" }).click();
 
   const analysis = page.getByRole("region", { name: "地区与客户单位分析" });
   await analysis.getByLabel("分析月份").fill("2026-08");

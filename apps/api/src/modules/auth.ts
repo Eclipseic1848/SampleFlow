@@ -119,6 +119,7 @@ export async function registerAuth(app: FastifyInstance, db: Database, clock: ()
   app.addHook("preHandler", async (request, reply) => {
     const token = request.cookies[SESSION_COOKIE];
     if (!token) return;
+    const now = clock();
     const result = await db.query<{
       id: string;
       person_id: string;
@@ -137,10 +138,10 @@ export async function registerAuth(app: FastifyInstance, db: Database, clock: ()
        join users u on u.id = s.user_id and u.is_active
        join people p on p.user_id=u.id
        left join user_roles ur on ur.user_id = u.id
-       where s.token_hash = $1 and s.revoked_at is null and s.expires_at > now()
-         and s.last_seen_at > now() - interval '30 minutes'
+       where s.token_hash = $1 and s.revoked_at is null and s.expires_at > $2
+         and s.last_seen_at > $2 - interval '30 minutes'
        group by u.id, p.id, u.username, u.display_name, u.must_change_password, s.id, s.last_seen_at, s.csrf_token_hash`,
-      [hashSessionToken(token)],
+      [hashSessionToken(token), now],
     );
     const row = result.rows[0];
     if (!row) return;
@@ -184,8 +185,8 @@ export async function registerAuth(app: FastifyInstance, db: Database, clock: ()
         return reply.code(403).send({ code: "ORIGIN_INVALID", message: "请求来源不受信任" });
       }
     }
-    if (row.last_seen_at.getTime() <= Date.now() - 5 * 60 * 1000) {
-      await db.query("update sessions set last_seen_at=now() where id=$1", [row.session_id]);
+    if (row.last_seen_at.getTime() <= now.getTime() - 5 * 60 * 1000) {
+      await db.query("update sessions set last_seen_at=$2 where id=$1", [row.session_id, now]);
     }
   });
 
@@ -245,9 +246,9 @@ export async function registerAuth(app: FastifyInstance, db: Database, clock: ()
     try {
       await client.query("begin");
       await client.query(
-        `insert into sessions (user_id, token_hash, csrf_token_hash, expires_at, user_agent, ip_address)
-         values ($1, $2, $3, $4, $5, $6)`,
-        [user.id, tokenHash, csrf.tokenHash, new Date(now.getTime() + SESSION_TTL_MS), request.headers["user-agent"] ?? null, request.ip],
+        `insert into sessions (user_id, token_hash, csrf_token_hash, expires_at, created_at, last_seen_at, user_agent, ip_address)
+         values ($1, $2, $3, $4, $5, $5, $6, $7)`,
+        [user.id, tokenHash, csrf.tokenHash, new Date(now.getTime() + SESSION_TTL_MS), now, request.headers["user-agent"] ?? null, request.ip],
       );
       await client.query("delete from auth_login_throttles where scope='account' and throttle_key=$1", [accountKey]);
       await client.query(

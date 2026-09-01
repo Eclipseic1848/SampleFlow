@@ -383,7 +383,7 @@ test("无业务权限账号访问订单深链时看到明确权限说明", async
   await page.getByLabel("密码", { exact: true }).fill("Forbidden@123");
   await page.getByRole("button", { name: "进入 SampleFlow" }).click();
   await expect(page.getByRole("heading", { name: "无法访问订单业绩" })).toBeVisible();
-  await expect(page.getByText("当前账号没有订单查看权限。", { exact: true })).toBeVisible();
+  await expect(page.getByText("403 · 当前账号没有订单业绩权限。", { exact: true })).toBeVisible();
   await expect(page).toHaveURL(/page=orders/);
 });
 

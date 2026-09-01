@@ -253,8 +253,10 @@ form button:disabled { cursor: wait; opacity: .72; }
 .events-panel .panel-title { padding: 20px 22px 15px; }
 .events-panel .panel-title button { border: 0; color: var(--blue); background: transparent; cursor: pointer; }
 .analysis-panel { margin-top: 20px; border: 1px solid var(--line); background: #fff; }
+.analysis-page .analysis-panel { margin-top: 0; }
 .analysis-header { min-height: 78px; padding: 16px 22px; display: flex; align-items: center; justify-content: space-between; gap: 20px; }
-.analysis-header h2, .analysis-card h3 { margin: 0; font-size: 16px; }
+.analysis-header h1 { margin: 0; font-size: 22px; }
+.analysis-card h3 { margin: 0; font-size: 16px; }
 .analysis-header p { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
 .analysis-header label { width: 180px; margin: 0; }
 .analysis-header label span { display: block; margin-bottom: 6px; color: var(--muted); font-size: 12px; }
