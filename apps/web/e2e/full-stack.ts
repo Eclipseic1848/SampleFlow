@@ -99,7 +99,16 @@ async function stopProcess(process: RunningProcess): Promise<void> {
   }
 }
 
-export const test = base.extend<{ database: FullStackDatabase }>({
+export const test = base.extend<{ database: FullStackDatabase; dismissOnboarding: void; onboardingEnabled: boolean }>({
+  onboardingEnabled: [false, { option: true }],
+  dismissOnboarding: [async ({ onboardingEnabled, page }, use) => {
+    if (!onboardingEnabled) {
+      await page.addLocatorHandler(page.locator(".onboarding-bubble"), async (dialog) => {
+        await dialog.getByRole("button", { name: "跳过全部引导" }).click();
+      });
+    }
+    await use();
+  }, { auto: true }],
   database: [async ({}, use, testInfo) => {
     await withMigratedTestDatabase(async (database) => {
       const [apiPort, webPort] = await allocatePorts();
