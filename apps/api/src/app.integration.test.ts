@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { buildApp } from "./app.js";
+import { db } from "./db.js";
+
+test("全局连接池处理空闲连接错误，数据库暂不可用时进程不会因未监听事件退出", () => {
+  assert.ok(db.listenerCount("error") > 0);
+});
 
 test("API 应用可在不监听端口时返回健康状态", async () => {
   const app = await buildApp();

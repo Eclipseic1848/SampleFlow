@@ -19,6 +19,10 @@ export const db = new Pool({
   connectionTimeoutMillis: 5_000,
 });
 
+db.on("error", () => {
+  console.error("[数据库] 空闲连接中断；readiness 将报告未就绪并等待连接池自动恢复");
+});
+
 export type Database = PgPool;
 
 export async function checkDatabase(database: Database = db): Promise<void> {
