@@ -102,7 +102,12 @@ function cleanup() {
   cleaning = true;
   try {
     compose(["--profile", "operations", "down", "--rmi", "local", "-v", "--remove-orphans"]);
-    const images = docker(["image", "ls", "--filter", `reference=${project}-*`, "--format", "{{.Repository}}"], true).trim();
+    const imageList = () => docker([
+      "image", "ls", "--filter", `reference=${project}-*`, "--format", "{{.Repository}}:{{.Tag}}",
+    ], true).trim();
+    const remainingImages = imageList().split(/\r?\n/).filter(Boolean);
+    if (remainingImages.length > 0) docker(["image", "rm", ...remainingImages]);
+    const images = imageList();
     assert.equal(images, "", `${project} 遗留验收镜像`);
     ownsResources = false;
   } finally {
