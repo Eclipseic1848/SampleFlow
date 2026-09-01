@@ -570,13 +570,26 @@ test("销售经理可从选择器创建顶层目标并完成总经理到人事�
       await page.getByRole("button",{name:"确认目标"}).click();
       await expect(topRow).toContainText("待总经理审批");
 
+      let delayedHistory=false;await page.route("**/api/goals/*/history",async(route)=>{if(!delayedHistory){delayedHistory=true;await new Promise((resolve)=>setTimeout(resolve,500));}await route.continue();});
       await logout();await login("e2e_goal_gm");await page.getByRole("button",{name:"审批中心"}).click();
       const gmRow=page.getByRole("row").filter({hasText:"2026-11"});await gmRow.getByRole("button",{name:"批准"}).click();
+      const gmDialog=page.getByRole("dialog");
+      await expect(gmDialog.getByRole("button",{name:"确认批准"})).toBeDisabled();
+      await expect(gmDialog.getByRole("heading",{name:"审批依据"})).toBeVisible();
+      await expect(gmDialog).toContainText("当前目标 ¥1,000.00");
+      await expect(gmDialog).toContainText("确认人 E2E 销售经理");
+      await expect(gmDialog).toContainText("本人已核对并确认承担本目标版本。");
+      await expect(gmDialog).toContainText("公司十一月目标");
+      const concurrentGmDecision=await page.evaluate(async()=>{const pending=await fetch("/api/goals?pendingOnly=true").then((response)=>response.json()) as {goals:Array<{id:string;versionId:string;periodMonth:string}>};const goal=pending.goals.find((item)=>item.periodMonth==="2026-11")!;const csrf=document.cookie.split("; ").find((item)=>item.startsWith("sampleflow_csrf="))?.split("=")[1]??"";const response=await fetch(`/api/goals/${goal.id}/decision`,{method:"POST",headers:{"content-type":"application/json","x-csrf-token":decodeURIComponent(csrf)},body:JSON.stringify({expectedVersionId:goal.versionId,decision:"approved",comment:"并发总经理批准"})});return response.status;});
+      expect(concurrentGmDecision).toBe(200);
       await page.getByLabel("审批意见").fill("总经理同意");await page.getByRole("button",{name:"确认批准"}).click();
+      await expect(page.getByText("状态已变化，已重新读取权威状态。")).toBeVisible();
       await expect(gmRow).toHaveCount(0);
 
       await logout();await login("e2e_goal_hr");await page.getByRole("button",{name:"审批中心"}).click();
       const hrRow=page.getByRole("row").filter({hasText:"2026-11"});await hrRow.getByRole("button",{name:"批准"}).click();
+      await expect(page.getByRole("dialog").getByRole("heading",{name:"审批依据"})).toBeVisible();
+      await expect(page.getByRole("dialog")).toContainText("并发总经理批准");
       await page.getByLabel("审批意见").fill("人事终审同意");await page.getByRole("button",{name:"确认批准"}).click();
       await expect(hrRow).toHaveCount(0);
 
@@ -626,7 +639,23 @@ test("目标修改申请在审批中心完成填金额、重新确认、终审�
 
       await logout();await login("e2e_change_leader");await page.getByRole("button",{name:"审批中心"}).click();
       const requestRow=page.getByRole("row").filter({hasText:"E2E 变更业务员"}).filter({hasText:"客户结构发生变化"});await requestRow.getByRole("button",{name:"接受并填金额"}).click();
+      const concurrentRequestDecision=await page.evaluate(async()=>{const workflows=await fetch("/api/goal-workflows").then((response)=>response.json()) as {changeRequests:Array<{id:string;reason:string}>;linkageDecisions:unknown[]};const request=workflows.changeRequests.find((item)=>item.reason==="客户结构发生变化")!;const csrf=document.cookie.split("; ").find((item)=>item.startsWith("sampleflow_csrf="))?.split("=")[1]??"";const response=await fetch(`/api/goal-change-requests/${request.id}/accept`,{method:"POST",headers:{"content-type":"application/json","x-csrf-token":decodeURIComponent(csrf)},body:JSON.stringify({newAmount:450,comment:"并发接受修改"})});return{status:response.status,staleWorkflows:workflows};});
+      expect(concurrentRequestDecision.status).toBe(200);
+      let failedWorkflowRefresh=false;await page.route("**/api/goal-workflows",async(route)=>{if(!failedWorkflowRefresh){failedWorkflowRefresh=true;await route.fulfill({status:503,contentType:"application/json",body:JSON.stringify({message:"测试注入：待办刷新失败"})});return;}await route.continue();});
       await page.getByLabel("新目标金额").fill("450");await page.getByLabel("处理意见").fill("同意按客户结构调整");await page.getByRole("button",{name:"接受并创建新版本"}).click();
+      await expect(page.getByText(/状态已变化.*列表刷新失败/)).toBeVisible();
+      await expect(requestRow).toHaveCount(0);
+      await page.getByRole("button",{name:"目标管理"}).click();await page.getByRole("button",{name:"审批中心"}).click();
+      await expect(page.getByRole("row").filter({hasText:"客户结构发生变化"})).toHaveCount(0);
+
+      let releaseStaleLoad!:()=>void;let markStaleLoadStarted!:()=>void;let workflowLoadCount=0;
+      const staleLoadGate=new Promise<void>((resolve)=>{releaseStaleLoad=resolve;});const staleLoadStarted=new Promise<void>((resolve)=>{markStaleLoadStarted=resolve;});
+      await page.route("**/api/goal-workflows",async(route)=>{workflowLoadCount+=1;if(workflowLoadCount===1){markStaleLoadStarted();await staleLoadGate;await route.fulfill({status:200,contentType:"application/json",body:JSON.stringify(concurrentRequestDecision.staleWorkflows)});return;}await route.continue();});
+      await page.getByRole("button",{name:"目标管理"}).click();await page.getByRole("button",{name:"审批中心"}).click();await staleLoadStarted;
+      await page.getByRole("button",{name:"目标管理"}).click();const currentWorkflowResponse=page.waitForResponse((response)=>response.url().endsWith("/api/goal-workflows")&&response.status()===200);await page.getByRole("button",{name:"审批中心"}).click();await currentWorkflowResponse;
+      const staleWorkflowResponse=page.waitForResponse((response)=>response.url().endsWith("/api/goal-workflows")&&response.status()===200);releaseStaleLoad();await (await staleWorkflowResponse).finished();
+      await page.evaluate(()=>new Promise<void>((resolve)=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve()))));
+      await expect(page.getByRole("row").filter({hasText:"客户结构发生变化"})).toHaveCount(0);
 
       await logout();await login("e2e_change_salesperson");await page.getByRole("button",{name:"目标管理"}).click();
       const pendingRow=page.getByRole("row").filter({hasText:"E2E 变更业务员"});await expect(pendingRow).toContainText("¥450.00");await pendingRow.getByRole("button",{name:"确认目标"}).click();
@@ -634,13 +663,22 @@ test("目标修改申请在审批中心完成填金额、重新确认、终审�
 
       await logout();await login("e2e_change_hr");await page.getByRole("button",{name:"审批中心"}).click();
       const approvalRow=page.getByRole("row").filter({hasText:"E2E 变更业务员"}).filter({hasText:"待人事审批"});await approvalRow.getByRole("button",{name:"批准"}).click();
+      const approvalDialog=page.getByRole("dialog");
+      await expect(approvalDialog.getByRole("heading",{name:"审批依据"})).toBeVisible();
+      await expect(approvalDialog).toContainText("原目标 ¥400.00");
+      await expect(approvalDialog).toContainText("当前目标 ¥450.00");
+      await expect(approvalDialog).toContainText("差异 +¥50.00");
+      await expect(approvalDialog).toContainText("确认人 E2E 变更业务员");
+      await expect(approvalDialog).toContainText("本人已核对并确认承担本目标版本。");
+      await expect(approvalDialog).toContainText("客户结构发生变化");
+      await expect(approvalDialog).toContainText("并发接受修改");
       await page.getByLabel("审批意见").fill("人事确认变更链完整");await page.getByRole("button",{name:"确认批准"}).click();
 
       await logout();await login("e2e_change_leader");await page.getByRole("button",{name:"审批中心"}).click();
       const linkageRow=page.getByRole("row").filter({hasText:"E2E 变更业务员"}).filter({hasText:"¥450.00"});await linkageRow.getByRole("button",{name:"选择是否调整"}).click();
       await page.getByLabel("处理方式").selectOption("keep_parent");await page.getByLabel("联动原因").fill("小组目标维持六百元");await page.getByRole("button",{name:"确认联动选择"}).click();
       const linkageCard=page.locator("section.workflow-card").filter({has:page.getByRole("heading",{name:"目标联动选择"})});
-      await expect(linkageCard.getByRole("row").filter({hasText:"E2E 变更业务员"}).filter({hasText:"已完成"})).toBeVisible();
+      await expect(linkageCard.getByRole("row").filter({hasText:"E2E 变更业务员"})).toHaveCount(0);
 
       await logout();await login("e2e_change_salesperson");await page.getByRole("button",{name:"目标管理"}).click();
       const activePersonal=page.getByRole("row").filter({hasText:"E2E 变更业务员"});await activePersonal.getByRole("button",{name:"申请修改"}).click();

@@ -55,7 +55,8 @@ test("四级目标只能由合法直属角色和同月父目标创建并按稳�
       const gm=await headers(app,"goal_gm");const hr=await headers(app,"goal_hr");const outsider=await headers(app,"goal_outsider");
       const create=async(actor:typeof manager,payload:Record<string,unknown>)=>app.inject({method:"POST",url:"/api/goals",headers:actor,payload});
       const sign=async(actor:typeof manager,id:string,knownVersionId?:string)=>{const list=knownVersionId?null:await app.inject({method:"GET",url:"/api/goals",headers:{cookie:actor.cookie}});const versionId=knownVersionId??list!.json().goals.find((goal:{id:string})=>goal.id===id).versionId;return app.inject({method:"POST",url:`/api/goal-versions/${versionId}/confirm`,headers:actor,payload:{}});};
-      const decide=async(actor:typeof manager,id:string,decision="approved")=>app.inject({method:"POST",url:`/api/goals/${id}/decision`,headers:actor,payload:{decision,comment:"审批意见"}});
+      const versionIdFor=async(actor:typeof manager,id:string)=>{const list=await app.inject({method:"GET",url:"/api/goals",headers:{cookie:actor.cookie}});return list.json().goals.find((goal:{id:string})=>goal.id===id).versionId as string;};
+      const decide=async(actor:typeof manager,id:string,decision="approved",expectedVersionId?:string)=>app.inject({method:"POST",url:`/api/goals/${id}/decision`,headers:actor,payload:{expectedVersionId:expectedVersionId??await versionIdFor(actor,id),decision,comment:"审批意见"}});
 
       const top=await create(manager,{periodMonth:"2026-09",level:"sales_manager",ownerPersonId:Number(scenario.personIds.manager),orgUnitId:null,parentGoalId:null,amount:1000,changeReason:"公司目标"});
       assert.equal(top.statusCode,201,top.body);const topId=top.json().id as string;
@@ -71,6 +72,10 @@ test("四级目标只能由合法直属角色和同月父目标创建并按稳�
       ]);
       assert.deepEqual(confirmations.map((response)=>response.statusCode),[200,200]);
       assert.deepEqual(confirmations.map((response)=>response.json().changed).sort(),[false,true]);
+      const managerGmPending=await app.inject({method:"GET",url:"/api/goals?pendingOnly=true",headers:{cookie:manager.cookie}});
+      const gmPending=await app.inject({method:"GET",url:"/api/goals?pendingOnly=true",headers:{cookie:gm.cookie}});
+      assert.equal(managerGmPending.json().goals.some((goal:{id:string})=>goal.id===topId),false,"确认者即使兼任总经理也不能收到自己的审批待办");
+      assert.equal(gmPending.json().goals.some((goal:{id:string})=>goal.id===topId),true);
       const confirmationClient=new Client({connectionString:database.url});await confirmationClient.connect();
       try{
         const confirmed=await confirmationClient.query(
@@ -111,16 +116,44 @@ test("四级目标只能由合法直属角色和同月父目标创建并按稳�
           /审计日志不可更新或删除/,
         );
       }finally{await confirmationClient.end();}
-      const blankDecision=await app.inject({method:"POST",url:`/api/goals/${topId}/decision`,headers:gm,payload:{decision:"approved",comment:""}});
+      const blankDecision=await app.inject({method:"POST",url:`/api/goals/${topId}/decision`,headers:gm,payload:{expectedVersionId:top.json().versionId,decision:"approved",comment:""}});
       assert.equal(blankDecision.statusCode,400,blankDecision.body);
       assert.equal((await decide(manager,topId)).statusCode,409,"确认者即使兼任总经理也不能自批");
       assert.equal((await decide(gm,topId)).statusCode,200);
+      const managerHrPending=await app.inject({method:"GET",url:"/api/goals?pendingOnly=true",headers:{cookie:manager.cookie}});
+      const hrPending=await app.inject({method:"GET",url:"/api/goals?pendingOnly=true",headers:{cookie:hr.cookie}});
+      assert.equal(managerHrPending.json().goals.some((goal:{id:string})=>goal.id===topId),false,"录入人或确认者即使兼任人事也不能收到自己的终审待办");
+      assert.equal(hrPending.json().goals.some((goal:{id:string})=>goal.id===topId),true);
       assert.equal((await decide(manager,topId)).statusCode,409,"确认者即使兼任人事也不能终审");
       assert.equal((await decide(hr,topId)).statusCode,200);
       const replayAfterApproval=await app.inject({method:"POST",url:`/api/goal-versions/${top.json().versionId}/confirm`,headers:manager,payload:{}});
       assert.equal(replayAfterApproval.statusCode,200,replayAfterApproval.body);
       assert.equal(replayAfterApproval.json().changed,false);
       assert.equal((await decide(hr,topId)).statusCode,409,"同一终审节点不能重复审批");
+
+      const raced=await create(manager,{periodMonth:"2026-12",level:"sales_manager",ownerPersonId:Number(scenario.personIds.manager),orgUnitId:null,parentGoalId:null,amount:1200,changeReason:"版本竞态目标"});
+      assert.equal(raced.statusCode,201,raced.body);const racedGoalId=raced.json().id as string;const staleVersionId=raced.json().versionId as string;
+      assert.equal((await sign(manager,racedGoalId,staleVersionId)).statusCode,200);
+      const replacementClient=new Client({connectionString:database.url});await replacementClient.connect();
+      try{
+        await replacementClient.query("begin");
+        await replacementClient.query("update goal_versions set status='rejected' where id=$1",[staleVersionId]);
+        const replacement=await replacementClient.query<{id:string}>(
+          `insert into goal_versions(goal_id,version_no,amount,status,created_by,created_by_person_id,signed_by,signed_by_person_id,signed_at,signature_text,change_reason)
+           select goal_id,version_no+1,amount,'pending_gm',created_by,created_by_person_id,signed_by,signed_by_person_id,signed_at,signature_text,'替换版本'
+           from goal_versions where id=$1 returning id::text`,
+          [staleVersionId],
+        );
+        await replacementClient.query("commit");
+        const staleDecision=await decide(gm,racedGoalId,"approved",staleVersionId);
+        assert.equal(staleDecision.statusCode,409,"旧弹窗不能审批同阶段替换版本");
+        const untouched=await replacementClient.query<{status:string;approvals:string}>(
+          `select version.status,count(approval.id)::text as approvals from goal_versions version
+           left join goal_approvals approval on approval.goal_version_id=version.id where version.id=$1 group by version.id`,
+          [replacement.rows[0]!.id],
+        );
+        assert.deepEqual(untouched.rows[0],{status:"pending_gm",approvals:"0"});
+      }catch(error){await replacementClient.query("rollback");throw error;}finally{await replacementClient.end();}
 
       const missingParent=await create(manager,{periodMonth:"2026-09",level:"department",ownerPersonId:Number(scenario.personIds.supervisor),orgUnitId:Number(scenario.departmentId),parentGoalId:null,amount:800,changeReason:"缺父目标"});
       assert.equal(missingParent.statusCode,400,missingParent.body);
@@ -136,6 +169,8 @@ test("四级目标只能由合法直属角色和同月父目标创建并按稳�
       assert.equal(wrongMonth.statusCode,409,wrongMonth.body);
       assert.equal((await sign(outsider,departmentId,department.json().versionId)).statusCode,403);
       assert.equal((await sign(supervisor,departmentId)).statusCode,200);
+      const creatorPending=await app.inject({method:"GET",url:"/api/goals?pendingOnly=true",headers:{cookie:manager.cookie}});
+      assert.equal(creatorPending.json().goals.some((goal:{id:string})=>goal.id===departmentId),false,"下达人即使兼任人事也不能收到该版本终审待办");
       assert.equal((await decide(manager,departmentId)).statusCode,409,"下达人即使兼任人事也不能审批");
       assert.equal((await decide(hr,departmentId)).statusCode,200);
 
@@ -151,7 +186,7 @@ test("四级目标只能由合法直属角色和同月父目标创建并按稳�
       assert.deepEqual(options.json().owners.map((owner:{personId:string})=>owner.personId),[scenario.personIds.salesperson]);
       const list=await app.inject({method:"GET",url:"/api/goals",headers:{cookie:hr.cookie}});
       assert.equal(list.statusCode,200,list.body);
-      assert.deepEqual(list.json().goals.map((goal:{level:string})=>goal.level),["sales_manager","department","group","personal"]);
+      assert.deepEqual(list.json().goals.filter((goal:{periodMonth:string})=>goal.periodMonth==="2026-09").map((goal:{level:string})=>goal.level),["sales_manager","department","group","personal"]);
     });
   });
 });
@@ -163,7 +198,8 @@ test("目标修改申请可重试、直属上级处理、责任人重新确认�
       const actor=Object.fromEntries(await Promise.all((["manager","supervisor","leader","salesperson","hr","gm","outsider"] as const).map(async(key)=>[key,await headers(app,`goal_${key}`)]))) as Record<GoalActor,Awaited<ReturnType<typeof headers>>>;
       const create=async(who:GoalActor,payload:Record<string,unknown>)=>{const response=await app.inject({method:"POST",url:"/api/goals",headers:actor[who],payload});assert.equal(response.statusCode,201,response.body);return response.json().id as string;};
       const sign=async(who:GoalActor,id:string)=>{const list=await app.inject({method:"GET",url:"/api/goals",headers:{cookie:actor[who].cookie}});const versionId=list.json().goals.find((goal:{id:string})=>goal.id===id).versionId;const response=await app.inject({method:"POST",url:`/api/goal-versions/${versionId}/confirm`,headers:actor[who],payload:{}});assert.equal(response.statusCode,200,response.body);};
-      const approve=async(who:GoalActor,id:string)=>{const response=await app.inject({method:"POST",url:`/api/goals/${id}/decision`,headers:actor[who],payload:{decision:"approved",comment:"同意"}});assert.equal(response.statusCode,200,response.body);};
+      const versionIdFor=async(who:GoalActor,id:string)=>{const list=await app.inject({method:"GET",url:"/api/goals",headers:{cookie:actor[who].cookie}});return list.json().goals.find((goal:{id:string})=>goal.id===id).versionId as string;};
+      const approve=async(who:GoalActor,id:string)=>{const response=await app.inject({method:"POST",url:`/api/goals/${id}/decision`,headers:actor[who],payload:{expectedVersionId:await versionIdFor(who,id),decision:"approved",comment:"同意"}});assert.equal(response.statusCode,200,response.body);};
       const top=await create("manager",{periodMonth:"2026-09",level:"sales_manager",ownerPersonId:Number(scenario.personIds.manager),parentGoalId:null,orgUnitId:null,amount:1000,changeReason:"顶层"});await sign("manager",top);await approve("gm",top);await approve("hr",top);
       const department=await create("manager",{periodMonth:"2026-09",level:"department",ownerPersonId:Number(scenario.personIds.supervisor),parentGoalId:Number(top),orgUnitId:Number(scenario.departmentId),amount:800,changeReason:"部门"});await sign("supervisor",department);await approve("hr",department);
       const group=await create("supervisor",{periodMonth:"2026-09",level:"group",ownerPersonId:Number(scenario.personIds.leader),parentGoalId:Number(department),orgUnitId:Number(scenario.groupId),amount:600,changeReason:"小组"});await sign("leader",group);await approve("hr",group);
@@ -171,22 +207,27 @@ test("目标修改申请可重试、直属上级处理、责任人重新确认�
 
       const requested=await app.inject({method:"POST",url:`/api/goals/${personal}/change-requests`,headers:actor.salesperson,payload:{requestedAmount:450,reason:"业务调整"}});
       assert.equal(requested.statusCode,201,requested.body);const requestId=requested.json().id as string;
+      const actionableFor=async(who:GoalActor)=>app.inject({method:"GET",url:"/api/goal-workflows",headers:{cookie:actor[who].cookie}});
+      const [leaderPending,salespersonPending,hrPending,outsiderPending]=await Promise.all([actionableFor("leader"),actionableFor("salesperson"),actionableFor("hr"),actionableFor("outsider")]);
+      assert.deepEqual(
+        [leaderPending,salespersonPending,hrPending,outsiderPending].map((response)=>response.json().changeRequests.map((item:{id:string})=>item.id)),
+        [[requestId],[requestId],[],[]],
+        "审批中心只能返回本人可接受、拒绝或撤回的申请",
+      );
       const replay=await app.inject({method:"POST",url:`/api/goals/${personal}/change-requests`,headers:actor.salesperson,payload:{requestedAmount:450,reason:"业务调整"}});
       assert.equal(replay.statusCode,200,replay.body);assert.equal(replay.json().id,requestId);
       const forbidden=await app.inject({method:"POST",url:`/api/goal-change-requests/${requestId}/accept`,headers:actor.outsider,payload:{newAmount:450,comment:"越权"}});
       assert.equal(forbidden.statusCode,403,forbidden.body);
       const accepted=await app.inject({method:"POST",url:`/api/goal-change-requests/${requestId}/accept`,headers:actor.leader,payload:{newAmount:450,comment:"同意调整"}});
       assert.equal(accepted.statusCode,200,accepted.body);
+      assert.deepEqual((await actionableFor("leader")).json().changeRequests,[],"已接受申请不再留在审批中心");
+      assert.deepEqual((await actionableFor("salesperson")).json().changeRequests,[],"已处理申请只在历史中保留");
       const beforeFinalApproval=await app.inject({method:"GET",url:"/api/goals",headers:{cookie:actor.leader.cookie}});
       assert.equal(beforeFinalApproval.statusCode,200,beforeFinalApproval.body);
       const groupBeforeFinal=beforeFinalApproval.json().goals.find((goal:{id:string})=>goal.id===group);
       const personalBeforeFinal=beforeFinalApproval.json().goals.find((goal:{id:string})=>goal.id===personal);
       assert.equal(groupBeforeFinal.allocatedAmount,"400.00","未终审的下级候选版本不能改变上级生效分配金额");
       assert.deepEqual([personalBeforeFinal.amount,personalBeforeFinal.effectiveAmount],["450.00","400.00"],"候选版本可操作，但必须同时标明当前生效金额");
-      const pendingWorkflows=await app.inject({method:"GET",url:"/api/goal-workflows",headers:{cookie:actor.leader.cookie}});
-      assert.equal(pendingWorkflows.statusCode,200,pendingWorkflows.body);
-      const pendingWorkflow=pendingWorkflows.json().changeRequests.find((item:{id:string})=>item.id===requestId);
-      assert.deepEqual([pendingWorkflow.currentAmount,pendingWorkflow.newAmount,pendingWorkflow.amountDifference],["400.00","450.00","50.00"]);
       const confirmationVersions=await app.inject({method:"GET",url:`/api/goals/${personal}/history`,headers:{cookie:actor.salesperson.cookie}});
       assert.equal(confirmationVersions.statusCode,200,confirmationVersions.body);
       assert.deepEqual(
@@ -198,7 +239,7 @@ test("目标修改申请可重试、直属上级处理、责任人重新确认�
 
       const workflows=await app.inject({method:"GET",url:"/api/goal-workflows",headers:{cookie:actor.leader.cookie}});
       assert.equal(workflows.statusCode,200,workflows.body);
-      assert.equal(workflows.json().changeRequests.find((item:{id:string})=>item.id===requestId).status,"completed");
+      assert.equal(workflows.json().changeRequests.some((item:{id:string})=>item.id===requestId),false);
       const linkage=workflows.json().linkageDecisions.find((item:{parentGoalId:string;status:string})=>item.parentGoalId===group&&item.status==="pending");
       assert.ok(linkage);
       const kept=await app.inject({method:"POST",url:`/api/goal-linkage-decisions/${linkage.id}/decide`,headers:actor.leader,payload:{decision:"keep_parent",reason:"组目标保持不变"}});
@@ -210,7 +251,7 @@ test("目标修改申请可重试、直属上级处理、责任人重新确认�
       assert.equal(second.statusCode,201,second.body);const secondId=second.json().id as string;
       const acceptedAgain=await app.inject({method:"POST",url:`/api/goal-change-requests/${secondId}/accept`,headers:actor.leader,payload:{newAmount:455,comment:"上级再次接受"}});
       assert.equal(acceptedAgain.statusCode,200,acceptedAgain.body);await sign("salesperson",personal);
-      const hrRejected=await app.inject({method:"POST",url:`/api/goals/${personal}/decision`,headers:actor.hr,payload:{decision:"rejected",comment:"人事要求重新核对"}});
+      const hrRejected=await app.inject({method:"POST",url:`/api/goals/${personal}/decision`,headers:actor.hr,payload:{expectedVersionId:await versionIdFor("hr",personal),decision:"rejected",comment:"人事要求重新核对"}});
       assert.equal(hrRejected.statusCode,200,hrRejected.body);
       const third=await app.inject({method:"POST",url:`/api/goals/${personal}/change-requests`,headers:actor.salesperson,payload:{reason:"人事拒绝后重提"}});
       assert.equal(third.statusCode,201,`人事拒绝候选版本后应允许基于仍生效版本重提：${third.body}`);
@@ -223,7 +264,7 @@ test("目标修改申请可重试、直属上级处理、责任人重新确认�
         app.inject({method:"POST",url:`/api/goal-change-requests/${fourth.json().id}/accept`,headers:actor.leader,payload:{newAmount:460,comment:"并发接受"}}),
       ]);
       assert.deepEqual(concurrent.map((response)=>response.statusCode).sort(),[200,409]);
-      if(concurrent[1]!.statusCode===200){await sign("salesperson",personal);const cleanup=await app.inject({method:"POST",url:`/api/goals/${personal}/decision`,headers:actor.hr,payload:{decision:"rejected",comment:"并发测试候选清理"}});assert.equal(cleanup.statusCode,200,cleanup.body);}
+      if(concurrent[1]!.statusCode===200){await sign("salesperson",personal);const cleanup=await app.inject({method:"POST",url:`/api/goals/${personal}/decision`,headers:actor.hr,payload:{expectedVersionId:await versionIdFor("hr",personal),decision:"rejected",comment:"并发测试候选清理"}});assert.equal(cleanup.statusCode,200,cleanup.body);}
 
       const direct=new Client({connectionString:database.url});await direct.connect();
       try{
@@ -239,7 +280,7 @@ test("目标修改申请可重试、直属上级处理、责任人重新确认�
       assert.equal(staleRequest.statusCode,201,staleRequest.body);
       await approve("hr",personal);
       const invalidated=await app.inject({method:"GET",url:"/api/goal-workflows",headers:{cookie:actor.leader.cookie}});
-      assert.equal(invalidated.json().changeRequests.find((item:{id:string})=>item.id===staleRequest.json().id).status,"invalidated");
+      assert.equal(invalidated.json().changeRequests.some((item:{id:string})=>item.id===staleRequest.json().id),false);
       const staleWithdraw=await app.inject({method:"POST",url:`/api/goal-change-requests/${staleRequest.json().id}/withdraw`,headers:actor.salesperson,payload:{}});
       const staleReject=await app.inject({method:"POST",url:`/api/goal-change-requests/${staleRequest.json().id}/reject`,headers:actor.leader,payload:{comment:"错误处理旧申请"}});
       assert.deepEqual([staleWithdraw.statusCode,staleReject.statusCode],[409,409],"自动失效申请不能再被撤回或拒绝");
@@ -248,6 +289,7 @@ test("目标修改申请可重试、直属上级处理、责任人重新确认�
       assert.equal(history.statusCode,200,history.body);
       assert.ok(history.json().versions.length>=2);
       assert.ok(history.json().versions.some((version:{amountDifference:string|null})=>version.amountDifference!==null));
+      assert.equal(history.json().changeRequests.find((item:{id:string})=>item.id===staleRequest.json().id).status,"invalidated");
       assert.ok(history.json().audit.some((item:{action:string})=>item.action==="goal.change_completed"));
     });
   });
@@ -260,7 +302,8 @@ test("个人、组、部门变更可逐级递归且顶层调整必须明确填�
       const actor=Object.fromEntries(await Promise.all((["manager","supervisor","leader","salesperson","hr","gm","outsider"] as const).map(async(key)=>[key,await headers(app,`goal_${key}`)]))) as Record<GoalActor,Awaited<ReturnType<typeof headers>>>;
       const create=async(who:GoalActor,payload:Record<string,unknown>)=>{const response=await app.inject({method:"POST",url:"/api/goals",headers:actor[who],payload});assert.equal(response.statusCode,201,response.body);return response.json().id as string;};
       const sign=async(who:GoalActor,id:string)=>{const list=await app.inject({method:"GET",url:"/api/goals",headers:{cookie:actor[who].cookie}});const versionId=list.json().goals.find((goal:{id:string})=>goal.id===id).versionId;const response=await app.inject({method:"POST",url:`/api/goal-versions/${versionId}/confirm`,headers:actor[who],payload:{}});assert.equal(response.statusCode,200,response.body);};
-      const approve=async(who:GoalActor,id:string)=>{const response=await app.inject({method:"POST",url:`/api/goals/${id}/decision`,headers:actor[who],payload:{decision:"approved",comment:"同意"}});assert.equal(response.statusCode,200,response.body);};
+      const versionIdFor=async(who:GoalActor,id:string)=>{const list=await app.inject({method:"GET",url:"/api/goals",headers:{cookie:actor[who].cookie}});return list.json().goals.find((goal:{id:string})=>goal.id===id).versionId as string;};
+      const approve=async(who:GoalActor,id:string)=>{const response=await app.inject({method:"POST",url:`/api/goals/${id}/decision`,headers:actor[who],payload:{expectedVersionId:await versionIdFor(who,id),decision:"approved",comment:"同意"}});assert.equal(response.statusCode,200,response.body);};
       const accept=async(who:GoalActor,requestId:string,newAmount:number)=>{const response=await app.inject({method:"POST",url:`/api/goal-change-requests/${requestId}/accept`,headers:actor[who],payload:{newAmount,comment:"明确调整金额"}});assert.equal(response.statusCode,200,response.body);};
       const linkage=async(who:GoalActor,parentGoalId:string)=>{const response=await app.inject({method:"GET",url:"/api/goal-workflows",headers:{cookie:actor[who].cookie}});assert.equal(response.statusCode,200,response.body);const item=response.json().linkageDecisions.find((candidate:{parentGoalId:string;status:string})=>candidate.parentGoalId===parentGoalId&&candidate.status==="pending");assert.ok(item);return item.id as string;};
 

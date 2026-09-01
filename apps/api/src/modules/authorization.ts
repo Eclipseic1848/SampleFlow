@@ -141,9 +141,21 @@ export function canReadGoals(access: GoalAccess): boolean {
 }
 
 export function pendingGoalSql(goalAlias: string, versionAlias: string, firstParameter: number): string {
-  return `((${versionAlias}.status='pending_signature' and ${goalAlias}.owner_person_id=$${firstParameter})
-    or ($${firstParameter + 1}::boolean and ${versionAlias}.status='pending_gm' and ${goalAlias}.goal_level='sales_manager')
-    or ($${firstParameter + 2}::boolean and ${versionAlias}.status='pending_hr'))`;
+  return `((${versionAlias}.status='pending_signature' and ${goalAlias}.owner_person_id=$${firstParameter}
+      and (${goalAlias}.goal_level='sales_manager' or ${versionAlias}.created_by_person_id<>$${firstParameter}))
+    or ($${firstParameter + 1}::boolean and ${versionAlias}.status='pending_gm' and ${goalAlias}.goal_level='sales_manager'
+      and ${versionAlias}.created_by_person_id<>$${firstParameter}
+      and ${versionAlias}.signed_by_person_id is distinct from $${firstParameter})
+    or ($${firstParameter + 2}::boolean and ${versionAlias}.status='pending_hr'
+      and ${versionAlias}.created_by_person_id<>$${firstParameter}
+      and ${versionAlias}.signed_by_person_id is distinct from $${firstParameter}
+      and not exists (
+        select 1 from goal_approvals pending_approval
+        where pending_approval.goal_version_id=${versionAlias}.id
+          and pending_approval.approval_stage='general_manager'
+          and pending_approval.decision='approved'
+          and pending_approval.decided_by_person_id=$${firstParameter}
+      )))`;
 }
 
 export function pendingGoalValues(user: CurrentUser): unknown[] {
