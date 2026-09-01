@@ -27,8 +27,8 @@ test("审计页面只读展示所属域并支持组合过滤", async ({ database
       [actor.rows[0]!.id],
     );
     await setup.query(
-      `insert into performance_events(order_id,event_type,delta_amount,resulting_current_revenue,resulting_counted_amount,accounting_month,occurred_on,reason,salesperson_person_id,salesperson_name,department_name,group_name)
-       values($1,'initial',100,100,100,date_trunc('month',current_date)::date,current_date,'E2E 审计事件',$2,'E2E 审计业务员','E2E 部门','E2E 小组')`,
+      `insert into performance_events(order_id,event_type,delta_amount,resulting_current_revenue,resulting_counted_amount,accounting_month,occurred_on,reason,salesperson_person_id,salesperson_name,department_name,group_name,created_at)
+       values($1,'initial',100,100,100,date_trunc('month',current_date)::date,current_date,'E2E 审计事件',$2,'E2E 审计业务员','E2E 部门','E2E 小组','2026-09-01T12:30:30Z')`,
       [order.rows[0]!.id, actor.rows[0]!.id],
     );
     await setup.query(

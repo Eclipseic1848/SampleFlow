@@ -2,6 +2,7 @@ import { FormEvent, type ReactNode, useCallback, useEffect, useId, useRef, useSt
 import { createPortal } from "react-dom";
 import { Activity, BarChart3, ChevronRight, ClipboardCheck, Database, Eye, EyeOff, FileClock, FileUp, LogOut, Network, PauseCircle, PlayCircle, Plus, RefreshCw, Search, ShieldCheck, Target, UsersRound, X } from "lucide-react";
 import type { ChinaMap } from "./china-map";
+import { PAGE_ORDER, PAGE_ROUTES, readPageId, type PageId } from "./page-routes";
 
 type Capabilities = { viewPerformance:boolean; viewGoals:boolean; viewAudits:boolean; viewOrganization:boolean; viewApprovals:boolean; editPerformance:boolean; exportPerformance:boolean; exportGoals:boolean; manageAccounts:boolean; manageOrganization:boolean };
 type User = { id: string; personId:string; username: string; displayName: string; mustChangePassword: boolean; roles: string[]; capabilities:Capabilities };
@@ -123,6 +124,7 @@ function Login({ onLogin }: { onLogin: (user: User) => void }) {
   const [username, setUsername] = useState(import.meta.env.DEV ? "sales_assistant" : "");
   const [password, setPassword] = useState(import.meta.env.DEV ? "SampleFlow@2026" : "");
   const [message, setMessage] = useState("");
+  useEffect(()=>{document.title="登录 — SampleFlow";},[]);
   const [submitting, setSubmitting] = useState(false);
   const [readiness, setReadiness] = useState<"checking" | "ready" | "unavailable">("checking");
   useEffect(() => {
@@ -165,25 +167,17 @@ function Login({ onLogin }: { onLogin: (user: User) => void }) {
 }
 
 function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
-  type PageId = "overview"|"goals"|"orders"|"organization"|"approvals"|"accounts"|"audits";
-  const pages = [
-    user.capabilities.viewPerformance ? {id:"overview" as const,Icon:BarChart3,label:"业绩总览"} : null,
-    user.capabilities.viewGoals ? {id:"goals" as const,Icon:Target,label:"目标管理"} : null,
-    user.capabilities.viewPerformance ? {id:"orders" as const,Icon:ClipboardCheck,label:"订单业绩"} : null,
-    user.capabilities.viewOrganization ? {id:"organization" as const,Icon:Network,label:"组织架构"} : null,
-    user.capabilities.viewApprovals ? {id:"approvals" as const,Icon:FileClock,label:"审批中心"} : null,
-    user.capabilities.viewAudits ? {id:"audits" as const,Icon:Search,label:"审计查询"} : null,
-    user.capabilities.manageAccounts ? {id:"accounts" as const,Icon:UsersRound,label:"账号管理"} : null,
-  ].filter((page):page is NonNullable<typeof page>=>page!==null);
+  const pageIcons = {overview:BarChart3,goals:Target,orders:ClipboardCheck,analysis:Activity,organization:Network,approvals:FileClock,audits:Search,accounts:UsersRound};
+  const canOpen=(page:PageId)=>user.capabilities[PAGE_ROUTES[page].capability];
+  const pages=PAGE_ORDER.filter(canOpen).map((id)=>({id,Icon:pageIcons[id],label:PAGE_ROUTES[id].label}));
   const defaultPage:PageId=user.capabilities.manageAccounts?"accounts":pages[0]?.id??"overview";
-  const canOpenOrders=pages.some((page)=>page.id==="orders");
-  const requestedPage=new URLSearchParams(window.location.search).get("page");
-  const [active, setActive] = useState<PageId|"forbidden">(requestedPage==="orders"?(canOpenOrders?"orders":"forbidden"):defaultPage);
-  const navigate=useCallback((page:PageId)=>{const params=new URLSearchParams(window.location.search);if(page==="orders")params.set("page","orders");else params.delete("page");window.history.pushState({},"",`${window.location.pathname}${params.size?`?${params.toString()}`:""}${window.location.hash}`);setActive(page);},[]);
-  useEffect(()=>{const restore=()=>{const page=new URLSearchParams(window.location.search).get("page");setActive(page==="orders"?(canOpenOrders?"orders":"forbidden"):defaultPage);};window.addEventListener("popstate",restore);return()=>window.removeEventListener("popstate",restore);},[canOpenOrders,defaultPage]);
+  const [active,setActive]=useState<PageId>(()=>readPageId(window.location.search)??defaultPage);
+  const navigate=useCallback((page:PageId,mode:"push"|"replace"="push")=>{if(mode==="push"&&readPageId(window.location.search)===page)return;const params=new URLSearchParams(window.location.search);params.set("page",page);window.history[`${mode}State`]({},"",`${window.location.pathname}?${params.toString()}${window.location.hash}`);setActive(page);},[]);
+  useEffect(()=>{if(!readPageId(window.location.search))navigate(defaultPage,"replace");const restore=()=>{const page=readPageId(window.location.search);if(page)setActive(page);else navigate(defaultPage,"replace");};window.addEventListener("popstate",restore);return()=>window.removeEventListener("popstate",restore);},[defaultPage,navigate]);
+  useEffect(()=>{document.title=`${PAGE_ROUTES[active].label} — SampleFlow`;},[active]);
   async function logout() { await apiFetch("/api/auth/logout", { method: "POST" }); onLogout(); }
-  const content = active === "forbidden"
-    ? <main className="dashboard"><header><div><h1>无法访问订单业绩</h1><p>该页面需要业务查看权限</p></div></header><div className="permission-note"><ShieldCheck size={18}/>当前账号没有订单查看权限。</div></main>
+  const content = !canOpen(active)
+    ? <main className="dashboard"><header><div><h1>无法访问{PAGE_ROUTES[active].label}</h1><p>该页面不在当前账号的角色权限范围内</p></div></header><div className="permission-note"><ShieldCheck size={18}/>403 · 当前账号没有{PAGE_ROUTES[active].label}权限。</div></main>
     : active === "orders"
     ? <OrdersPage user={user} />
     : active === "goals"
@@ -192,6 +186,8 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
         ? <GoalsPage user={user} pendingOnly />
       : active === "organization"
         ? <OrganizationPage user={user}/>
+      : active === "analysis"
+        ? <AnalysisPage/>
       : active === "audits"
         ? <AuditPage/>
       : active === "accounts"
@@ -373,13 +369,12 @@ function Overview({ canEdit, canExport, onEnterOrders }: { canEdit: boolean; can
         onClose={()=>{groupDetailsRequest.current+=1;setSelectedGroup(null);}}
       >{groupDetailsError?<p className="form-error group-drilldown" role="alert">{groupDetailsError}</p>:groupDetails?<div className="group-drilldown"><AchievementMembers members={groupDetails.members}/></div>:<p className="group-drilldown">正在读取小组业绩构成…</p>}</Modal>:null}
       <section className="metric-band"><Metric label="账本净额" value={data ? formatMoney(data.metrics.total) : "—"} note={`${data?.metrics.eventCount ?? 0} 条授权范围事件`}/><Metric label="正式报表" value="从生效目标进入" note="未生效不计算达成率"/><Metric label="待处理审批" value={String(data?.metrics.pendingApprovals ?? 0)} note="目标确认与变更" warning/><Metric label="负向调整" value={data ? formatMoney(data.metrics.negativeTotal) : "—"} note="暂停与金额变更" negative/></section>
-      <AnalysisPanel/>
       <section className="dashboard-grid"><article className="trend-panel"><PanelTitle title="月度业绩趋势" note={`${data?.month.slice(0,4)??"当前"} 年授权范围业绩净额`}/><TrendChart year={data?.month.slice(0,4)??""} monthly={data?.monthly??[]}/></article><article className="ranking-panel"><PanelTitle title="小组业绩" note="按事件发生时组织归属"/>{data?.groups.map((group,i) => <div className="rank-row" key={group.id}><span>{i+1}</span><div><strong>{group.name}</strong><span><i style={{width:`${Math.max(0, Number(group.total)) / maxGroup * 100}%`}}/></span></div><b>{(Number(group.total)/10000).toFixed(1)}万</b></div>)}</article></section>
       <section className="events-panel"><div className="panel-title"><div><h2>最近业绩事件</h2><p>入账后不可覆盖或删除</p></div><button onClick={onEnterOrders}>查看全部</button></div><table><thead><tr><th>订单编号</th><th>业务员</th><th>事件类型</th><th>记账月</th><th>金额</th><th>组织归属</th><th>状态</th></tr></thead><tbody>{data?.recent.map((event) => <tr key={`${event.orderNo}-${event.month}-${event.amount}`}><td>{event.orderNo}</td><td>{event.salespersonName}</td><td>{eventTypeName(event.eventType)}</td><td>{event.month}</td><td className={Number(event.amount)<0?"negative":""}>{formatMoney(event.amount)}</td><td>{event.groupName}</td><td>已入账</td></tr>)}</tbody></table></section>
     </main>;
 }
 
-function AnalysisPanel(){
+function AnalysisPage(){
   const[month,setMonth]=useState(businessDateToday().slice(0,7));
   const[data,setData]=useState<PerformanceAnalysis|null>(null);
   const[error,setError]=useState("");
@@ -387,11 +382,11 @@ function AnalysisPanel(){
   const[selectedProvince,setSelectedProvince]=useState<AnalysisProvince|null>(null);
   useEffect(()=>setSelectedProvince(null),[month]);
   useEffect(()=>{const controller=new AbortController();setData(null);setError("");fetch(`/api/performance/analysis?month=${month}`,{signal:controller.signal}).then(async(response)=>{const result=await readResponseJson<PerformanceAnalysis&{message?:string}>(response,"分析服务响应无效");if(!response.ok)throw new Error(result.message??"分析加载失败");setData(result);}).catch((failure)=>{if(failure instanceof DOMException&&failure.name==="AbortError")return;setError(failure instanceof Error?failure.message:"分析加载失败");});return()=>controller.abort();},[month,revision]);
-  return <section className="analysis-panel" aria-labelledby="analysis-title"><div className="analysis-header"><div><h2 id="analysis-title">地区与客户单位分析</h2><p>只按事件发生时的不可变分析维度快照汇总，不使用订单当前资料</p></div><label><span>分析月份</span><input type="month" value={month} onChange={(event)=>setMonth(event.target.value)}/></label></div>
+  return <main className="dashboard analysis-page"><section className="analysis-panel" aria-labelledby="analysis-title"><div className="analysis-header"><div><h1 id="analysis-title">地区与客户单位分析</h1><p>只按事件发生时的不可变分析维度快照汇总，不使用订单当前资料</p></div><label><span>分析月份</span><input type="month" value={month} onChange={(event)=>setMonth(event.target.value)}/></label></div>
     {error?<div className="query-feedback"><p className="page-message" role="alert">{error}</p><button type="button" onClick={()=>setRevision((value)=>value+1)}>重试查询</button></div>:null}
     {!data&&!error?<p className="analysis-loading" role="status">正在读取地区与客户单位分析…</p>:null}
     {data?<><section className="metric-band analysis-metrics"><Metric label="授权范围总账" value={formatMoney(data.ledger.totalAmount)} note={`${data.ledger.eventCount} 条事件`}/><Metric label="已映射" value={formatMoney(data.mapped.totalAmount)} note={`${data.mapped.eventCount} 条可信维度事件`}/><Metric label="待补齐" value={formatMoney(data.pending.totalAmount)} note={`${data.pending.eventCount} 条缺少可信维度事件`} warning/></section><p className={`analysis-reconciliation ${data.reconciled?"":"analysis-reconciliation-error"}`}>{data.reconciled?"已映射金额 + 待补齐金额与授权范围总账完全对平。":"分析维度对账失败，请停止使用当前汇总。"}</p><div className="analysis-map-layout"><ChinaProvinceMap provinces={data.provinces} selectedRegionCode={selectedProvince?.regionCode??null} onSelect={setSelectedProvince}/><article className="analysis-card analysis-province-ranking"><h3>省份汇总</h3><div className="orders-table-wrap"><table aria-label="省份汇总"><thead><tr><th>省份</th><th>事件</th><th>金额</th></tr></thead><tbody>{data.provinces.length?data.provinces.map((item)=><tr key={item.regionCode}><td><button type="button" className="analysis-link" aria-pressed={selectedProvince?.regionCode===item.regionCode} onClick={()=>setSelectedProvince(item)}>{item.regionName}</button></td><td>{item.eventCount}</td><td className={Number(item.totalAmount)<0?"negative":""}>{formatMoney(item.totalAmount)}</td></tr>):<tr><td colSpan={3} className="empty-cell">本月没有已映射省份事件。</td></tr>}</tbody></table></div><div className="analysis-foreign"><div><strong>外贸（EXT-TRADE）</strong><span>独立区域，不进入省份统计</span></div><b className={Number(data.foreignTrade.totalAmount)<0?"negative":""}>{data.foreignTrade.eventCount} 条事件 · {formatMoney(data.foreignTrade.totalAmount)}</b></div></article></div><article className="analysis-card analysis-customer-summary"><h3>客户单位汇总</h3><div className="orders-table-wrap"><table aria-label="客户单位汇总"><thead><tr><th>区域</th><th>客户单位</th><th>事件</th><th>金额</th></tr></thead><tbody>{data.customers.length?data.customers.map((item)=><tr key={`${item.regionCode}:${item.customerUnit}`}><td>{item.regionName}</td><td>{item.customerUnit}</td><td>{item.eventCount}</td><td className={Number(item.totalAmount)<0?"negative":""}>{formatMoney(item.totalAmount)}</td></tr>):<tr><td colSpan={4} className="empty-cell">本月没有已映射客户单位事件。</td></tr>}</tbody></table></div></article>{selectedProvince?<AnalysisDrilldown key={`${month}:${selectedProvince.regionCode}`} province={selectedProvince} month={month}/>:null}</>:null}
-  </section>;
+  </section></main>;
 }
 
 function ChinaProvinceMap({provinces,selectedRegionCode,onSelect}:{provinces:AnalysisProvince[];selectedRegionCode:string|null;onSelect:(province:AnalysisProvince)=>void}){
