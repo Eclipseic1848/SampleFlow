@@ -34,7 +34,6 @@ test("系统管理员搜索分页账号并审计固定角色组合变更", async
       [adminId],
     );
 
-    await page.setViewportSize({ width: 1280, height: 900 });
     await page.goto("/");
     await page.getByLabel("账号").fill("e2e_accounts_admin");
     await page.getByLabel("密码", { exact: true }).fill("Accounts@123");

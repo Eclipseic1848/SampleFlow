@@ -4,8 +4,6 @@ import { expect, test } from "./full-stack.js";
 
 const { Client } = pg;
 
-test.use({ locale: "zh-CN", timezoneId: "Asia/Shanghai", viewport: { width: 1280, height: 800 } });
-
 test("业绩分析页显示事件快照地区、外贸、客户单位和待补齐对账", async ({ database, page }) => {
   const userId = await seedTestUser(database.url, {
     username: "e2e_analysis_assistant",
