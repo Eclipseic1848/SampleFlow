@@ -141,9 +141,6 @@ test("200% 桌面缩放仍保留导航、键盘焦点和无遮挡操作", async 
   await page.setViewportSize({ width: 512, height: 768 });
   await page.goto("/?page=overview");
   await login(page, "e2e_desktop_zoom");
-  const tour = page.locator(".onboarding-bubble");
-  if (await tour.isVisible()) await tour.getByRole("button", { name: "跳过全部引导" }).click();
-
   await expect(page.getByRole("button", { name: "退出登录" })).toBeVisible();
   const navigation = page.locator(".sidebar nav button");
   await expect(navigation).toHaveCount(8);

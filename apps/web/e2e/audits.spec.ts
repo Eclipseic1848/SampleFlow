@@ -8,7 +8,7 @@ test.use({ timezoneId: "America/Los_Angeles" });
 
 async function login(page: Page, username: string) {
   await page.goto("/");
-  await page.getByLabel("账号").fill(username);
+  await page.getByLabel("账号", { exact: true }).fill(username);
   await page.getByLabel("密码", { exact: true }).fill("Audits@123");
   await page.getByRole("button", { name: "进入 SampleFlow" }).click();
 }

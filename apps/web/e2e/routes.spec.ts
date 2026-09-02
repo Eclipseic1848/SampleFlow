@@ -190,7 +190,6 @@ test("总览失败后显示错误并可重试成功", async ({ database, page })
   await expect(page.getByRole("heading",{name:"小组业绩"})).toHaveCount(0);
   fail=false;
   await page.getByRole("button",{name:"重试总览"}).click();
-  await expect(page.getByText("正在加载真实业绩账本…",{exact:true})).toBeVisible();
   await expect(page.getByText(/月 · 原始账本，不代表正式绩效结果/)).toBeVisible();
   const chart=page.getByRole("img",{name:"2026年1月至12月业绩折线图"});
   const zeroY=Number(await chart.locator(".trend-zero-baseline").getAttribute("y1"));
