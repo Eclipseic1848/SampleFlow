@@ -38,7 +38,6 @@ function ChinaProvinceMap({provinces,selectedRegionCode,onSelect}:{provinces:Ana
   const[mapError,setMapError]=useState("");
   useEffect(()=>{const controller=new AbortController();import("../china-map").then(({loadChinaMap})=>loadChinaMap(controller.signal)).then(setChinaMap).catch((failure)=>{if(failure instanceof DOMException&&failure.name==="AbortError")return;setMapError(failure instanceof Error?failure.message:"中国省级地图加载失败");});return()=>controller.abort();},[]);
   const byCode=new Map(provinces.map((province)=>[province.regionCode,province]));
-  const taiwan=byCode.get("CN-TW");
   const finiteTotals=provinces.map((province)=>Math.abs(Number(province.totalAmount))).filter(Number.isFinite);
   const maximum=Math.max(1,...finiteTotals);
   return <article className="analysis-card analysis-map-card"><h3>省份地图</h3><div className="analysis-map-wrap">{chinaMap?<svg className="analysis-map" viewBox={chinaMap.viewBox} role="group" aria-label="中国省份业绩地图">{chinaMap.locations.map((location)=>{
@@ -48,7 +47,7 @@ function ChinaProvinceMap({provinces,selectedRegionCode,onSelect}:{provinces:Ana
     const selected=selectedRegionCode===province.regionCode;
     const label=`地图选择${province.regionName}，${province.eventCount} 条事件，金额 ${formatMoney(province.totalAmount)}`;
     return <path key={location.id} d={location.path} className={`analysis-map-region${Number(province.totalAmount)<0?" negative":""}${selected?" selected":""}`} style={{fillOpacity:.3+.7*Math.abs(Number(province.totalAmount))/maximum}} data-region-code={regionCode} role="button" tabIndex={0} aria-label={label} aria-pressed={selected} onClick={()=>onSelect(province)} onKeyDown={(event)=>{if(event.key==="Enter"||event.key===" "){event.preventDefault();onSelect(province);}}}/>;
-  })}</svg>:<p className={mapError?"page-message":"analysis-loading"} role={mapError?"alert":"status"}>{mapError||"正在读取中国省级地图…"}</p>}<p>颜色深浅只表示相对规模；金额以右侧省份汇总为准。</p><p><span>{taiwan?`台湾省 ${taiwan.eventCount} 条事件 · ${formatMoney(taiwan.totalAmount)}`:"台湾省资料暂缺"}</span>；香港特别行政区、澳门特别行政区资料暂缺。</p><small>省级轮廓：<a href="https://www.tianditu.gov.cn/">天地图</a>来源；<a href="https://github.com/JayMuShui/chinese-global-compliant-geodata">chinese-global-compliant-geodata 1.0.0</a>（MIT）。</small></div></article>;
+  })}</svg>:<p className={mapError?"page-message":"analysis-loading"} role={mapError?"alert":"status"}>{mapError||"正在读取中国省级地图…"}</p>}<p>颜色深浅只表示相对规模；金额以右侧省份汇总为准。</p></div></article>;
 }
 
 function AnalysisDrilldown({province,month}:{province:AnalysisProvince;month:string}){
