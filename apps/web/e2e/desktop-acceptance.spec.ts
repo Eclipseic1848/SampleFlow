@@ -135,3 +135,55 @@ test("八个主要页面的 WCAG 2.2 A/AA critical/serious 自动违规为零", 
     expect(severe, `${heading}: ${JSON.stringify(severe, null, 2)}`).toEqual([]);
   }
 });
+
+test("200% 桌面缩放仍保留导航、键盘焦点和无遮挡操作", async ({ database, page }) => {
+  await seedFullAccessUser(database.url, "e2e_desktop_zoom");
+  await page.setViewportSize({ width: 512, height: 768 });
+  await page.goto("/?page=overview");
+  await login(page, "e2e_desktop_zoom");
+  const tour = page.locator(".onboarding-bubble");
+  if (await tour.isVisible()) await tour.getByRole("button", { name: "跳过全部引导" }).click();
+
+  await expect(page.getByRole("button", { name: "退出登录" })).toBeVisible();
+  const navigation = page.locator(".sidebar nav button");
+  await expect(navigation).toHaveCount(8);
+  for (const item of await navigation.all()) await expect(item.locator("span")).toBeVisible();
+  await expect(page.getByRole("button", { name: "业绩总览", exact: true })).toHaveAttribute("aria-current", "page");
+  await expectNoPageOverflow(page);
+
+  const skipLink = page.getByRole("link", { name: "跳到主要内容" });
+  await navigation.first().focus();
+  await page.keyboard.press("Shift+Tab");
+  await expect(skipLink).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#main-content")).toBeFocused();
+
+  await page.getByRole("button", { name: "账号管理", exact: true }).click();
+  const heading = page.getByRole("heading", { name: "账号管理", level: 1 });
+  await expect(heading).toBeFocused();
+  await waitForPageReady(page, "账号管理");
+  const tableRegions = page.locator(".orders-table-wrap");
+  expect(await tableRegions.count()).toBeGreaterThan(0);
+  for (const region of await tableRegions.all()) {
+    await expect(region).toHaveAttribute("tabindex", "0");
+    await expect(region).toHaveAttribute("role", "region");
+    expect(await region.getAttribute("aria-label")).toMatch(/.+/);
+  }
+
+  const replay = page.getByRole("button", { name: "重播当前页面新手引导" });
+  await expect(replay).toBeVisible();
+  const overlap = await page.evaluate(() => {
+    const help = document.querySelector<HTMLElement>(".onboarding-replay")!.getBoundingClientRect();
+    return [...document.querySelectorAll<HTMLElement>("main button")].some((button) => {
+      const action = button.getBoundingClientRect();
+      return action.width > 0 && action.height > 0 && help.left < action.right && help.right > action.left && help.top < action.bottom && help.bottom > action.top;
+    });
+  });
+  expect(overlap).toBe(false);
+
+  await page.setViewportSize({ width: 640, height: 800 });
+  await expect(page.getByRole("button", { name: "退出登录" })).toBeVisible();
+  await expectNoPageOverflow(page);
+  const results = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"]).analyze();
+  expect(results.violations.filter((violation) => violation.impact === "critical" || violation.impact === "serious")).toEqual([]);
+});
