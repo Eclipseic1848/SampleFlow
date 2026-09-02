@@ -315,7 +315,7 @@ test("订单组合筛选由 URL 恢复并区分空集、失败和无权限", asy
     await page.getByRole("button", { name: "关闭" }).click();
     expect(page.url()).toBe(secondPageUrl);
 
-    const exportButton=page.getByRole("button",{name:"导出全部匹配订单"});
+    const exportButton=page.getByRole("button",{name:"导出当前授权范围匹配订单"});
     await expect(exportButton).toBeVisible({timeout:1_000});
     const [exportRequest,download]=await Promise.all([
       page.waitForRequest("**/api/exports/performance.csv*"),
@@ -675,7 +675,13 @@ test("销售经理可从选择器创建顶层目标并完成总经理到人事�
       await expect(hrRow).toHaveCount(0);
 
       await logout();await login("e2e_goal_manager");await page.getByRole("button",{name:"目标管理"}).click();
-      await expect(page.getByRole("row").filter({hasText:"2026-11"}).filter({hasText:"已生效"})).toBeVisible();
+      const activeTopGoal=page.getByRole("row").filter({hasText:"2026-11"}).filter({hasText:"已生效"});
+      await expect(activeTopGoal).toBeVisible();
+      await activeTopGoal.getByRole("button",{name:"版本与记录"}).click();
+      const historyDialog=page.getByRole("dialog",{name:"目标版本与操作记录"});
+      await expect(historyDialog.getByText("创建目标版本",{exact:true}).first()).toBeVisible();
+      await expect(historyDialog).not.toContainText(/goal\.|[{}]/);
+      await historyDialog.getByRole("button",{name:"关闭"}).click();
       await page.getByRole("button",{name:"下达目标"}).click();
       await page.getByLabel("目标月份").fill("2026-11");await page.getByLabel("目标层级").selectOption("department");
       await expect(page.getByLabel("直属上级目标")).toContainText("E2E 销售经理");

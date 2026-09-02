@@ -247,14 +247,18 @@ form button:disabled { cursor: wait; opacity: .72; }
 .chart { margin-top: 16px; }
 .chart svg { width: 100%; height: 210px; overflow: visible; }
 .grid-lines line { stroke: #e8edf2; stroke-width: 1; }
+.trend-zero-baseline { stroke: #738196; stroke-width: 1.5; stroke-dasharray: 5 4; }
+.trend-point-negative { stroke: #c84242; }
 .chart-labels { margin: -5px 2.5% 0 6.5%; display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; }
 .rank-row { padding: 14px 0; border-bottom: 1px solid #edf0f4; display: grid; grid-template-columns: 24px 1fr auto; align-items: center; gap: 10px; }
 .rank-row:last-child { border-bottom: 0; }
 .rank-row > span { color: #8c99a9; font-size: 12px; }
 .rank-row > div { min-width: 0; display: grid; gap: 7px; }
 .rank-row strong, .rank-row b { font-size: 13px; }
-.rank-row div span { height: 4px; overflow: hidden; border-radius: 2px; background: #e9edf2; }
-.rank-row i { display: block; height: 100%; background: var(--teal); }
+.rank-row div span { position: relative; height: 4px; overflow: hidden; border-radius: 2px; background: #e9edf2; }
+.rank-row div span::after { content: ""; position: absolute; inset: 0 auto 0 50%; width: 1px; background: #738196; }
+.rank-row i { position: absolute; left: 50%; display: block; height: 100%; background: var(--teal); }
+.rank-row i.negative { right: 50%; left: auto; background: #c84242; }
 .events-panel { margin-top: 20px; overflow: auto; }
 .events-panel .panel-title { padding: 20px 22px 15px; }
 .events-panel .panel-title button { border: 0; color: var(--blue); background: transparent; cursor: pointer; }
@@ -343,8 +347,7 @@ th { color: #607084; background: #fafbfc; font-weight: 600; }
 .icon-action { width: 36px; height: 36px; border: 1px solid var(--line); border-radius: 6px; color: #56657a; background: #fff; display: grid; place-items: center; cursor: pointer; }
 .orders-table-wrap { overflow-x: auto; }
 .audit-table { min-width: 1180px; }
-.audit-data { min-width: 220px; max-width: 340px; white-space: normal; }
-.audit-data code { color: #3f5065; font-family: Consolas, monospace; overflow-wrap: anywhere; }
+.audit-data { min-width: 220px; max-width: 340px; color: #3f5065; overflow-wrap: anywhere; white-space: normal; }
 .permission-matrix-table { min-width: 1080px; white-space: normal; }
 .permission-matrix-table th, .permission-matrix-table td { vertical-align: top; line-height: 1.65; }
 .permission-matrix-table td:first-child { min-width: 112px; color: var(--navy); }
