@@ -4,7 +4,7 @@ import { z } from "zod";
 import type { Database } from "../db.js";
 import { standardBusinessRegionName } from "../domain/business-regions.js";
 import { businessDate } from "../domain/business-time.js";
-import { postgresBigintIdSchema } from "../validation.js";
+import { nonnegativeMoneySchema, postgresBigintIdSchema } from "../validation.js";
 import { hasAnyRole, type CurrentUser } from "./auth.js";
 import { recordEventAnalysisDimensions } from "./event-analysis-dimensions.js";
 import { OrganizationResolutionError, resolveOrganization } from "./organization.js";
@@ -30,7 +30,7 @@ const correctionListSchema = z.object({
 const reviewSchema = z.strictObject({
   orderId: postgresBigintIdSchema,
   lifecycleState: z.enum(["active", "paused", "zero"]),
-  currentRevenue: z.number().finite().min(0).max(99_999_999_999.99),
+  currentRevenue: nonnegativeMoneySchema,
   conclusion: z.string().trim().min(1).max(500),
   evidence: z.string().trim().min(1).max(1000),
   reason: z.string().trim().min(1).max(500),

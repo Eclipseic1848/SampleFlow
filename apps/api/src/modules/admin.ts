@@ -58,7 +58,6 @@ export async function registerAdmin(app:FastifyInstance,db:Database){
         await client.query("commit");
         return{users:result.rows[0]!.users,roles:fixedRoles,permissionMatrix:ROLE_PERMISSION_MATRIX,page,pageSize,totalCount:Number(result.rows[0]!.totalCount)};
       }
-      if(!cursor)await client.query("lock table users in share mode");
       const result=await client.query<{cutoffId:string|null;users:Array<{id:string;username:string;displayName:string;isActive:boolean;mustChangePassword:boolean;roles:string[]}>}>(
         `with cutoff as (select coalesce($3::bigint,max(id)) as id from users), page as (
          select u.id as "__id",u.id::text,u.username,u.display_name as "displayName",u.is_active as "isActive",u.must_change_password as "mustChangePassword",

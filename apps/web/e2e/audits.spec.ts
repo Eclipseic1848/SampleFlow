@@ -49,11 +49,13 @@ test("审计页面只读展示所属域并支持组合过滤", async ({ context,
     await page.getByRole("button", { name: "审计查询" }).click();
     await expect(page.getByRole("heading", { name: "审计查询" })).toBeVisible();
     await expect(page.getByRole("cell", { name: "创建账号" })).toBeVisible();
+    await expect.poll(()=>new URL(page.url()).searchParams.get("auditSnapshot")).toBeTruthy();
     await expect(page.getByText("performance.order_posted", { exact: true })).not.toBeVisible();
     const pageSize=page.getByLabel("审计记录每页条数");
     expect(await pageSize.locator("option").allTextContents()).toEqual(["10 条/页","20 条/页","50 条/页","100 条/页"]);
     await page.getByRole("button", { name: "第 2 页" }).click();
     expect(new URL(page.url()).searchParams.get("auditPage")).toBe("2");
+    expect(new URL(page.url()).searchParams.get("auditSnapshot")).toBeTruthy();
     await expect(page.getByText("创建账号", { exact: true })).toHaveCount(0);
     await expect(page.getByRole("cell", { name: "组织分页记录" }).first()).toBeVisible();
     const secondPageUrl = page.url();

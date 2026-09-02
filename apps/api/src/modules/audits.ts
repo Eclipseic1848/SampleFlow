@@ -12,13 +12,19 @@ const auditFiltersSchema = z.strictObject({
   from: z.iso.datetime({ offset: true }).optional(),
   to: z.iso.datetime({ offset: true }).optional(),
 });
-const querySchema = auditFiltersSchema.extend({ cursor: z.string().max(2048).optional(), page:pageNumberSchema.optional(), pageSize:pageSizeSchema.optional() });
+const querySchema = auditFiltersSchema.extend({ cursor: z.string().max(2048).optional(), snapshot:z.string().max(2048).optional(), page:pageNumberSchema.optional(), pageSize:pageSizeSchema.optional() });
 const auditCursorSchema = z.strictObject({
   version: z.literal(1),
   userId: postgresBigintIdSchema,
   filters: auditFiltersSchema,
   id: postgresBigintIdSchema,
   cutoffId: postgresBigintIdSchema,
+});
+const auditSnapshotSchema = z.strictObject({
+  version:z.literal(1),
+  userId:postgresBigintIdSchema,
+  filters:auditFiltersSchema,
+  cutoffId:z.union([z.literal("0"),postgresBigintIdSchema]),
 });
 const PAGE_SIZE = 50;
 const SENSITIVE_FIELD = /password|token|secret|credential|authorization|cookie|session/i;
@@ -31,6 +37,19 @@ function decodeAuditCursor(value: string): z.infer<typeof auditCursorSchema> | n
   try {
     const parsed = auditCursorSchema.safeParse(JSON.parse(Buffer.from(value, "base64url").toString("utf8")));
     return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+}
+
+function encodeAuditSnapshot(value:z.infer<typeof auditSnapshotSchema>):string {
+  return Buffer.from(JSON.stringify(value),"utf8").toString("base64url");
+}
+
+function decodeAuditSnapshot(value:string):z.infer<typeof auditSnapshotSchema>|null {
+  try {
+    const parsed=auditSnapshotSchema.safeParse(JSON.parse(Buffer.from(value,"base64url").toString("utf8")));
+    return parsed.success?parsed.data:null;
   } catch {
     return null;
   }
@@ -50,13 +69,17 @@ export async function registerAudits(app: FastifyInstance, db: Database) {
       return reply.code(400).send({ message: "审计查询条件无效" });
     }
 
-    const { cursor: encodedCursor, page:requestedPage, pageSize:requestedPageSize, ...filters } = parsed.data;
+    const { cursor: encodedCursor, snapshot:encodedSnapshot, page:requestedPage, pageSize:requestedPageSize, ...filters } = parsed.data;
     const numbered=requestedPage!==undefined||requestedPageSize!==undefined;
-    if(numbered&&encodedCursor)return reply.code(400).send({message:"页码与游标不能同时使用"});
+    if((numbered&&encodedCursor)||(!numbered&&encodedSnapshot))return reply.code(400).send({message:"页码快照只能与页码一起使用，且不能与游标混用"});
     const page=requestedPage??1;const pageSize=requestedPageSize??20;
     const cursor = encodedCursor ? decodeAuditCursor(encodedCursor) : null;
     if (encodedCursor && (!cursor || cursor.userId !== request.currentUser.id || JSON.stringify(cursor.filters) !== JSON.stringify(filters))) {
       return reply.code(400).send({ message: "审计分页游标无效或已不适用于当前查询" });
+    }
+    const snapshot=encodedSnapshot?decodeAuditSnapshot(encodedSnapshot):null;
+    if(encodedSnapshot&&(!snapshot||snapshot.userId!==request.currentUser.id||JSON.stringify(snapshot.filters)!==JSON.stringify(filters))){
+      return reply.code(400).send({message:"审计页码快照无效或已不适用于当前查询"});
     }
 
     const systemAdmin = request.currentUser.roles.includes("system_admin");
@@ -70,28 +93,23 @@ export async function registerAudits(app: FastifyInstance, db: Database) {
     const client = await db.connect();
     try {
       await client.query("begin");
-      // ponytail: 首屏短暂锁表冻结快照；审计写入吞吐成为瓶颈时再改持久化快照。
-      if (!cursor) await client.query("lock table audit_logs in share mode");
-      const result = await client.query<{
+      const result = await client.query<{audits:Array<{
       action: string;
       actorDisplayName: string | null;
       actorPersonId: string | null;
       actorUsername: string | null;
       afterData: unknown;
       beforeData: unknown;
-      createdAt: Date;
+      createdAt: string;
       entityId: string | null;
       entityType: string;
       id: string;
-      cutoffId: string;
-      __totalCount: string;
-    }>(
-      `with cutoff as (select coalesce($20::bigint,max(id)) as id from audit_logs)
-       select audit.id::text,
+      }>;cutoffId:string;totalCount:string}>(
+      `with cutoff as (select coalesce($20::bigint,max(id),0) as id from audit_logs), filtered as materialized (
+       select audit.id as "__id",audit.id::text,
                actor_person.id::text as "actorPersonId",actor_user.username as "actorUsername",actor_user.display_name as "actorDisplayName",
                audit.action,audit.entity_type as "entityType",audit.entity_id as "entityId",
-               audit.before_data as "beforeData",audit.after_data as "afterData",audit.created_at as "createdAt",
-               cutoff.id::text as "cutoffId",count(*) over()::text as "__totalCount"
+               audit.before_data as "beforeData",audit.after_data as "afterData",audit.created_at as "createdAt"
        from audit_logs audit
        cross join cutoff
        left join users actor_user on actor_user.id=audit.actor_user_id
@@ -146,7 +164,13 @@ export async function registerAudits(app: FastifyInstance, db: Database) {
           and ($15::timestamptz is null or audit.created_at<=$15::timestamptz)
           and ($16::bigint is null or audit.id<$16::bigint)
           and audit.id<=cutoff.id
-        order by audit.id desc limit $19 offset $21`,
+       ), page_rows as (
+         select * from filtered order by "__id" desc limit $19 offset $21
+       )
+       select cutoff.id::text as "cutoffId",(select count(*)::text from filtered) as "totalCount",
+              coalesce(jsonb_agg(to_jsonb(page_rows)-'__id' order by page_rows."__id" desc)
+                filter(where page_rows."__id" is not null),'[]'::jsonb) as audits
+       from cutoff left join page_rows on true group by cutoff.id`,
       [
         systemAdmin,
         goalAccess.all,
@@ -164,27 +188,27 @@ export async function registerAudits(app: FastifyInstance, db: Database) {
         request.currentUser.id,
         performanceReader,
         numbered?pageSize:PAGE_SIZE + 1,
-        cursor?.cutoffId ?? null,
+        cursor?.cutoffId ?? snapshot?.cutoffId ?? null,
         numbered?(page-1)*pageSize:0,
       ],
     );
       await client.query("commit");
-      const totalCount=Number(result.rows[0]?.__totalCount??0);
-      const hasNext = numbered?page*pageSize<totalCount:result.rows.length > PAGE_SIZE;
-      const rows=numbered?result.rows:result.rows.slice(0,PAGE_SIZE);
-      const audits = rows.map(({ cutoffId: _cutoffId, __totalCount:_totalCount, ...row }) => ({
-        ...row,
-        beforeData: redact(row.beforeData),
-        afterData: redact(row.afterData),
+      const row=result.rows[0]!;
+      const totalCount=Number(row.totalCount);
+      const hasNext = numbered?page*pageSize<totalCount:row.audits.length > PAGE_SIZE;
+      const rows=numbered?row.audits:row.audits.slice(0,PAGE_SIZE);
+      const audits = rows.map((audit) => ({
+        ...audit,
+        beforeData: redact(audit.beforeData),
+        afterData: redact(audit.afterData),
       }));
-      if(numbered)return{audits,page,pageSize,totalCount};
+      if(numbered)return{audits,page,pageSize,totalCount,snapshot:encodeAuditSnapshot({version:1,userId:request.currentUser.id,filters,cutoffId:row.cutoffId})};
       const last = audits.at(-1);
-      const cutoffId = result.rows[0]?.cutoffId;
       return {
         audits,
         pageSize: PAGE_SIZE,
-        nextCursor: hasNext && last && cutoffId
-          ? encodeAuditCursor({ version: 1, userId: request.currentUser.id, filters, id: last.id, cutoffId })
+        nextCursor: hasNext && last && row.cutoffId!=="0"
+          ? encodeAuditCursor({ version: 1, userId: request.currentUser.id, filters, id: last.id, cutoffId:row.cutoffId })
           : null,
       };
     } catch (error) {

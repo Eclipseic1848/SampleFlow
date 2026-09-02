@@ -1223,22 +1223,17 @@ test("账号管理使用稳定搜索分页并审计固定角色组合变更", as
         const adminHeaders = await loginWriteHeaders(app, "scope_admin");
         const search = encodeURIComponent("分页账号");
         const firstRequest = app.inject({ method: "GET", url: `/api/admin/users?search=${search}`, headers: adminHeaders });
+        const firstResult=await Promise.race([
+          firstRequest,
+          new Promise<null>((resolve)=>setTimeout(()=>resolve(null),1_000)),
+        ]);
         try {
-          for (let attempt = 0; attempt < 100; attempt += 1) {
-            const waiting = await setup.query<{ waiting: boolean }>(
-              `select exists(
-                 select 1 from pg_locks locks join pg_class relation on relation.oid=locks.relation
-                 where relation.relname='users' and locks.mode='ShareLock' and not locks.granted
-               ) as waiting`,
-            );
-            if (waiting.rows[0]!.waiting) break;
-            if (attempt === 99) assert.fail("账号首屏必须等待在途账号写入提交后再冻结分页快照");
-            await new Promise((resolve) => setTimeout(resolve, 10));
-          }
-        } finally {
           await writer.query("commit");
+        } finally {
+          if(!firstResult)await writer.query("rollback");
         }
-        const first = await firstRequest;
+        assert.ok(firstResult,"账号读取不得等待在途写入提交");
+        const first=firstResult;
         assert.equal(first.statusCode, 200, first.body);
         assert.equal(first.json().users.length, 50);
         assert.equal(first.json().pageSize, 50);
@@ -1269,11 +1264,11 @@ test("账号管理使用稳定搜索分页并审计固定角色组合变更", as
           headers: adminHeaders,
         });
         assert.equal(second.statusCode, 200, second.body);
-        assert.equal(second.json().users.length, 11);
+        assert.equal(second.json().users.length, 10);
         assert.equal(second.json().nextCursor, null);
         const ids = [...first.json().users, ...second.json().users].map((user: { id: string }) => user.id);
-        assert.equal(new Set(ids).size, 61);
-        assert.equal(ids.includes(pending.rows[0]!.id), true);
+        assert.equal(new Set(ids).size, 60);
+        assert.equal(ids.includes(pending.rows[0]!.id), false);
         assert.equal(ids.includes(late.rows[0]!.id), false);
 
         const mismatchedCursor = await app.inject({
@@ -1450,12 +1445,25 @@ test("订单台账用固定快照稳定遍历并保持有界查询次数", async
       assert.equal(numbered.json().pageSize, 10);
       assert.equal(numbered.json().totalCount, 101);
       assert.equal(numbered.json().orders.length, 10);
+      const numberedSnapshot=numbered.json<{snapshot:string}>().snapshot;
+      assert.ok(numberedSnapshot);
       const mixedPagination = await app.inject({ method: "GET", url: `/api/performance/orders?search=CURSOR-FIX-&page=1&cursor=${encodeURIComponent(first.body.nextCursor!)}`, headers: { cookie: leaderCookie } });
       assert.equal(mixedPagination.statusCode, 400, mixedPagination.body);
       const invalidPageSize = await app.inject({ method: "GET", url: "/api/performance/orders?pageSize=15", headers: { cookie: leaderCookie } });
       assert.equal(invalidPageSize.statusCode, 400, invalidPageSize.body);
 
       const [newOrderId] = await insertRows("CURSOR-FIX-NEW-", 1);
+      const numberedLast=await app.inject({method:"GET",url:`/api/performance/orders?search=CURSOR-FIX-&page=11&pageSize=10&snapshot=${encodeURIComponent(numberedSnapshot)}`,headers:{cookie:leaderCookie}});
+      assert.equal(numberedLast.statusCode,200,numberedLast.body);
+      assert.equal(numberedLast.json().totalCount,101);
+      assert.equal(numberedLast.json().orders.length,1);
+      assert.equal(numberedLast.json<{orders:Array<{id:string}>}>().orders.some((order)=>order.id===newOrderId),false);
+      const numberedOutOfRange=await app.inject({method:"GET",url:`/api/performance/orders?search=CURSOR-FIX-&page=999&pageSize=10&snapshot=${encodeURIComponent(numberedSnapshot)}`,headers:{cookie:leaderCookie}});
+      assert.equal(numberedOutOfRange.statusCode,200,numberedOutOfRange.body);
+      assert.equal(numberedOutOfRange.json().totalCount,101);
+      assert.deepEqual(numberedOutOfRange.json().orders,[]);
+      const numberedMismatch=await app.inject({method:"GET",url:`/api/performance/orders?search=OTHER&page=1&pageSize=10&snapshot=${encodeURIComponent(numberedSnapshot)}`,headers:{cookie:leaderCookie}});
+      assert.equal(numberedMismatch.statusCode,400,numberedMismatch.body);
       const pages = [first.body];
       let nextCursor: string | null = first.body.nextCursor;
       while (nextCursor) {
@@ -1506,6 +1514,8 @@ test("订单台账用固定快照稳定遍历并保持有界查询次数", async
         headers: { cookie: bobCookie },
       });
       assert.equal(otherUser.statusCode, 400, otherUser.body);
+      const otherSnapshotUser=await app.inject({method:"GET",url:`/api/performance/orders?search=CURSOR-FIX-&page=1&pageSize=10&snapshot=${encodeURIComponent(numberedSnapshot)}`,headers:{cookie:bobCookie}});
+      assert.equal(otherSnapshotUser.statusCode,400,otherSnapshotUser.body);
       const oversizedPayload = JSON.parse(Buffer.from(first.body.nextCursor!, "base64url").toString("utf8")) as Record<string, unknown>;
       oversizedPayload.anchorId = "9223372036854775808";
       const oversizedCursor = Buffer.from(JSON.stringify(oversizedPayload), "utf8").toString("base64url");
@@ -1542,6 +1552,7 @@ test("订单组合筛选始终叠加服务端权限范围", async () => {
            customer_unit=case qingflow_order_no when 'SCOPE-1' then '甲客户单位' when 'SCOPE-2' then '乙客户单位' else '丙客户单位' end,
            business_region_code=case qingflow_order_no when 'SCOPE-1' then 'CN-JS' when 'SCOPE-2' then 'CN-ZJ' else 'EXT-TRADE' end,
            source_received_on=case qingflow_order_no when 'SCOPE-2' then '2026-09-01'::date else '2026-08-01'::date end,
+           counted_amount=case qingflow_order_no when 'SCOPE-2' then 0 else counted_amount end,
            lifecycle_state=case qingflow_order_no when 'SCOPE-2' then 'paused' else 'active' end
          where id=any($1::bigint[])`,
         [scenario.orderIds],

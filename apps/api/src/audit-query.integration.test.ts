@@ -221,19 +221,19 @@ test("审计查询支持人员、动作、实体、时间和稳定游标过滤",
         [scenario.users.alice, scenario.orders[0]],
       );
       const inFlightId = inFlight.rows[0]!.id;
-      let firstPageResolved = false;
-      const firstPagePromise = app.inject({ method: "GET", url: "/api/audits?action=performance.cursor_test", headers: { cookie } })
-        .then((response) => { firstPageResolved = true; return response; });
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      const resolvedBeforeCommit = firstPageResolved;
+      const firstPageResult = await Promise.race([
+        app.inject({ method: "GET", url: "/api/audits?action=performance.cursor_test", headers: { cookie } }),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 1_000)),
+      ]);
       await inFlightClient.query("commit");
       await inFlightClient.end();
-      const firstPage = await firstPagePromise;
-      assert.equal(resolvedBeforeCommit, false, "首屏应等待已开始的审计写入提交后再冻结快照");
+      assert.ok(firstPageResult, "审计读取不得等待在途写入提交");
+      const firstPage=firstPageResult;
       assert.equal(firstPage.statusCode, 200, firstPage.body);
       const firstData = firstPage.json<{ audits: AuditRow[]; nextCursor: string | null }>();
       assert.equal(firstData.audits.length, 50);
       assert.ok(firstData.nextCursor);
+      assert.equal(firstData.audits.some((row) => row.id === inFlightId), false);
       const concurrentClient = new Client({ connectionString: database.url });
       await concurrentClient.connect();
       let concurrentId: string;
@@ -246,12 +246,33 @@ test("审计查询支持人员、动作、实体、时间和稳定游标过滤",
       } finally {
         await concurrentClient.end();
       }
-      const numbered = await app.inject({ method: "GET", url: "/api/audits?action=performance.cursor_test&page=6&pageSize=10", headers: { cookie } });
+      const numberedFirst = await app.inject({ method: "GET", url: "/api/audits?action=performance.cursor_test&page=1&pageSize=10", headers: { cookie } });
+      assert.equal(numberedFirst.statusCode, 200, numberedFirst.body);
+      const numberedSnapshot=numberedFirst.json<{snapshot:string}>().snapshot;
+      assert.ok(numberedSnapshot);
+      const postSnapshotClient=new Client({connectionString:database.url});
+      await postSnapshotClient.connect();
+      let afterSnapshot:string;
+      try {
+        const inserted=await postSnapshotClient.query<{id:string}>(
+          "insert into audit_logs(actor_user_id,action,entity_type,entity_id) values($1,'performance.cursor_test','performance_order',$2) returning id::text",
+          [scenario.users.alice,scenario.orders[0]],
+        );
+        afterSnapshot=inserted.rows[0]!.id;
+      } finally {
+        await postSnapshotClient.end();
+      }
+      const numbered = await app.inject({ method: "GET", url: `/api/audits?action=performance.cursor_test&page=6&pageSize=10&snapshot=${encodeURIComponent(numberedSnapshot)}`, headers: { cookie } });
       assert.equal(numbered.statusCode, 200, numbered.body);
       assert.equal(numbered.json().page, 6);
       assert.equal(numbered.json().pageSize, 10);
       assert.equal(numbered.json().totalCount, 53);
       assert.equal(numbered.json().audits.length, 3);
+      assert.equal(numbered.json<{audits:AuditRow[]}>().audits.some((row)=>row.id===afterSnapshot),false);
+      const outOfRange = await app.inject({ method:"GET",url:`/api/audits?action=performance.cursor_test&page=999&pageSize=10&snapshot=${encodeURIComponent(numberedSnapshot)}`,headers:{cookie} });
+      assert.equal(outOfRange.statusCode,200,outOfRange.body);
+      assert.equal(outOfRange.json().totalCount,53);
+      assert.deepEqual(outOfRange.json().audits,[]);
       const mixedPagination = await app.inject({ method: "GET", url: `/api/audits?action=performance.cursor_test&page=1&cursor=${firstData.nextCursor}`, headers: { cookie } });
       assert.equal(mixedPagination.statusCode, 400, mixedPagination.body);
       const invalidPageSize = await app.inject({ method: "GET", url: "/api/audits?pageSize=15", headers: { cookie } });
@@ -259,10 +280,10 @@ test("审计查询支持人员、动作、实体、时间和稳定游标过滤",
       const cursorPage = await app.inject({ method: "GET", url: `/api/audits?action=performance.cursor_test&cursor=${firstData.nextCursor}`, headers: { cookie } });
       assert.equal(cursorPage.statusCode, 200, cursorPage.body);
       const secondRows = cursorPage.json<{ audits: AuditRow[] }>().audits;
-      assert.equal(secondRows.length, 2);
+      assert.equal(secondRows.length, 1);
       const traversedIds = [...firstData.audits, ...secondRows].map((row) => row.id);
-      assert.equal(new Set(traversedIds).size, 52);
-      assert.equal(traversedIds.includes(inFlightId), true);
+      assert.equal(new Set(traversedIds).size, 51);
+      assert.equal(traversedIds.includes(inFlightId), false);
       assert.equal(traversedIds.includes(concurrentId), false);
 
       const mismatched = await app.inject({ method: "GET", url: `/api/audits?action=other.action&cursor=${firstData.nextCursor}`, headers: { cookie } });

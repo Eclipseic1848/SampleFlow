@@ -418,23 +418,6 @@ test("地区与客户分析按事件快照对账且查询次数不随规模增�
           await setup.query("delete from performance_event_analysis_dimensions where event_id=$1", [eventIds[4]]);
           await setup.query("set session_replication_role=origin");
         };
-        const waitForAnalysisShareLock = async () => {
-          for (let attempt = 0; attempt < 100; attempt += 1) {
-            const waiting = await setup.query<{ waiting: boolean }>(
-              `select exists(
-                 select 1 from pg_locks locks
-                 join pg_class relation on relation.oid=locks.relation
-                 join pg_stat_activity activity on activity.pid=locks.pid
-                 where relation.relname='performance_event_analysis_dimensions'
-                   and locks.mode='ShareLock' and not locks.granted
-                   and activity.application_name='sampleflow-api-runtime'
-               ) as waiting`,
-            );
-            if (waiting.rows[0]!.waiting) return;
-            await new Promise((resolve) => setTimeout(resolve, 10));
-          }
-          assert.fail("首屏分析必须等待在途维度写入提交后再冻结快照");
-        };
         const scaledDrilldowns = [
           { name: "省份客户", url: "/api/performance/analysis/drilldown?level=customers&regionCode=CN-JS&month=2026-08", baseline: smallCustomersReadCount },
           { name: "客户月份", url: "/api/performance/analysis/drilldown?level=months&regionCode=CN-JS&customerUnit=%E5%AE%A2%E6%88%B7%E5%8D%95%E4%BD%8D%E7%94%B2&year=2026", baseline: smallMonthsReadCount },
@@ -465,12 +448,17 @@ test("地区与客户分析按事件快照对账且查询次数不随规模增�
                 [heldEventId],
               );
               const pendingResult = app.inject({ method: "GET", url: drilldown.url, headers: { cookie: leaderCookie } });
+              const resolvedBeforeCommit=await Promise.race([
+                pendingResult,
+                new Promise<null>((resolve)=>setTimeout(()=>resolve(null),1_000)),
+              ]);
               try {
-                await waitForAnalysisShareLock();
-              } finally {
                 await writer.query("commit");
+              } finally {
+                if(!resolvedBeforeCommit)await writer.query("rollback");
               }
-              result = await pendingResult;
+              assert.ok(resolvedBeforeCommit,"分析读取不得等待在途维度写入提交");
+              result = resolvedBeforeCommit;
             } finally {
               await writer.end();
             }
@@ -485,9 +473,22 @@ test("地区与客户分析按事件快照对账且查询次数不随规模增�
             const page = result.json();
             assert.equal(page.customers.length, 50);
             assert.equal(page.customerCount, 61);
-            assert.equal(page.eventCount, 4699);
+            assert.equal(page.eventCount, 4698);
             assert.ok(page.nextCursor);
             const firstUnits = new Set(page.customers.map((customer: { customerUnit: string }) => customer.customerUnit));
+            const numberedFirst=await app.inject({method:"GET",url:`${drilldown.url}&page=1&pageSize=10`,headers:{cookie:leaderCookie}});
+            assert.equal(numberedFirst.statusCode,200,numberedFirst.body);
+            const numberedBody=numberedFirst.json<{snapshot:string;totalCount:number;customers:Array<{customerUnit:string}>}>();
+            assert.ok(numberedBody.snapshot);
+            await insertConcurrentDimension("页码并发单位");
+            try {
+              const numberedNext=await app.inject({method:"GET",url:`${drilldown.url}&page=2&pageSize=10&snapshot=${encodeURIComponent(numberedBody.snapshot)}`,headers:{cookie:leaderCookie}});
+              assert.equal(numberedNext.statusCode,200,numberedNext.body);
+              assert.equal(numberedNext.json().totalCount,numberedBody.totalCount);
+              assert.equal(numberedNext.json().customers.some((customer:{customerUnit:string})=>customer.customerUnit==="页码并发单位"),false);
+            } finally {
+              await removeConcurrentDimension();
+            }
             const concurrentEventId = await insertConcurrentEvent(-1_000_000_000);
             await insertConcurrentDimension("并发补齐单位");
             try {
@@ -508,6 +509,19 @@ test("地区与客户分析按事件快照对账且查询次数不随规模增�
             assert.equal(page.orders.flatMap((order: { events: unknown[] }) => order.events).length, 100);
             assert.ok(page.nextCursor);
             const ids = new Set(page.orders.flatMap((order: { events: Array<{ id: string }> }) => order.events.map((event) => event.id)));
+            const numberedFirst=await app.inject({method:"GET",url:`${drilldown.url}&page=1&pageSize=100`,headers:{cookie:leaderCookie}});
+            assert.equal(numberedFirst.statusCode,200,numberedFirst.body);
+            const numberedBody=numberedFirst.json<{snapshot:string;totalCount:number}>();
+            assert.ok(numberedBody.snapshot);
+            await insertConcurrentDimension("客户单位甲");
+            try {
+              const numberedNext=await app.inject({method:"GET",url:`${drilldown.url}&page=2&pageSize=100&snapshot=${encodeURIComponent(numberedBody.snapshot)}`,headers:{cookie:leaderCookie}});
+              assert.equal(numberedNext.statusCode,200,numberedNext.body);
+              assert.equal(numberedNext.json().totalCount,numberedBody.totalCount);
+              assert.equal(numberedNext.json().orders.flatMap((order:{events:Array<{id:string}>})=>order.events).some((event:{id:string})=>event.id===eventIds[4]),false);
+            } finally {
+              await removeConcurrentDimension();
+            }
             const concurrentEventId = await insertConcurrentEvent(1);
             await insertConcurrentDimension("客户单位甲");
             try {
@@ -522,6 +536,7 @@ test("地区与客户分析按事件快照对账且查询次数不随规模增�
             }
           }
         }
+        assert.equal(analysisShareLockCount,0,"分析穿透不得取得阻塞业务写入的表级锁");
 
         for (const [index, captured] of largeDrilldownQueries.entries()) {
           const explain = await setup.query<{ "QUERY PLAN": Array<{ Plan: Record<string, unknown> }> }>(

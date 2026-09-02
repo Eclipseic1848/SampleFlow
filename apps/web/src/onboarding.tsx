@@ -241,6 +241,7 @@ export function Onboarding({ user, page, canOpen, includeNavigation }: { user: U
   useEffect(() => {
     if (!canOpen || hasFlag(pageFlag) || hasFlag(allFlag) || autoAttempted.current.has(pageFlag)) return;
     const tryStart = () => {
+      if (page === "overview" && !document.querySelector('[data-onboarding-page="overview"][data-onboarding-ready="true"]')) return false;
       if (!start()) return false;
       autoAttempted.current.add(pageFlag);
       return true;
@@ -249,7 +250,7 @@ export function Onboarding({ user, page, canOpen, includeNavigation }: { user: U
     const root = document.getElementById("root");
     if (!root) return;
     const observer = new MutationObserver(() => { if (tryStart()) observer.disconnect(); });
-    observer.observe(root, { childList: true, subtree: true });
+    observer.observe(root, { attributes:true,childList: true, subtree: true,attributeFilter:["data-onboarding-ready"] });
     return () => observer.disconnect();
   }, [allFlag, canOpen, pageFlag, start]);
 

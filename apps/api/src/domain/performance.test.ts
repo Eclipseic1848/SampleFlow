@@ -25,3 +25,10 @@ test("零金额订单通过首次计入事件转为正向计入", () => {
   assert.equal(result.deltaAmount, 88);
   assert.equal(result.next.lifecycle, "active");
 });
+
+test("首次计入金额舍入为零时拒绝改变账本状态", () => {
+  assert.throws(
+    () => decidePerformanceEvent({ currentRevenue: 0, countedAmount: 0, lifecycle: "zero" }, { type: "first_include", amount: 0.001 }),
+    PerformanceRuleError,
+  );
+});

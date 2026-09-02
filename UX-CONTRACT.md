@@ -54,12 +54,13 @@
 
 ## Dataset navigation
 
-- Admin tables: 使用服务端边界；订单页 P0 仅提供最大 100 条的服务端精确/模糊定位，完整分页属于 Issue #11。
-- Exploratory lists: 当前无。
-- URL state: 订单已提交搜索写入 `orderSearch` 查询参数；无路由库时使用 History API，并响应浏览器前进/后退。
-- Page size: 订单 P0 临时上限 100；不得声称完整分页。
+- Service-backed lists: 订单、账号、审计和分析穿透由服务端分页并返回精确 `totalCount`；其他已完整加载的数据集合复用 `PaginatedCollection` 客户端分页。
+- Exploratory lists: 省份、总览指标等有限集合也复用统一分页控件，不另建局部分页交互。
+- URL state: 页面、已提交筛选、页码、每页条数和服务端不透明快照令牌写入查询参数；History API 必须支持刷新及前进/后退恢复。
+- Stable snapshot: 订单、审计和分析穿透的首次页码查询返回绑定用户、筛选和 cutoff 的快照；后续翻页复用，筛选、每页条数或主动刷新时清空并重新创建。旧游标 API 仅保留兼容。
+- Page size: 默认 20 条，可选 10／20／50／100 条；显示精确总数、总页数、当前页、上一页／下一页和可点击页码。
 - Empty/no-results/error/loading treatment: 分别说明“暂无数据”“没有匹配结果”“加载失败可刷新”；后台刷新保留既有结果。
-- Back/scroll restoration: 搜索由 URL 恢复；页面保留自然文档滚动。
+- Back/scroll restoration: 筛选、分页和快照由 URL 恢复；页面保留自然文档滚动。
 - Selection scope: 当前不提供批量选择。
 
 ## Flow ledger

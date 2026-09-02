@@ -3,7 +3,7 @@ import type { PoolClient } from "pg";
 import { z } from "zod";
 import type { Database } from "../db.js";
 import { recordOperation } from "../observability.js";
-import { postgresBigintIdSchema } from "../validation.js";
+import { nonnegativeMoneySchema, postgresBigintIdSchema } from "../validation.js";
 import { hasAnyRole, type CurrentUser } from "./auth.js";
 import { canReadGoals, pendingGoalSql, pendingGoalValues, resolveGoalAccess } from "./authorization.js";
 
@@ -16,7 +16,7 @@ const createSchema = z.object({
   ownerPersonId: postgresBigintIdSchema,
   orgUnitId: postgresBigintIdSchema.nullable().optional(),
   parentGoalId: postgresBigintIdSchema.nullable().optional(),
-  amount: z.number().finite().min(0).max(99_999_999_999.99),
+  amount: nonnegativeMoneySchema,
   changeReason: z.string().trim().min(1).max(500).optional().default("目标下达"),
 });
 const confirmationSchema = z.strictObject({});
@@ -27,18 +27,18 @@ const decisionSchema = z.object({
   comment: z.string().trim().min(1).max(500),
 });
 const requestSchema = z.object({
-  requestedAmount: z.number().finite().min(0).max(99_999_999_999.99).optional(),
+  requestedAmount: nonnegativeMoneySchema.optional(),
   reason: z.string().trim().min(1).max(500),
 });
 const acceptSchema = z.object({
-  newAmount: z.number().finite().min(0).max(99_999_999_999.99),
+  newAmount: nonnegativeMoneySchema,
   comment: z.string().trim().min(1).max(500),
 });
 const rejectSchema = z.object({ comment: z.string().trim().min(1).max(500) });
 const linkageSchema = z.object({
   decision: z.enum(["keep_parent", "adjust_parent"]),
   reason: z.string().trim().min(1).max(500),
-  newAmount: z.number().finite().min(0).max(99_999_999_999.99).optional(),
+  newAmount: nonnegativeMoneySchema.optional(),
 });
 const idSchema = z.object({ id: postgresBigintIdSchema });
 const versionIdSchema = z.strictObject({ id: postgresBigintIdSchema });
