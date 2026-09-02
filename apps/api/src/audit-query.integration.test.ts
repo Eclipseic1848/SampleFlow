@@ -246,6 +246,16 @@ test("审计查询支持人员、动作、实体、时间和稳定游标过滤",
       } finally {
         await concurrentClient.end();
       }
+      const numbered = await app.inject({ method: "GET", url: "/api/audits?action=performance.cursor_test&page=6&pageSize=10", headers: { cookie } });
+      assert.equal(numbered.statusCode, 200, numbered.body);
+      assert.equal(numbered.json().page, 6);
+      assert.equal(numbered.json().pageSize, 10);
+      assert.equal(numbered.json().totalCount, 53);
+      assert.equal(numbered.json().audits.length, 3);
+      const mixedPagination = await app.inject({ method: "GET", url: `/api/audits?action=performance.cursor_test&page=1&cursor=${firstData.nextCursor}`, headers: { cookie } });
+      assert.equal(mixedPagination.statusCode, 400, mixedPagination.body);
+      const invalidPageSize = await app.inject({ method: "GET", url: "/api/audits?pageSize=15", headers: { cookie } });
+      assert.equal(invalidPageSize.statusCode, 400, invalidPageSize.body);
       const cursorPage = await app.inject({ method: "GET", url: `/api/audits?action=performance.cursor_test&cursor=${firstData.nextCursor}`, headers: { cookie } });
       assert.equal(cursorPage.statusCode, 200, cursorPage.body);
       const secondRows = cursorPage.json<{ audits: AuditRow[] }>().audits;

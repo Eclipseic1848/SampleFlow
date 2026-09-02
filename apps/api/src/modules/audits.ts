@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { Database } from "../db.js";
-import { postgresBigintIdSchema } from "../validation.js";
+import { pageNumberSchema, pageSizeSchema, postgresBigintIdSchema } from "../validation.js";
 import { canReadGoals, canReadPerformance, performanceScopeSql, performanceScopeValues, resolveGoalAccess, resolvePerformanceAccess } from "./authorization.js";
 
 const auditFiltersSchema = z.strictObject({
@@ -12,7 +12,7 @@ const auditFiltersSchema = z.strictObject({
   from: z.iso.datetime({ offset: true }).optional(),
   to: z.iso.datetime({ offset: true }).optional(),
 });
-const querySchema = auditFiltersSchema.extend({ cursor: z.string().max(2048).optional() });
+const querySchema = auditFiltersSchema.extend({ cursor: z.string().max(2048).optional(), page:pageNumberSchema.optional(), pageSize:pageSizeSchema.optional() });
 const auditCursorSchema = z.strictObject({
   version: z.literal(1),
   userId: postgresBigintIdSchema,
@@ -50,7 +50,10 @@ export async function registerAudits(app: FastifyInstance, db: Database) {
       return reply.code(400).send({ message: "审计查询条件无效" });
     }
 
-    const { cursor: encodedCursor, ...filters } = parsed.data;
+    const { cursor: encodedCursor, page:requestedPage, pageSize:requestedPageSize, ...filters } = parsed.data;
+    const numbered=requestedPage!==undefined||requestedPageSize!==undefined;
+    if(numbered&&encodedCursor)return reply.code(400).send({message:"页码与游标不能同时使用"});
+    const page=requestedPage??1;const pageSize=requestedPageSize??20;
     const cursor = encodedCursor ? decodeAuditCursor(encodedCursor) : null;
     if (encodedCursor && (!cursor || cursor.userId !== request.currentUser.id || JSON.stringify(cursor.filters) !== JSON.stringify(filters))) {
       return reply.code(400).send({ message: "审计分页游标无效或已不适用于当前查询" });
@@ -81,13 +84,14 @@ export async function registerAudits(app: FastifyInstance, db: Database) {
       entityType: string;
       id: string;
       cutoffId: string;
+      __totalCount: string;
     }>(
       `with cutoff as (select coalesce($20::bigint,max(id)) as id from audit_logs)
        select audit.id::text,
                actor_person.id::text as "actorPersonId",actor_user.username as "actorUsername",actor_user.display_name as "actorDisplayName",
                audit.action,audit.entity_type as "entityType",audit.entity_id as "entityId",
                audit.before_data as "beforeData",audit.after_data as "afterData",audit.created_at as "createdAt",
-               cutoff.id::text as "cutoffId"
+               cutoff.id::text as "cutoffId",count(*) over()::text as "__totalCount"
        from audit_logs audit
        cross join cutoff
        left join users actor_user on actor_user.id=audit.actor_user_id
@@ -142,7 +146,7 @@ export async function registerAudits(app: FastifyInstance, db: Database) {
           and ($15::timestamptz is null or audit.created_at<=$15::timestamptz)
           and ($16::bigint is null or audit.id<$16::bigint)
           and audit.id<=cutoff.id
-        order by audit.id desc limit $19`,
+        order by audit.id desc limit $19 offset $21`,
       [
         systemAdmin,
         goalAccess.all,
@@ -159,17 +163,21 @@ export async function registerAudits(app: FastifyInstance, db: Database) {
         cursor?.id ?? null,
         request.currentUser.id,
         performanceReader,
-        PAGE_SIZE + 1,
+        numbered?pageSize:PAGE_SIZE + 1,
         cursor?.cutoffId ?? null,
+        numbered?(page-1)*pageSize:0,
       ],
     );
       await client.query("commit");
-      const hasNext = result.rows.length > PAGE_SIZE;
-      const audits = result.rows.slice(0, PAGE_SIZE).map(({ cutoffId: _cutoffId, ...row }) => ({
+      const totalCount=Number(result.rows[0]?.__totalCount??0);
+      const hasNext = numbered?page*pageSize<totalCount:result.rows.length > PAGE_SIZE;
+      const rows=numbered?result.rows:result.rows.slice(0,PAGE_SIZE);
+      const audits = rows.map(({ cutoffId: _cutoffId, __totalCount:_totalCount, ...row }) => ({
         ...row,
         beforeData: redact(row.beforeData),
         afterData: redact(row.afterData),
       }));
+      if(numbered)return{audits,page,pageSize,totalCount};
       const last = audits.at(-1);
       const cutoffId = result.rows[0]?.cutoffId;
       return {

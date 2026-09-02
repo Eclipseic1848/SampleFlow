@@ -201,6 +201,16 @@ test("地区与客户分析按事件快照对账且查询次数不随规模增�
         assert.ok(analysisReadCount <= 3, `省份客户穿透读取应不超过 3 次，实际 ${analysisReadCount} 次`);
         const smallCustomersReadCount = analysisReadCount;
         const smallCustomersQuery = requireCapturedQuery(analysisQuery);
+        const numberedCustomers = await app.inject({
+          method: "GET",
+          url: "/api/performance/analysis/drilldown?level=customers&regionCode=CN-JS&month=2026-08&page=1&pageSize=10",
+          headers: { cookie: leaderCookie },
+        });
+        assert.equal(numberedCustomers.statusCode, 200, numberedCustomers.body);
+        assert.equal(numberedCustomers.json().page, 1);
+        assert.equal(numberedCustomers.json().pageSize, 10);
+        assert.equal(numberedCustomers.json().totalCount, 1);
+        assert.equal(numberedCustomers.json().customers.length, 1);
 
         analysisReadCount = 0;
         const months = await app.inject({
@@ -263,6 +273,32 @@ test("地区与客户分析按事件快照对账且查询次数不随规模增�
           totalAmount: "100.00",
           events: undefined,
         }]);
+        assert.ok(analysisReadCount <= 3, `订单事件穿透读取应不超过 3 次，实际 ${analysisReadCount} 次`);
+        const smallEventsReadCount = analysisReadCount;
+        const smallEventsQuery = requireCapturedQuery(analysisQuery);
+        const numberedEvents = await app.inject({
+          method: "GET",
+          url: "/api/performance/analysis/drilldown?level=events&regionCode=CN-JS&customerUnit=%E5%AE%A2%E6%88%B7%E5%8D%95%E4%BD%8D%E7%94%B2&month=2026-08&page=1&pageSize=10",
+          headers: { cookie: leaderCookie },
+        });
+        assert.equal(numberedEvents.statusCode, 200, numberedEvents.body);
+        assert.equal(numberedEvents.json().page, 1);
+        assert.equal(numberedEvents.json().pageSize, 10);
+        assert.equal(numberedEvents.json().totalCount, 2);
+        assert.equal(numberedEvents.json().orders[0].events.length, 2);
+        const mixedPagination = await app.inject({
+          method: "GET",
+          url: "/api/performance/analysis/drilldown?level=customers&regionCode=CN-JS&month=2026-08&page=1&cursor=x",
+          headers: { cookie: leaderCookie },
+        });
+        assert.equal(mixedPagination.statusCode, 400, mixedPagination.body);
+        assert.equal(mixedPagination.json().code, "ANALYSIS_PAGINATION_INVALID");
+        const invalidPageSize = await app.inject({
+          method: "GET",
+          url: "/api/performance/analysis/drilldown?level=customers&regionCode=CN-JS&month=2026-08&pageSize=15",
+          headers: { cookie: leaderCookie },
+        });
+        assert.equal(invalidPageSize.statusCode, 400, invalidPageSize.body);
         assert.deepEqual(eventsBody.orders[0].events.map((item: Record<string, unknown>) => ({
           id: item.id,
           sequence: item.sequence,
@@ -281,10 +317,6 @@ test("地区与客户分析按事件快照对账且查询次数不随规模增�
           { id: eventIds[0], sequence: 1, eventType: "legacy_adjustment", deltaAmount: "100.00", accountingMonth: "2026-08-01", occurredOn: "2026-08-01", reason: "分析回归", salespersonName: "分析业务员", departmentName: "分析甲部", groupName: "分析甲组", businessRegionCode: "CN-JS", businessRegionSourceText: "江苏来源", customerUnit: "客户单位甲" },
           { id: eventIds[3], sequence: 4, eventType: "legacy_adjustment", deltaAmount: "0.00", accountingMonth: "2026-08-01", occurredOn: "2026-08-01", reason: "分析回归", salespersonName: "分析业务员", departmentName: "分析甲部", groupName: "分析甲组", businessRegionCode: "CN-JS", businessRegionSourceText: "江苏来源", customerUnit: "客户单位甲" },
         ]);
-        assert.ok(analysisReadCount <= 3, `订单事件穿透读取应不超过 3 次，实际 ${analysisReadCount} 次`);
-        const smallEventsReadCount = analysisReadCount;
-        const smallEventsQuery = requireCapturedQuery(analysisQuery);
-
         for (const [name, captured] of [
           ["省份客户", smallCustomersQuery],
           ["客户月份", smallMonthsQuery],

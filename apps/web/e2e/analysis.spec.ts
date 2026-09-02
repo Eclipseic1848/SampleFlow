@@ -171,10 +171,12 @@ test("业绩分析页显示事件快照地区、外贸、客户单位和待补�
 
   await drilldown.getByRole("button", { name: "查看大额客户月份趋势" }).click();
   await drilldown.getByRole("button", { name: "查看2026年8月订单事件，101 条事件，金额 ¥100,999,999,999,998.99" }).click();
-  await expect(drilldown.getByText("已加载 100 / 101 条事件", { exact: true })).toBeVisible();
-  await drilldown.getByRole("button", { name: "加载更多事件" }).click();
-  await expect(drilldown.getByText("已加载 101 / 101 条事件", { exact: true })).toBeVisible();
-  await expect(drilldown.getByRole("button", { name: "加载更多事件" })).toHaveCount(0);
+  const eventPageSize=drilldown.getByLabel("订单事件每页条数");
+  expect(await eventPageSize.locator("option").allTextContents()).toEqual(["10 条/页","20 条/页","50 条/页","100 条/页"]);
+  await eventPageSize.selectOption("100");
+  await expect(drilldown.getByText("本页 100 / 共 101 条事件", { exact: true })).toBeVisible();
+  await drilldown.getByRole("navigation", { name: "订单事件分页" }).getByRole("button", { name: "第 2 页" }).click();
+  await expect(drilldown.getByText("本页 1 / 共 101 条事件", { exact: true })).toBeVisible();
 
   await drilldown.getByRole("button", { name: "查看2026年1月订单事件，0 条事件，金额 ¥0.00" }).click();
   await expect(drilldown.getByText("该月份没有订单事件。", { exact: true })).toBeVisible();
@@ -230,37 +232,42 @@ test("第二批客户穿透可通过刷新和浏览器历史恢复", async ({ da
     const level = url.searchParams.get("level");
     if (level === "customers") {
       customerRequests += 1;
-      const secondPage = url.searchParams.get("cursor") === "page-2";
+      const pageNumber = Number(url.searchParams.get("page")??"1");
+      const pageSize = Number(url.searchParams.get("pageSize")??"20");
+      const secondPage = pageNumber === 2;
       const customers = secondPage
         ? [{ customerUnit: "客户51", eventCount: 0, totalAmount: "0.00" }]
-        : Array.from({ length: 50 }, (_, index) => ({ customerUnit: `客户${String(index + 1).padStart(2, "0")}`, eventCount: 0, totalAmount: "0.00" }));
-      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ level, regionCode: "CN-JS", regionName: "江苏省", month: "2026-08", eventCount: 0, totalAmount: "0.00", customerCount: 51, nextCursor: secondPage ? null : "page-2", pageSize: 50, customers }) });
+        : Array.from({ length: pageSize }, (_, index) => ({ customerUnit: `客户${String(index + 1).padStart(2, "0")}`, eventCount: 0, totalAmount: "0.00" }));
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ level, regionCode: "CN-JS", regionName: "江苏省", month: "2026-08", eventCount: 0, totalAmount: "0.00", customerCount: 51, nextCursor: null, page: pageNumber, pageSize, totalCount: 51, customers }) });
       return;
     }
     if (level === "months") {
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ level, regionCode: "CN-JS", regionName: "江苏省", customerUnit: url.searchParams.get("customerUnit"), year: "2026", eventCount: 0, totalAmount: "0.00", months: [{ month: "2026-08", eventCount: 0, totalAmount: "0.00" }] }) });
       return;
     }
-    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ level: "events", regionCode: "CN-JS", regionName: "江苏省", customerUnit: url.searchParams.get("customerUnit"), month: "2026-08", eventCount: 0, totalAmount: "0.00", nextCursor: null, pageSize: 100, orders: [] }) });
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ level: "events", regionCode: "CN-JS", regionName: "江苏省", customerUnit: url.searchParams.get("customerUnit"), month: "2026-08", eventCount: 0, totalAmount: "0.00", nextCursor: null, page: 1, pageSize: 20, totalCount: 0, orders: [] }) });
   });
 
-  await page.goto(`/?${new URLSearchParams({ page: "analysis", analysisMonth: "2026-08", analysisRegion: "CN-JS", analysisCustomer: "客户51", analysisEventMonth: "2026-08" })}`);
+  await page.goto(`/?${new URLSearchParams({ page: "analysis", analysisMonth: "2026-08", analysisRegion: "CN-JS", analysisCustomer: "客户51", analysisEventMonth: "2026-08", analysisCustomerPage: "2", analysisCustomerPageSize: "50" })}`);
   await page.getByLabel("账号").fill("e2e_analysis_restore");
   await page.getByLabel("密码", { exact: true }).fill("Analysis@123");
   await page.getByRole("button", { name: "进入 SampleFlow" }).click();
   await expect(page.getByText("台湾省资料暂缺", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "客户51月度趋势" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "2026年8月订单与事件" })).toBeVisible();
-  expect(customerRequests).toBeGreaterThanOrEqual(2);
+  expect(customerRequests).toBeGreaterThanOrEqual(1);
 
   customerRequests = 0;
   await page.reload();
   await expect(page.getByRole("heading", { name: "2026年8月订单与事件" })).toBeVisible();
-  expect(customerRequests).toBeGreaterThanOrEqual(2);
+  expect(customerRequests).toBeGreaterThanOrEqual(1);
+  await page.getByRole("navigation", { name: "客户单位分页" }).getByRole("button", { name: "第 1 页" }).click();
   await page.getByRole("button", { name: "查看客户01月份趋势" }).click();
   await expect(page.getByRole("heading", { name: "客户01月度趋势" })).toBeVisible();
   await page.goBack();
+  await page.goBack();
   await expect(page.getByRole("heading", { name: "2026年8月订单与事件" })).toBeVisible();
+  await page.goForward();
   await page.goForward();
   await expect(page.getByRole("heading", { name: "客户01月度趋势" })).toBeVisible();
 });

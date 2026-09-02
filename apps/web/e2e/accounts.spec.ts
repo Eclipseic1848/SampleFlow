@@ -39,24 +39,28 @@ test("系统管理员搜索分页账号并审计固定角色组合变更", async
     await page.getByLabel("密码", { exact: true }).fill("Accounts@123");
     await page.getByRole("button", { name: "进入 SampleFlow" }).click();
     await expect(page.getByRole("heading", { name: "账号管理" })).toBeVisible();
-    await expect(page.getByText("第 1 页 · 本页 50 个账号", { exact: true })).toBeVisible();
+    await expect(page.getByText("本页 20 个账号", { exact: true })).toBeVisible();
+    const pageSize=page.getByLabel("账号每页条数");
+    expect(await pageSize.locator("option").allTextContents()).toEqual(["10 条/页","20 条/页","50 条/页","100 条/页"]);
+    await pageSize.selectOption("50");
+    await expect(page.getByText("本页 50 个账号", { exact: true })).toBeVisible();
 
-    const nextPage = page.waitForResponse((response) => new URL(response.url()).searchParams.has("cursor"));
-    await page.getByRole("button", { name: "下一页" }).click();
+    const nextPage = page.waitForResponse((response) => new URL(response.url()).searchParams.get("page") === "2");
+    await page.getByRole("button", { name: "第 2 页" }).click();
     expect((await nextPage).status()).toBe(200);
-    await expect(page.getByText("第 2 页 · 本页 7 个账号", { exact: true })).toBeVisible();
-    await expect.poll(() => new URL(page.url()).searchParams.get("accountPage")).toBe("1");
-    expect(new URL(page.url()).searchParams.get("accountCursor")).toBeTruthy();
+    await expect(page.getByText("本页 7 个账号", { exact: true })).toBeVisible();
+    await expect.poll(() => new URL(page.url()).searchParams.get("accountPage")).toBe("2");
+    expect(new URL(page.url()).searchParams.get("accountPageSize")).toBe("50");
     const coldPage = await context.newPage();
     await coldPage.goto(page.url());
     await expect(coldPage.getByRole("heading", { name: "账号管理" })).toBeVisible();
-    await expect(coldPage.getByText("第 2 页 · 本页 7 个账号", { exact: true })).toBeVisible();
-    await expect(coldPage.getByRole("button", { name: "上一页" })).toBeDisabled();
+    await expect(coldPage.getByText("本页 7 个账号", { exact: true })).toBeVisible();
+    await expect(coldPage.getByRole("button", { name: "上一页" }).first()).toBeEnabled();
     await coldPage.close();
     await page.reload();
-    await expect(page.getByText("第 2 页 · 本页 7 个账号", { exact: true })).toBeVisible();
-    await page.getByRole("button", { name: "上一页" }).click();
-    await expect(page.getByText("第 1 页 · 本页 50 个账号", { exact: true })).toBeVisible();
+    await expect(page.getByText("本页 7 个账号", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "上一页" }).first().click();
+    await expect(page.getByText("本页 50 个账号", { exact: true })).toBeVisible();
 
     await page.getByLabel("搜索账号").fill("e2e_role_target");
     await page.getByRole("button", { name: "搜索账号" }).click();
@@ -155,7 +159,7 @@ test("系统管理员搜索分页账号并审计固定角色组合变更", async
     await expect(page.getByLabel("搜索账号")).toBeFocused();
     await expect(page.getByLabel("搜索账号")).toHaveValue("");
     await expect.poll(() => new URL(page.url()).searchParams.get("accountSearch")).toBe(null);
-    await expect(page.getByText("第 1 页 · 本页 50 个账号", { exact: true })).toBeVisible();
+    await expect(page.getByText("本页 50 个账号", { exact: true })).toBeVisible();
     await page.getByLabel("搜索账号").pressSequentially("甲乙", { delay: 350 });
     await expect(page).toHaveURL(/accountSearch=%E7%94%B2%E4%B9%99/);
     await page.goBack();

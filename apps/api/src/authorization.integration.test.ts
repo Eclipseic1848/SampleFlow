@@ -1252,6 +1252,17 @@ test("账号管理使用稳定搜索分页并审计固定角色组合变更", as
         );
         await setup.query("insert into user_roles(user_id,role_code,assigned_by) values($1,'salesperson',$2)", [late.rows[0]!.id, scenario.users.admin]);
 
+        const numbered = await app.inject({ method: "GET", url: `/api/admin/users?search=${search}&page=2&pageSize=10`, headers: adminHeaders });
+        assert.equal(numbered.statusCode, 200, numbered.body);
+        assert.equal(numbered.json().page, 2);
+        assert.equal(numbered.json().pageSize, 10);
+        assert.equal(numbered.json().totalCount, 62);
+        assert.equal(numbered.json().users.length, 10);
+        const mixedPagination = await app.inject({ method: "GET", url: `/api/admin/users?search=${search}&page=1&cursor=${encodeURIComponent(first.json().nextCursor)}`, headers: adminHeaders });
+        assert.equal(mixedPagination.statusCode, 400, mixedPagination.body);
+        const invalidPageSize = await app.inject({ method: "GET", url: "/api/admin/users?pageSize=15", headers: adminHeaders });
+        assert.equal(invalidPageSize.statusCode, 400, invalidPageSize.body);
+
         const second = await app.inject({
           method: "GET",
           url: `/api/admin/users?search=${search}&cursor=${encodeURIComponent(first.json().nextCursor)}`,
@@ -1432,6 +1443,17 @@ test("订单台账用固定快照稳定遍历并保持有界查询次数", async
       assert.equal(first.body.orders.length, 50);
       assert.equal(first.body.previousCursor, null);
       assert.ok(first.body.nextCursor);
+
+      const numbered = await app.inject({ method: "GET", url: "/api/performance/orders?search=CURSOR-FIX-&page=2&pageSize=10", headers: { cookie: leaderCookie } });
+      assert.equal(numbered.statusCode, 200, numbered.body);
+      assert.equal(numbered.json().page, 2);
+      assert.equal(numbered.json().pageSize, 10);
+      assert.equal(numbered.json().totalCount, 101);
+      assert.equal(numbered.json().orders.length, 10);
+      const mixedPagination = await app.inject({ method: "GET", url: `/api/performance/orders?search=CURSOR-FIX-&page=1&cursor=${encodeURIComponent(first.body.nextCursor!)}`, headers: { cookie: leaderCookie } });
+      assert.equal(mixedPagination.statusCode, 400, mixedPagination.body);
+      const invalidPageSize = await app.inject({ method: "GET", url: "/api/performance/orders?pageSize=15", headers: { cookie: leaderCookie } });
+      assert.equal(invalidPageSize.statusCode, 400, invalidPageSize.body);
 
       const [newOrderId] = await insertRows("CURSOR-FIX-NEW-", 1);
       const pages = [first.body];
