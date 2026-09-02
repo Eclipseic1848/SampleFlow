@@ -339,11 +339,12 @@ th { color: #607084; background: #fafbfc; font-weight: 600; }
 .orders-toolbar span { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; }
 .account-search { display: flex; align-items: center; gap: 8px; }
 .account-search-field { position: relative; display: block; }
-.account-search-field > svg { position: absolute; top: 12px; left: 11px; color: var(--muted); pointer-events: none; }
-.account-search input { width: 250px; height: 40px; padding: 0 40px 0 34px; border: 1px solid var(--line); border-radius: 6px; }
+.account-search-field > svg { position: absolute; top: 50%; left: 11px; color: var(--muted); transform: translateY(-50%); pointer-events: none; }
+.account-search-field > input { height: 40px; padding: 0 40px 0 34px; border: 1px solid var(--line); border-radius: 6px; }
+.account-search input { width: 250px; }
 .account-search > button { width: auto; height: 40px; margin: 0; padding: 0 15px; border: 1px solid var(--blue); color: #fff; background: var(--blue); }
-.account-search .account-search-clear { position: absolute; top: 4px; right: 4px; width: 32px; height: 32px; margin: 0; padding: 0; border: 0; color: var(--muted); background: transparent; display: grid; place-items: center; cursor: pointer; }
-.account-search .account-search-clear:hover { color: var(--navy); background: #eef2f6; }
+.account-search-field > .account-search-clear { position: absolute; top: 4px; right: 4px; width: 32px; height: 32px; margin: 0; padding: 0; border: 0; color: var(--muted); background: transparent; display: grid; place-items: center; cursor: pointer; }
+.account-search-field > .account-search-clear:hover { color: var(--navy); background: #eef2f6; }
 .icon-action { width: 36px; height: 36px; border: 1px solid var(--line); border-radius: 6px; color: #56657a; background: #fff; display: grid; place-items: center; cursor: pointer; }
 .orders-table-wrap { overflow-x: auto; }
 .audit-table { min-width: 1180px; }
@@ -474,7 +475,7 @@ th { color: #607084; background: #fafbfc; font-weight: 600; }
 .table-pagination > span { margin-right: auto; align-self: center; color: var(--muted); font-size: 12px; }
 .table-pagination button { width: auto; min-width: 36px; height: 36px; margin: 0; padding: 0 12px; border: 1px solid var(--line); border-radius: 6px; color: #39495d; background: #fff; }
 .table-pagination button:disabled { color: #9aa6b5; background: #f4f5f7; cursor: not-allowed; }
-.page-size-select { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
+.page-size-select { margin: 0; display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
 .page-size-select select { width: auto; height: 36px; margin: 0; padding: 0 28px 0 10px; }
 .page-number-list { display: flex; align-items: center; gap: 6px; }
 .table-pagination .page-number { padding: 0 10px; }
