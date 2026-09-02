@@ -670,6 +670,7 @@ test("销售经理可从选择器创建顶层目标并完成总经理到人事�
       await expect(gmDialog).toContainText("公司十一月目标");
       const concurrentGmDecision=await page.evaluate(async()=>{const pending=await fetch("/api/goals?pendingOnly=true").then((response)=>response.json()) as {goals:Array<{id:string;versionId:string;periodMonth:string}>};const goal=pending.goals.find((item)=>item.periodMonth==="2026-11")!;const csrf=document.cookie.split("; ").find((item)=>item.startsWith("sampleflow_csrf="))?.split("=")[1]??"";const response=await fetch(`/api/goals/${goal.id}/decision`,{method:"POST",headers:{"content-type":"application/json","x-csrf-token":decodeURIComponent(csrf)},body:JSON.stringify({expectedVersionId:goal.versionId,decision:"approved",comment:"并发总经理批准"})});return response.status;});
       expect(concurrentGmDecision).toBe(200);
+      await expect.poll(()=>page.getByLabel("审批意见").evaluate((element)=>getComputedStyle(element).resize)).toBe("vertical");
       await page.getByLabel("审批意见").fill("总经理同意");await page.getByRole("button",{name:"确认批准"}).click();
       await expect(page.getByText("状态已变化，已重新读取权威状态。")).toBeVisible();
       await expect(gmRow).toHaveCount(0);
@@ -853,6 +854,16 @@ test("系统管理员通过页面办理组织异动并保留前后有效期", as
       const newAssignment=page.locator(".compact-list > div").filter({hasText:"E2E 异动业务员"}).filter({hasText:"E2E 新部门 / E2E 新小组"});
       await expect(oldAssignment).toContainText("2026-07-01 至 2026-07-31");
       await expect(newAssignment).toContainText("2026-08-01 起");
+      const assignmentCard=page.locator("article").filter({has:page.getByRole("heading",{name:"人员任职"})});
+      await expect(assignmentCard.getByText("当前有效 1 条 · 历史与待生效 1 条",{exact:true})).toBeVisible();
+      await expect(oldAssignment).not.toBeVisible();
+      await assignmentCard.getByText("历史与待生效（1）",{exact:true}).click();
+      await expect(oldAssignment).toBeVisible();
+      const organizationSearch=page.getByRole("search",{name:"搜索组织后台"});
+      await organizationSearch.getByLabel("搜索组织、人员或负责人").fill("E2E 原部门");
+      await expect(page.getByRole("heading",{name:"E2E 原部门"})).toBeVisible();
+      await expect(page.getByRole("heading",{name:"E2E 新部门"})).not.toBeVisible();
+      await organizationSearch.getByRole("button",{name:"清除搜索"}).click();
 
       let failOrganizationRefresh=true;
       await page.route("**/api/organization",async(route)=>{
@@ -873,6 +884,8 @@ test("系统管理员通过页面办理组织异动并保留前后有效期", as
       await page.keyboard.press("Escape");await expect(closeDialog).toBeVisible();releaseClose();
       await expect(newAssignment).toContainText("2026-08-01 至 2026-09-30");
       await expect(page.getByRole("alert")).toHaveText("任职已关闭，但组织列表刷新失败，请刷新页面重试。");
+      await page.getByRole("button",{name:"重试加载组织"}).click();
+      await expect(page.getByRole("alert")).toHaveCount(0);
       await expect(newAssignment.getByRole("button",{name:"关闭任职"})).toHaveCount(0);
 
       const currentLeader=page.locator(".responsibility-list > div").filter({hasText:"E2E 新小组"}).filter({hasText:"E2E 异动组长"}).filter({hasText:"2026-08-01 起"});

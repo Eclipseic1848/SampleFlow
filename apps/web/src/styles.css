@@ -394,8 +394,7 @@ th { color: #607084; background: #fafbfc; font-weight: 600; }
 .field span { display: block; margin-bottom: 7px; color: #46556a; font-size: 12px; font-weight: 700; }
 .field input { height: 42px; }
 .field select { width: 100%; height: 42px; padding: 0 12px; border: 1px solid var(--line); border-radius: 8px; color: #17263b; background: #fff; }
-.field textarea { width: 100%; min-height: 104px; padding: 11px 12px; resize: none; border: 1px solid var(--line); border-radius: 8px; color: #17263b; background: #fff; line-height: 1.6; }
-.resize-none { resize: none; }
+.field textarea { width: 100%; min-height: 104px; max-height: 50vh; padding: 11px 12px; resize: vertical; border: 1px solid var(--line); border-radius: 8px; color: #17263b; background: #fff; line-height: 1.6; }
 .field select:disabled, .field input:disabled, .field textarea:disabled { cursor: not-allowed; color: #77869a; background: #f3f5f8; }
 .modal-actions { margin-top: 24px; display: flex; justify-content: flex-end; gap: 10px; }
 .modal-actions button { width: auto; height: 40px; margin: 0; border: 1px solid var(--line); border-radius: 6px; color: #39495d; background: #fff; }
@@ -551,6 +550,15 @@ th { color: #607084; background: #fafbfc; font-weight: 600; }
 .org-grid { margin-top: 24px; display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
 .org-grid .orders-card { margin-top: 0; }
 .responsibility-card { grid-column: 1 / -1; }
+.organization-search { width: min(520px,100%); margin-top: 20px; }
+.organization-unit-group + .organization-unit-group { border-top: 1px solid var(--line); }
+.organization-unit-group > header { padding: 14px 20px 10px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.organization-unit-group > header div { display: flex; align-items: baseline; gap: 9px; }
+.organization-unit-group > header span, .organization-unit-group > header small { color: var(--muted); font-size: 11px; }
+.organization-unit-group h3, .list-section-title { margin: 0; color: var(--navy); font-size: 13px; }
+.list-section-title { padding: 13px 20px 8px; border-top: 1px solid var(--line); }
+.record-history { border-top: 1px solid var(--line); }
+.record-history summary { padding: 13px 20px; color: #46556a; font-size: 12px; font-weight: 700; cursor: pointer; }
 .compact-list { max-height: 600px; overflow-y: auto; }
 .compact-list > div { min-height: 55px; padding: 11px 20px; border-top: 1px solid #edf0f4; display: grid; grid-template-columns: 72px 1fr auto; align-items: center; gap: 12px; }
 .compact-list span, .compact-list small { color: var(--muted); font-size: 11px; }

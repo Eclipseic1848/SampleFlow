@@ -229,10 +229,10 @@ test("目标、组织、账号与审计查询区分失败和真实空集", async
   await page.getByRole("button",{name:"组织架构"}).click();
   await expect(page.getByRole("alert")).toHaveText("组织服务不可用");
   await expect(page.getByText("0 个组织单元",{exact:true})).toHaveCount(0);
-  await expect(page.getByText("暂无人员任职记录",{exact:true})).toHaveCount(0);
-  failures.organization=false;await page.getByRole("button",{name:"重试组织"}).click();
+  await expect(page.getByText("暂无当前有效任职",{exact:true})).toHaveCount(0);
+  failures.organization=false;await page.getByRole("button",{name:"重试加载组织"}).click();
   await expect(page.getByText("暂无组织单元",{exact:true})).toBeVisible();
-  await expect(page.getByText("暂无人员任职记录",{exact:true})).toBeVisible();
+  await expect(page.getByText("暂无当前有效任职",{exact:true})).toBeVisible();
 
   await page.getByRole("button",{name:"账号管理"}).click();
   await expect(page.getByRole("alert")).toHaveText("账号服务不可用");
