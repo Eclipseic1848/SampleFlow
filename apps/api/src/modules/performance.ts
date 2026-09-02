@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { Database } from "../db.js";
-import { postgresBigintIdSchema } from "../validation.js";
+import { pageNumberSchema, pageSizeSchema, postgresBigintIdSchema } from "../validation.js";
 import { businessDate } from "../domain/business-time.js";
 import {
   decidePerformanceEvent,
@@ -35,8 +35,9 @@ const dashboardQuerySchema = z.object({
 });
 const analysisProvinceSchema = z.string().refine((value) => value.startsWith("CN-") && standardBusinessRegionName(value) !== undefined);
 const analysisMonthSchema = z.string().regex(/^[1-9]\d{3}-(0[1-9]|1[0-2])$/);
+const paginationQueryFields={page:pageNumberSchema.optional(),pageSize:pageSizeSchema.optional()};
 const analysisDrilldownQuerySchema = z.discriminatedUnion("level", [
-  z.strictObject({ level: z.literal("customers"), regionCode: analysisProvinceSchema, month: analysisMonthSchema, cursor: z.string().min(1).max(2048).optional() }),
+  z.strictObject({ level: z.literal("customers"), regionCode: analysisProvinceSchema, month: analysisMonthSchema, cursor: z.string().min(1).max(2048).optional(), ...paginationQueryFields }),
   z.strictObject({
     level: z.literal("months"),
     regionCode: analysisProvinceSchema,
@@ -49,6 +50,7 @@ const analysisDrilldownQuerySchema = z.discriminatedUnion("level", [
     customerUnit: z.string().trim().min(1).max(300),
     month: analysisMonthSchema,
     cursor: z.string().min(1).max(2048).optional(),
+    ...paginationQueryFields,
   }),
 ]);
 const groupAchievementQuerySchema = dashboardQuerySchema.extend({
@@ -62,6 +64,7 @@ const ANALYSIS_CUSTOMER_PAGE_SIZE = 50;
 const ANALYSIS_EVENT_PAGE_SIZE = 100;
 const orderListQuerySchema = orderFilterQuerySchema.extend({
   cursor: z.string().min(1).max(2048).optional(),
+  ...paginationQueryFields,
 });
 const orderCursorSchema = z.strictObject({
   version: z.literal(2),
@@ -1039,7 +1042,11 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
     if (!request.currentUser) return reply.code(401).send({ message: "尚未登录" });
     const parsed = analysisDrilldownQuerySchema.safeParse(request.query);
     if (!parsed.success) return reply.code(400).send({ code: "ANALYSIS_DRILLDOWN_INVALID", message: "分析穿透条件无效" });
-    const queryDigest = analysisQueryDigest({ ...parsed.data, cursor: undefined });
+    const numbered=parsed.data.level!=="months"&&(parsed.data.page!==undefined||parsed.data.pageSize!==undefined);
+    if(parsed.data.level!=="months"&&numbered&&parsed.data.cursor)return reply.code(400).send({code:"ANALYSIS_PAGINATION_INVALID",message:"页码与游标不能同时使用"});
+    const page=parsed.data.level==="months"?1:parsed.data.page??1;
+    const pageSize=parsed.data.level==="months"?20:parsed.data.pageSize??20;
+    const queryDigest = analysisQueryDigest({ ...parsed.data, cursor: undefined, page:undefined, pageSize:undefined });
     const customerCursor = parsed.data.level === "customers" && parsed.data.cursor
       ? decodeAnalysisCursor(parsed.data.cursor, analysisCustomerCursorSchema)
       : null;
@@ -1086,7 +1093,7 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
              select customer_unit,event_count,total_amount from customers
              where ($7::numeric is null or total_amount<$7::numeric or (total_amount=$7::numeric and customer_unit>$8))
              order by total_amount desc,customer_unit
-             limit $11
+             limit $11 offset $12
            )
            select summary.event_count::text,summary.total_amount::text,
                   (select count(*)::text from customers) as customer_count,
@@ -1100,12 +1107,12 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
                   filter(where page.customer_unit is not null),'[]'::jsonb) as customers
            from summary cross join cutoff cross join dimension_cutoff left join page on true
            group by summary.event_count,summary.total_amount,cutoff.event_id,dimension_cutoff.sequence`,
-          [`${parsed.data.month}-01`, parsed.data.regionCode, ...performanceScopeValues(access), customerCursor?.totalAmount ?? null, customerCursor?.customerUnit ?? null, customerCursor?.cutoffEventId ?? null, customerCursor?.cutoffDimensionSequence ?? null, ANALYSIS_CUSTOMER_PAGE_SIZE + 1],
+          [`${parsed.data.month}-01`, parsed.data.regionCode, ...performanceScopeValues(access), customerCursor?.totalAmount ?? null, customerCursor?.customerUnit ?? null, customerCursor?.cutoffEventId ?? null, customerCursor?.cutoffDimensionSequence ?? null, numbered?pageSize:ANALYSIS_CUSTOMER_PAGE_SIZE + 1, numbered?(page-1)*pageSize:0],
         );
         await client.query("commit");
         const row = result.rows[0]!;
-        const hasNextPage = row.customers.length > ANALYSIS_CUSTOMER_PAGE_SIZE;
-        const customers = row.customers.slice(0, ANALYSIS_CUSTOMER_PAGE_SIZE);
+        const hasNextPage = !numbered&&row.customers.length > ANALYSIS_CUSTOMER_PAGE_SIZE;
+        const customers = numbered?row.customers:row.customers.slice(0, ANALYSIS_CUSTOMER_PAGE_SIZE);
         const last = customers.at(-1);
         return {
           level: "customers",
@@ -1116,7 +1123,8 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
           totalAmount: row.total_amount,
           customerCount: Number(row.customer_count),
           nextCursor: hasNextPage && last && row.cutoff_event_id && row.cutoff_dimension_sequence ? encodeAnalysisCursor({ version: 1, queryDigest, userId: request.currentUser.id, cutoffEventId: row.cutoff_event_id, cutoffDimensionSequence: row.cutoff_dimension_sequence, totalAmount: last.totalAmount, customerUnit: last.customerUnit }) : null,
-          pageSize: ANALYSIS_CUSTOMER_PAGE_SIZE,
+          ...(numbered?{page,totalCount:Number(row.customer_count)}:{}),
+          pageSize: numbered?pageSize:ANALYSIS_CUSTOMER_PAGE_SIZE,
           customers,
         };
       }
@@ -1187,7 +1195,7 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
            from raw_scoped_analysis raw cross join cutoff where raw."__eventId"<=cutoff.event_id
          ), page as (
            select * from scoped_analysis where ($8::bigint is null or "__eventId">$8::bigint)
-           order by "__eventId" limit $11
+           order by "__eventId" limit $11 offset $12
          ), summary as (
            select count(*)::bigint as event_count,coalesce(sum("deltaAmount"::numeric),0.00) as total_amount from scoped_analysis
          )
@@ -1198,12 +1206,12 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
                   filter(where page."__eventId" is not null),'[]'::jsonb) as events
          from summary cross join cutoff cross join dimension_cutoff left join page on true
          group by summary.event_count,summary.total_amount,cutoff.event_id,dimension_cutoff.sequence`,
-        [`${parsed.data.month}-01`, parsed.data.regionCode, parsed.data.customerUnit, ...performanceScopeValues(access), eventCursor?.eventId ?? null, eventCursor?.cutoffEventId ?? null, eventCursor?.cutoffDimensionSequence ?? null, ANALYSIS_EVENT_PAGE_SIZE + 1],
+        [`${parsed.data.month}-01`, parsed.data.regionCode, parsed.data.customerUnit, ...performanceScopeValues(access), eventCursor?.eventId ?? null, eventCursor?.cutoffEventId ?? null, eventCursor?.cutoffDimensionSequence ?? null, numbered?pageSize:ANALYSIS_EVENT_PAGE_SIZE + 1, numbered?(page-1)*pageSize:0],
       );
       await client.query("commit");
       const row = result.rows[0]!;
-      const hasNextPage = row.events.length > ANALYSIS_EVENT_PAGE_SIZE;
-      const pageEvents = row.events.slice(0, ANALYSIS_EVENT_PAGE_SIZE);
+      const hasNextPage = !numbered&&row.events.length > ANALYSIS_EVENT_PAGE_SIZE;
+      const pageEvents = numbered?row.events:row.events.slice(0, ANALYSIS_EVENT_PAGE_SIZE);
       const orders = new Map<string, {
         orderId: string; orderNo: string; customerName: string; eventCount: number; totalAmount: string;
         events: Array<Omit<AnalysisEventRow, "orderId" | "orderNo" | "customerName" | "orderEventCount" | "orderTotalAmount">>;
@@ -1227,7 +1235,8 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
         eventCount: Number(row.eventCount),
         totalAmount: row.totalAmount,
         nextCursor: hasNextPage && last && row.cutoffEventId && row.cutoffDimensionSequence ? encodeAnalysisCursor({ version: 1, queryDigest, userId: request.currentUser.id, cutoffEventId: row.cutoffEventId, cutoffDimensionSequence: row.cutoffDimensionSequence, eventId: last.id }) : null,
-        pageSize: ANALYSIS_EVENT_PAGE_SIZE,
+        ...(numbered?{page,totalCount:Number(row.eventCount)}:{}),
+        pageSize: numbered?pageSize:ANALYSIS_EVENT_PAGE_SIZE,
         orders: [...orders.values()],
       };
     } catch (error) {
@@ -1391,15 +1400,18 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
     if (!canReadPerformance(access)) return reply.code(403).send({ message: "当前角色没有业务查看权限" });
     const query = orderListQuerySchema.safeParse(request.query);
     if (!query.success) return reply.code(400).send({ message: "查询条件无效" });
+    const numbered=query.data.page!==undefined||query.data.pageSize!==undefined;
+    if(numbered&&query.data.cursor)return reply.code(400).send({code:"ORDER_PAGINATION_INVALID",message:"页码与游标不能同时使用"});
+    const page=query.data.page??1;const pageSize=query.data.pageSize??20;
     const filters = normalizeOrderFilters(query.data);
     const cursor = query.data.cursor ? decodeOrderCursor(query.data.cursor) : null;
     if (query.data.cursor && (!cursor || cursor.filterDigest !== orderFilterDigest(filters) || cursor.userId !== request.currentUser.id)) {
       return reply.code(400).send({ code: "ORDER_CURSOR_INVALID", message: "分页游标无效或已不适用于当前查询" });
     }
     const direction = cursor?.direction ?? "next";
-    type OrderListRow = Record<string, unknown> & { id: string; __cursorCreatedAt: Date };
+    type OrderListRow = Record<string, unknown> & { id: string; __cursorCreatedAt: Date; __totalCount:string };
     const result = await db.query<OrderListRow>(
-      `select id::text, created_at as "__cursorCreatedAt", qingflow_order_no as "orderNo", customer_name as "customerName",
+      `select id::text, created_at as "__cursorCreatedAt",count(*) over()::text as "__totalCount",qingflow_order_no as "orderNo", customer_name as "customerName",
               customer_unit as "customerUnit", performance_orders.salesperson_name as "salespersonName", service_type as "serviceType",
               source_received_on as "sourceReceivedOn", original_amount::text as "originalAmount",
               current_revenue::text as "currentRevenue", counted_amount::text as "countedAmount",
@@ -1413,17 +1425,19 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
           ${cursor ? `and (performance_orders.created_at,performance_orders.id)<=($15::timestamptz,$16::bigint)
           and (performance_orders.created_at,performance_orders.id)${direction === "next" ? "<" : ">"}($17::timestamptz,$18::bigint)` : ""}
        order by performance_orders.created_at ${direction === "previous" ? "asc" : "desc"},performance_orders.id ${direction === "previous" ? "asc" : "desc"}
-       limit $1`,
+       limit $1 ${numbered?"offset $15":""}`,
       [
-        ORDER_PAGE_SIZE + 1,
+        numbered?pageSize:ORDER_PAGE_SIZE + 1,
         ...performanceScopeValues(access),
         ...orderFilterValues(filters),
-        ...(cursor ? [cursor.cutoffCreatedAt, cursor.cutoffId, cursor.anchorCreatedAt, cursor.anchorId] : []),
+        ...(cursor ? [cursor.cutoffCreatedAt, cursor.cutoffId, cursor.anchorCreatedAt, cursor.anchorId] : numbered?[(page-1)*pageSize]:[]),
       ],
     );
-    const hasExtra = result.rows.length > ORDER_PAGE_SIZE;
-    const pageRows = result.rows.slice(0, ORDER_PAGE_SIZE);
+    const totalCount=Number(result.rows[0]?.__totalCount??0);
+    const hasExtra = !numbered&&result.rows.length > ORDER_PAGE_SIZE;
+    const pageRows = numbered?result.rows:result.rows.slice(0, ORDER_PAGE_SIZE);
     if (direction === "previous") pageRows.reverse();
+    if(numbered)return{orders:pageRows.map(({__cursorCreatedAt:_createdAt,__totalCount:_total,...order})=>order),page,pageSize,totalCount};
     const cutoff = cursor ?? (pageRows[0] ? {
       cutoffCreatedAt: pageRows[0].__cursorCreatedAt.toISOString(),
       cutoffId: pageRows[0].id,
@@ -1443,7 +1457,7 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
     const previousCursor = first && cursor && (cursor.direction === "next" || hasExtra) ? makeCursor("previous", first) : null;
     const nextCursor = last && (cursor?.direction === "previous" || hasExtra) ? makeCursor("next", last) : null;
     return {
-      orders: pageRows.map(({ __cursorCreatedAt: _createdAt, ...order }) => order),
+      orders: pageRows.map(({ __cursorCreatedAt: _createdAt, __totalCount:_totalCount, ...order }) => order),
       previousCursor,
       nextCursor,
       pageSize: ORDER_PAGE_SIZE,

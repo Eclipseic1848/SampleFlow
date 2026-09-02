@@ -2,12 +2,12 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { Database } from "../db.js";
 import { generateTemporaryPassword, hashPassword, TEMPORARY_PASSWORD_TTL_MS } from "../security/password.js";
-import { postgresBigintIdSchema } from "../validation.js";
+import { pageNumberSchema, pageSizeSchema, postgresBigintIdSchema } from "../validation.js";
 import { hasAnyRole } from "./auth.js";
 import { BUSINESS_DATE_SQL, canReadPerformance, resolveGoalAccess, resolvePerformanceAccess, ROLE_PERMISSION_MATRIX } from "./authorization.js";
 
 const createUserSchema = z.strictObject({ username:z.string().trim().min(2).max(100), displayName:z.string().trim().min(1).max(100), roles:z.array(z.string().trim().min(1)).min(1), personId:postgresBigintIdSchema.nullable().optional() });
-const accountListQuerySchema = z.strictObject({ search:z.string().trim().max(100).optional().default(""), cursor:z.string().max(2048).optional() });
+const accountListQuerySchema = z.strictObject({ search:z.string().trim().max(100).optional().default(""), cursor:z.string().max(2048).optional(), page:pageNumberSchema.optional(), pageSize:pageSizeSchema.optional() });
 const accountCursorSchema = z.strictObject({ version:z.literal(1), userId:postgresBigintIdSchema, search:z.string().max(100), id:postgresBigintIdSchema, cutoffId:postgresBigintIdSchema });
 const roleUpdateSchema = z.strictObject({ roles:z.array(z.string().trim().min(1)).min(1) });
 const statusSchema = z.object({ isActive:z.boolean() });
@@ -31,11 +31,33 @@ export async function registerAdmin(app:FastifyInstance,db:Database){
   app.get("/api/admin/users",async(request,reply)=>{
     const denied=requireAdmin(request,reply);if(denied)return denied;
     const parsed=accountListQuerySchema.safeParse(request.query);if(!parsed.success)return reply.code(400).send({message:"账号查询条件无效"});
+    const numbered=parsed.data.page!==undefined||parsed.data.pageSize!==undefined;
+    if(numbered&&parsed.data.cursor)return reply.code(400).send({message:"页码与游标不能同时使用"});
+    const page=parsed.data.page??1;const pageSize=parsed.data.pageSize??20;
     const cursor=parsed.data.cursor?decodeAccountCursor(parsed.data.cursor):null;
     if(parsed.data.cursor&&(!cursor||cursor.userId!==request.currentUser!.id||cursor.search!==parsed.data.search))return reply.code(400).send({message:"账号分页游标无效或已不适用于当前查询"});
     const client=await db.connect();
     try{
       await client.query("begin transaction isolation level repeatable read read only");
+      if(numbered){
+        const result=await client.query<{totalCount:string;users:Array<{id:string;username:string;displayName:string;isActive:boolean;mustChangePassword:boolean;roles:string[]}>}>(
+          `with filtered as materialized (
+             select u.id as "__id",u.id::text,u.username,u.display_name as "displayName",u.is_active as "isActive",u.must_change_password as "mustChangePassword",
+                    coalesce(array_agg(ur.role_code order by ur.role_code) filter(where ur.role_code is not null),'{}') as roles
+             from users u left join user_roles ur on ur.user_id=u.id
+             where position(lower($1) in lower(u.username))>0 or position(lower($1) in lower(u.display_name))>0
+             group by u.id
+           ), page_rows as (
+             select * from filtered order by "__id" limit $2 offset $3
+           )
+           select (select count(*)::text from filtered) as "totalCount",
+                  coalesce(jsonb_agg(to_jsonb(page_rows)-'__id' order by page_rows."__id") filter(where page_rows."__id" is not null),'[]'::jsonb) as users
+           from page_rows`,
+          [parsed.data.search,pageSize,(page-1)*pageSize],
+        );
+        await client.query("commit");
+        return{users:result.rows[0]!.users,roles:fixedRoles,permissionMatrix:ROLE_PERMISSION_MATRIX,page,pageSize,totalCount:Number(result.rows[0]!.totalCount)};
+      }
       if(!cursor)await client.query("lock table users in share mode");
       const result=await client.query<{cutoffId:string|null;users:Array<{id:string;username:string;displayName:string;isActive:boolean;mustChangePassword:boolean;roles:string[]}>}>(
         `with cutoff as (select coalesce($3::bigint,max(id)) as id from users), page as (

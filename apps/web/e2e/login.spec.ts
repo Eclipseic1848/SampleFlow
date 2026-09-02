@@ -142,7 +142,7 @@ test("销售助理组长可在桌面端预检并确认合成历史分析维度�
     }finally{await client.query("rollback").catch(()=>{});await client.end();}
 });
 
-test("订单台账以前后游标稳定浏览并在刷新后开启新快照", async ({ database, page }) => {
+test("订单台账支持每页条数与可点击页码", async ({ database, page }) => {
   const userId = await seedTestUser(database.url, {
     username: "e2e_cursor_assistant",
     displayName: "E2E 游标销售助理",
@@ -180,26 +180,29 @@ test("订单台账以前后游标稳定浏览并在刷新后开启新快照", as
     await page.getByRole("button", { name: "进入 SampleFlow" }).click();
     await page.getByRole("button", { name: "订单业绩", exact: true }).click();
     const ledger = page.locator("section.orders-card").filter({ has: page.getByRole("heading", { name: "订单台账" }) });
-    await expect(ledger.getByText("本页 50 笔订单", { exact: true })).toBeVisible();
+    await expect(ledger.getByText("本页 20 笔订单", { exact: true })).toBeVisible();
     await expect(ledger.getByText("E2E-CURSOR-0101", { exact: true })).toBeVisible();
+    const pageSize=ledger.getByLabel("订单每页条数");
+    expect(await pageSize.locator("option").allTextContents()).toEqual(["10 条/页","20 条/页","50 条/页","100 条/页"]);
+    await pageSize.selectOption("50");
+    await expect(ledger.getByText("本页 50 笔订单", { exact: true })).toBeVisible();
     await expect(ledger.getByRole("button", { name: "上一页" })).toBeDisabled();
     await expect(ledger.getByRole("button", { name: "下一页" })).toBeEnabled();
 
-    await insertRows("E2E-CURSOR-NEW-", 1);
     let failNextPage = true;
-    await page.route("**/api/performance/orders?cursor=*", async (route) => {
-      if (failNextPage) {
+    await page.route("**/api/performance/orders?*", async (route) => {
+      if (failNextPage&&new URL(route.request().url()).searchParams.get("page")==="2") {
         failNextPage = false;
         await route.fulfill({ status: 503, contentType: "application/json", body: '{"message":"分页暂时失败"}' });
         return;
       }
       await route.continue();
     });
-    await ledger.getByRole("button", { name: "下一页" }).click();
+    await ledger.getByRole("button", { name: "第 2 页" }).click();
     await expect(page.getByText("分页暂时失败", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "重试查询" }).click();
     await expect(ledger.getByText("E2E-CURSOR-0051", { exact: true })).toBeVisible();
-    await ledger.getByRole("button", { name: "下一页" }).click();
+    await ledger.getByRole("button", { name: "第 3 页" }).click();
     await expect(ledger.getByText("E2E-CURSOR-0001", { exact: true })).toBeVisible();
     await expect(ledger.getByText("本页 1 笔订单", { exact: true })).toBeVisible();
     await expect(ledger.getByRole("button", { name: "下一页" })).toBeDisabled();
@@ -207,10 +210,8 @@ test("订单台账以前后游标稳定浏览并在刷新后开启新快照", as
     await expect(ledger.getByText("E2E-CURSOR-0051", { exact: true })).toBeVisible();
     await ledger.getByRole("button", { name: "上一页" }).click();
     await expect(ledger.getByText("E2E-CURSOR-0101", { exact: true })).toBeVisible();
-    await expect(ledger.getByText("E2E-CURSOR-NEW-0001", { exact: true })).toHaveCount(0);
-
-    await ledger.getByRole("button", { name: "刷新订单" }).click();
-    await expect(ledger.getByText("E2E-CURSOR-NEW-0001", { exact: true })).toBeVisible();
+    expect(new URL(page.url()).searchParams.get("orderPage")).toBe("1");
+    expect(new URL(page.url()).searchParams.get("orderPageSize")).toBe("50");
     await page.getByLabel("定位订单").fill("E2E游标单位0042");
     await expect(ledger.getByText("E2E-CURSOR-0042", { exact: true })).toBeVisible();
     await expect(ledger.getByText("本页 1 笔订单", { exact: true })).toBeVisible();
@@ -285,6 +286,7 @@ test("订单组合筛选由 URL 恢复并区分空集、失败和无权限", asy
     await page.getByRole("button", { name: "进入 SampleFlow" }).click();
     await page.getByRole("button", { name: "订单业绩", exact: true }).click();
     const ledger = page.locator("section.orders-card").filter({ has: page.getByRole("heading", { name: "订单台账" }) });
+    await ledger.getByLabel("订单每页条数").selectOption("50");
 
     await page.getByLabel("订单月份").fill(matching.month);
     await page.getByRole("button", { name: "应用筛选" }).click();
@@ -314,7 +316,8 @@ test("订单组合筛选由 URL 恢复并区分空集、失败和无权限", asy
     await expect(ledger.getByText("E2E-FILTER-0001", { exact: true })).toBeVisible();
     await expect(ledger.getByText("本页 1 笔订单", { exact: true })).toBeVisible();
     const secondPageUrl = page.url();
-    expect(secondPageUrl).toContain("orderCursor=");
+    expect(secondPageUrl).toContain("orderPage=2");
+    expect(secondPageUrl).toContain("orderPageSize=50");
     await page.reload();
     await expect(ledger.getByText("E2E-FILTER-0001", { exact: true })).toBeVisible();
     await ledger.getByRole("button", { name: "查看 / 调整" }).click();
@@ -353,7 +356,7 @@ test("订单组合筛选由 URL 恢复并区分空集、失败和无权限", asy
       if (responseMode === "live") return route.continue();
       if (responseMode === "failure") return route.fulfill({ status: 503, contentType: "application/json", body: '{"message":"筛选加载失败"}' });
       if (responseMode === "forbidden") return route.fulfill({ status: 403, contentType: "application/json", body: '{"message":"当前角色没有业务查看权限"}' });
-      return route.fulfill({ status: 200, contentType: "application/json", body: '{"orders":[],"previousCursor":null,"nextCursor":null,"pageSize":50}' });
+      return route.fulfill({ status: 200, contentType: "application/json", body: '{"orders":[],"page":1,"pageSize":50,"totalCount":0}' });
     });
     responseMode = "failure";
     await page.getByLabel("客户单位筛选").fill("不存在的单位");
@@ -531,7 +534,7 @@ test("系统管理员在账号管理页查看只读角色权限说明", async ({
       await page.goto("/");
       await page.getByLabel("账号").fill("e2e_system_admin");
       await page.getByLabel("密码", { exact: true }).fill("Admin@123");
-      const accountsResponse = page.waitForResponse((response) => response.url().endsWith("/api/admin/users"));
+      const accountsResponse = page.waitForResponse((response) => new URL(response.url()).pathname.endsWith("/api/admin/users"));
       await page.getByRole("button", { name: "进入 SampleFlow" }).click();
 
       expect((await accountsResponse).status()).toBe(200);
