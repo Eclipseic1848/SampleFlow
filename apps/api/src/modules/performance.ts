@@ -1410,8 +1410,8 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
        ${latestOrderEventJoinSql("performance_orders", "latest")}
        where ${performanceScopeSql("latest", 2)}
          and ${orderFilterSql("performance_orders", "latest", 6)}
-         ${cursor ? `and (performance_orders.created_at,performance_orders.id)<=($14::timestamptz,$15::bigint)
-         and (performance_orders.created_at,performance_orders.id)${direction === "next" ? "<" : ">"}($16::timestamptz,$17::bigint)` : ""}
+          ${cursor ? `and (performance_orders.created_at,performance_orders.id)<=($15::timestamptz,$16::bigint)
+          and (performance_orders.created_at,performance_orders.id)${direction === "next" ? "<" : ">"}($17::timestamptz,$18::bigint)` : ""}
        order by performance_orders.created_at ${direction === "previous" ? "asc" : "desc"},performance_orders.id ${direction === "previous" ? "asc" : "desc"}
        limit $1`,
       [

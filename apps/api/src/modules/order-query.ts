@@ -5,6 +5,7 @@ const orderTextFilterSchema = z.string().trim().min(1).max(300);
 
 export const orderFilterQuerySchema = z.object({
   search: z.string().trim().max(100).optional(),
+  orderNo: z.string().trim().min(1).max(100).optional(),
   month: z.string().regex(/^[1-9]\d{3}-(0[1-9]|1[0-2])$/).optional(),
   status: z.enum(["draft", "active", "paused", "zero", "historical_review_required"]).optional(),
   salesperson: orderTextFilterSchema.optional(),
@@ -16,6 +17,7 @@ export const orderFilterQuerySchema = z.object({
 
 export type OrderFilters = Readonly<{
   search: string;
+  orderNo: string;
   month: string;
   status: string;
   salesperson: string;
@@ -28,6 +30,7 @@ export type OrderFilters = Readonly<{
 export function normalizeOrderFilters(input: z.infer<typeof orderFilterQuerySchema>): OrderFilters {
   return {
     search: input.search ?? "",
+    orderNo: input.orderNo ?? "",
     month: input.month ?? "",
     status: input.status ?? "",
     salesperson: input.salesperson ?? "",
@@ -57,7 +60,9 @@ export function orderFilterSql(orderAlias: string, eventAlias: string, firstPara
     and ($${firstParameter + 4}::text is null or ${eventAlias}.department_name=$${firstParameter + 4})
     and ($${firstParameter + 5}::text is null or ${eventAlias}.group_name=$${firstParameter + 5})
     and ($${firstParameter + 6}::text is null or ${orderAlias}.business_region_code=$${firstParameter + 6})
-    and ($${firstParameter + 7}::text is null or ${orderAlias}.customer_unit=$${firstParameter + 7})`;
+    and ($${firstParameter + 7}::text is null or ${orderAlias}.customer_unit=$${firstParameter + 7})
+    and ($${firstParameter + 8}::text is null or regexp_replace(lower(normalize(${orderAlias}.qingflow_order_no,NFKC)),'[[:space:]]+','','g')
+      =regexp_replace(lower(normalize($${firstParameter + 8},NFKC)),'[[:space:]]+','','g'))`;
 }
 
 export function orderFilterValues(filters: OrderFilters): unknown[] {
@@ -70,5 +75,6 @@ export function orderFilterValues(filters: OrderFilters): unknown[] {
     filters.group || null,
     filters.region || null,
     filters.customerUnit || null,
+    filters.orderNo || null,
   ];
 }

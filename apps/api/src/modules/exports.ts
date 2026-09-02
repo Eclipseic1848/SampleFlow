@@ -21,10 +21,11 @@ async function auditFormalReportExport(db:Database,input:{actorUserId:string;goa
   );
 }
 async function auditOrderExport(db:Database,input:{actorUserId:string;filters:OrderFilters;rowCount:number;status:"completed"|"blocked";requestId:string;fileSha256:string|null;failureCode?:string},ipAddress:string){
+  const filterSummary=Object.fromEntries(Object.entries(input.filters).filter(([,value])=>value));
   await db.query(
     `insert into audit_logs(actor_user_id,action,entity_type,entity_id,after_data,ip_address)
      values($1,'performance.order_export','order_export',$2,$3,$4)`,
-    [input.actorUserId,input.requestId,JSON.stringify({filterSummary:input.filters,rowCount:input.rowCount,status:input.status,requestId:input.requestId,fileSha256:input.fileSha256,...(input.failureCode?{failureCode:input.failureCode}:{})}),ipAddress],
+    [input.actorUserId,input.requestId,JSON.stringify({filterSummary,rowCount:input.rowCount,status:input.status,requestId:input.requestId,fileSha256:input.fileSha256,...(input.failureCode?{failureCode:input.failureCode}:{})}),ipAddress],
   );
 }
 type OrderExportRow={orderNo:string;customerName:string;customerUnit:string;salespersonName:string;departmentName:string|null;groupName:string|null;businessRegionSourceText:string|null;businessRegionCode:string|null;sourceReceivedOn:string;currentRevenue:string;countedAmount:string;lifecycleState:string};

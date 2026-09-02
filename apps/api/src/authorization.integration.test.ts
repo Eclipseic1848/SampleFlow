@@ -1580,7 +1580,17 @@ test("订单组合筛选始终叠加服务端权限范围", async () => {
       assert.equal(authorized.statusCode, 200, authorized.body);
       assert.deepEqual((authorized.json().orders as Array<{ orderNo: string }>).map((order) => order.orderNo), ["SCOPE-3"]);
 
-      for (const query of ["month=2026-13", "status=forged"]) {
+      const exact = await app.inject({ method: "GET", url: "/api/performance/orders?orderNo=SCOPE-1", headers: { cookie: leaderCookie } });
+      assert.equal(exact.statusCode, 200, exact.body);
+      assert.deepEqual((exact.json().orders as Array<{ orderNo: string }>).map((order) => order.orderNo), ["SCOPE-1"]);
+      const exactMissing = await app.inject({ method: "GET", url: "/api/performance/orders?orderNo=SCOPE", headers: { cookie: leaderCookie } });
+      assert.equal(exactMissing.statusCode, 200, exactMissing.body);
+      assert.deepEqual(exactMissing.json().orders, []);
+      const exactOutsideScope = await app.inject({ method: "GET", url: "/api/performance/orders?orderNo=SCOPE-3", headers: { cookie: leaderCookie } });
+      assert.equal(exactOutsideScope.statusCode, 200, exactOutsideScope.body);
+      assert.deepEqual(exactOutsideScope.json().orders, []);
+
+      for (const query of ["month=2026-13", "status=forged", `orderNo=${"X".repeat(101)}`]) {
         const invalid = await app.inject({ method: "GET", url: `/api/performance/orders?${query}`, headers: { cookie: leaderCookie } });
         assert.equal(invalid.statusCode, 400, invalid.body);
       }

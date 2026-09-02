@@ -1066,6 +1066,9 @@ test("订单搜索与不可变事件链在浏览器和数据库中保持一致",
       await page.getByRole("button",{name:"进入 SampleFlow"}).click();
       await page.getByRole("button",{name:"订单业绩",exact:true}).click();
       await expect(page.getByRole("heading",{name:"记账治理工作台"})).toBeVisible();
+      await page.getByLabel("定位订单").fill("当前列表无结果");
+      await page.getByRole("button",{name:"搜索",exact:true}).click();
+      await expect(page.getByText("没有符合当前组合条件的订单。",{exact:true})).toBeVisible();
       await page.getByLabel("记账月份").fill("2026-07");
       await page.getByLabel("核对说明").fill("七月数据浏览器核对完成");
       await page.getByRole("button",{name:"提交核对确认"}).click();
@@ -1078,8 +1081,26 @@ test("订单搜索与不可变事件链在浏览器和数据库中保持一致",
       await page.getByRole("button",{name:"订单业绩",exact:true}).click();
       await page.getByLabel("记账月份").fill("2026-07");
       await page.getByLabel("关账说明").fill("七月浏览器关账");
+      let closeRequests=0;
+      let releaseClose!:()=>void;
+      const closeGate=new Promise<void>((resolve)=>{releaseClose=resolve;});
+      await page.route("**/api/accounting-periods/2026-07/close",async(route)=>{closeRequests+=1;await closeGate;await route.continue();});
       await page.getByRole("button",{name:"关闭记账期间"}).click();
+      let confirmation=page.getByRole("dialog",{name:"确认关闭记账期间"});
+      await expect(confirmation).toContainText("2026-07");
+      await expect(confirmation).toContainText("七月浏览器关账");
+      await confirmation.getByRole("button",{name:"取消"}).click();
+      expect(closeRequests).toBe(0);
+      await page.getByRole("button",{name:"关闭记账期间"}).click();
+      confirmation=page.getByRole("dialog",{name:"确认关闭记账期间"});
+      await confirmation.getByRole("button",{name:"确认关闭"}).click();
+      const pendingClose=confirmation.getByRole("button",{name:"正在关闭…"});
+      await expect(pendingClose).toBeDisabled();
+      await pendingClose.dispatchEvent("click");
+      releaseClose();
       await expect(page.getByText(/已关闭 · 版本 1/)).toBeVisible();
+      expect(closeRequests).toBe(1);
+      await page.unroute("**/api/accounting-periods/2026-07/close");
 
       await page.getByRole("button",{name:"退出登录"}).click();
       await page.getByLabel("账号").fill("e2e_accounting_leader");
@@ -1088,7 +1109,17 @@ test("订单搜索与不可变事件链在浏览器和数据库中保持一致",
       await page.getByRole("button",{name:"订单业绩",exact:true}).click();
       await page.getByLabel("记账月份").fill("2026-07");
       const correctionForm=page.getByRole("heading",{name:"申请关闭月更正"}).locator("..");
-      await correctionForm.locator("select").first().selectOption({label:"CHAIN-E2E-110 · 事件链客户"});
+      await correctionForm.getByLabel("精确订单编号").fill("不存在的订单");
+      await correctionForm.getByRole("button",{name:"查询订单"}).click();
+      await expect(correctionForm.getByText("未找到可访问的精确订单。",{exact:true})).toBeVisible();
+      let failLookup=true;
+      await page.route("**/api/performance/orders?*",async(route)=>{const url=new URL(route.request().url());if(failLookup&&url.searchParams.get("orderNo")==="CHAIN-E2E-110"){failLookup=false;await route.fulfill({status:503,contentType:"application/json",body:'{"message":"精确订单查询失败"}'});return;}await route.continue();});
+      await correctionForm.getByLabel("精确订单编号").fill("CHAIN-E2E-110");
+      await correctionForm.getByRole("button",{name:"查询订单"}).click();
+      await expect(correctionForm.getByRole("alert")).toHaveText("精确订单查询失败");
+      await correctionForm.getByRole("button",{name:"重试查询"}).click();
+      await expect(correctionForm.getByText("已选择 CHAIN-E2E-110 · 事件链客户",{exact:true})).toBeVisible();
+      await page.unroute("**/api/performance/orders?*");
       await correctionForm.getByLabel("原业务日期").fill("2026-07-15");
       await correctionForm.getByLabel("发生时标准业务区域").selectOption("CN-JS");
       await correctionForm.getByLabel("发生时来源区域原文").fill("江苏历史凭证");
@@ -1106,12 +1137,29 @@ test("订单搜索与不可变事件链在浏览器和数据库中保持一致",
       await page.getByRole("button",{name:"订单业绩",exact:true}).click();
       await page.getByLabel("审批意见").fill("同意浏览器更正");
       await page.getByRole("button",{name:"批准",exact:true}).click();
+      confirmation=page.getByRole("dialog",{name:"确认批准更正"});
+      await expect(confirmation).toContainText("CHAIN-E2E-110");
+      await expect(confirmation).toContainText("同意浏览器更正");
+      await confirmation.getByRole("button",{name:"确认批准"}).click();
       await expect(page.getByText(/approved/)).toBeVisible();
+
+      await page.getByRole("button",{name:"退出登录"}).click();
+      await page.getByLabel("账号").fill("e2e_accounting_leader");
+      await page.getByLabel("密码", { exact: true }).fill("Ledger@123");
+      await page.getByRole("button",{name:"进入 SampleFlow"}).click();
+      await page.getByRole("button",{name:"订单业绩",exact:true}).click();
+      await page.getByRole("button",{name:"执行更正"}).click();
+      const executionDialog=page.getByRole("dialog",{name:/执行更正 · CHAIN-E2E-110/});
+      await expect(executionDialog).toContainText("将追加不可变更正事件");
+      await executionDialog.getByLabel("调整后营业额").fill("90");
+      await executionDialog.getByLabel("执行原因").fill("执行获批更正");
+      await executionDialog.getByRole("button",{name:"确认追加更正事件"}).click();
+      await expect(executionDialog).toBeHidden();
 
       const evidence=new Client({connectionString:database.url});await evidence.connect();
       try{
         const result=await evidence.query<{delta_amount:string;order_sequence:number}>(`select e.delta_amount::text,e.order_sequence from performance_events e join performance_orders o on o.id=e.order_id where o.qingflow_order_no='CHAIN-E2E-110' order by e.order_sequence`);
-        expect(result.rows.map((row)=>Number(row.delta_amount))).toEqual([110,-10,-100,100]);
-        expect(result.rows.map((row)=>row.order_sequence)).toEqual([1,2,3,4]);
+        expect(result.rows.map((row)=>Number(row.delta_amount))).toEqual([110,-10,-100,100,-10]);
+        expect(result.rows.map((row)=>row.order_sequence)).toEqual([1,2,3,4,5]);
       }finally{await evidence.end();}
 });

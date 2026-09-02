@@ -429,6 +429,15 @@ th { color: #607084; background: #fafbfc; font-weight: 600; }
 .import-report li label { width: fit-content; display: flex; align-items: center; gap: 7px; color: #42546b; cursor: pointer; }
 .import-report li input { width: 16px; height: 16px; }
 .modal-actions .import-confirm { border-color: var(--blue); color: #fff; background: var(--blue); }
+.order-lookup { display: grid; }
+.order-lookup-controls { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 8px; }
+.order-lookup-controls button { width: auto; min-width: 96px; margin: 0; padding: 0 12px; }
+.order-lookup .form-note { margin: 7px 0 0; color: #42546b; font-size: 12px; }
+.governance-confirmation { padding: 22px 24px 24px; }
+.governance-confirmation dl { margin: 0; display: grid; gap: 12px; }
+.governance-confirmation dl div { display: grid; grid-template-columns: 72px 1fr; gap: 12px; }
+.governance-confirmation dt { color: var(--muted); font-size: 12px; }
+.governance-confirmation dd { margin: 0; color: var(--navy); font-size: 13px; }
 .import-handoff { align-self: center; color: var(--warning); font-size: 12px; font-weight: 700; }
 .formal-report-content { padding: 22px 24px 24px; }
 .formal-report-content > div:not(.modal-actions) { padding: 12px 0; border-bottom: 1px solid var(--line); display: flex; align-items: baseline; justify-content: space-between; gap: 20px; }
