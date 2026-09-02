@@ -1,8 +1,9 @@
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { Activity, ChevronRight, Database, Eye, EyeOff, ShieldCheck } from "lucide-react";
-import { apiFetch, readResponseJson } from "./app-api";
+import { apiFetch, logoutCurrentSession, readResponseJson } from "./app-api";
 import type { AuthState, User } from "./app-types";
 import { Dashboard } from "./dashboard";
+import { Modal } from "./shared-ui";
 
 function passwordStrength(password: string): "弱" | "中" | "强" {
   const categoryCount = [/[a-z]/, /[A-Z]/, /[0-9]/, /[^A-Za-z0-9]/].filter((pattern) => pattern.test(password)).length;
@@ -11,11 +12,11 @@ function passwordStrength(password: string): "弱" | "中" | "强" {
   return "弱";
 }
 
-function PasswordInput({id,name,label,value,onChange,autoComplete,describedBy,invalid=false}:{id:string;name:string;label:string;value:string;onChange:(value:string)=>void;autoComplete:"current-password"|"new-password";describedBy?:string;invalid?:boolean}){
+function PasswordInput({id,name,label,value,onChange,autoComplete,describedBy,invalid=false}:{id:string;name:string;label:string;value:string;onChange:(value:string)=>void;autoComplete:"current-password"|"new-password";describedBy?:string|undefined;invalid?:boolean}){
   const[visible,setVisible]=useState(false);
   const inputRef=useRef<HTMLInputElement>(null);
   function toggleVisibility(){if(inputRef.current&&inputRef.current.value!==value)onChange(inputRef.current.value);setVisible((current)=>!current);}
-  return <><label htmlFor={id}>{label}</label><div className="password-input"><input ref={inputRef} id={id} name={name} type={visible?"text":"password"} defaultValue={value} onChange={(event)=>onChange(event.target.value)} autoComplete={autoComplete} aria-describedby={describedBy} aria-invalid={invalid||undefined}/><button type="button" className="password-input-toggle" aria-label={`${visible?"隐藏":"显示"}${label}`} aria-pressed={visible} onClick={toggleVisibility}>{visible?<EyeOff size={18} aria-hidden="true"/>:<Eye size={18} aria-hidden="true"/>}</button></div></>;
+  return <><label htmlFor={id}>{label}</label><div className="password-input"><input ref={inputRef} required id={id} name={name} type={visible?"text":"password"} defaultValue={value} onChange={(event)=>onChange(event.target.value)} autoComplete={autoComplete} aria-describedby={describedBy} aria-invalid={invalid||undefined}/><button type="button" className="password-input-toggle" aria-label={`${visible?"隐藏":"显示"}${label}`} aria-pressed={visible} onClick={toggleVisibility}>{visible?<EyeOff size={18} aria-hidden="true"/>:<Eye size={18} aria-hidden="true"/>}</button></div></>;
 }
 
 async function getCurrentUser(): Promise<User | null> {
@@ -27,6 +28,7 @@ async function getCurrentUser(): Promise<User | null> {
 
 export function App() {
   const [auth, setAuth] = useState<AuthState>({ status: "loading" });
+  const [showPasswordChange,setShowPasswordChange]=useState(false);
   useEffect(() => {
     const expireSession = () => setAuth({ status: "guest" });
     window.addEventListener("sampleflow:session-expired", expireSession);
@@ -35,18 +37,34 @@ export function App() {
   useEffect(() => { getCurrentUser().then((user) => setAuth(user ? { status: "authenticated", user } : { status: "guest" })).catch(() => setAuth({ status: "guest" })); }, []);
   if (auth.status === "loading") return <div className="app-loading">正在连接 SampleFlow…</div>;
   if (auth.status === "guest") return <Login onLogin={(user) => setAuth({ status: "authenticated", user })} />;
-  if (auth.user.mustChangePassword) return <ChangePassword onChanged={async()=>{const user=await getCurrentUser();if(user)setAuth({status:"authenticated",user});}}/>;
-  return <Dashboard user={auth.user} onLogout={() => setAuth({ status: "guest" })} />;
+  if (auth.user.mustChangePassword) return <ChangePassword onLogout={()=>setAuth({status:"guest"})} onChanged={async()=>{const user=await getCurrentUser();if(user)setAuth({status:"authenticated",user});}}/>;
+  return <><Dashboard user={auth.user} onLogout={() => setAuth({ status: "guest" })} onChangePassword={()=>setShowPasswordChange(true)}/>{showPasswordChange?<ChangePasswordModal onClose={()=>setShowPasswordChange(false)}/>:null}</>;
 }
 
-function ChangePassword({onChanged}:{onChanged:()=>Promise<void>}){
+function PasswordForm({idPrefix,submitLabel,onChanged,onBusyChange,currentHint}:{idPrefix:string;submitLabel:string;onChanged:()=>Promise<void>;onBusyChange?:(busy:boolean)=>void;currentHint?:string}){
   const[currentPassword,setCurrentPassword]=useState("");
   const[newPassword,setNewPassword]=useState("");
+  const[confirmPassword,setConfirmPassword]=useState("");
   const[message,setMessage]=useState("");
   const[submitting,setSubmitting]=useState(false);
-  async function submit(event:FormEvent<HTMLFormElement>){event.preventDefault();if(submitting)return;setSubmitting(true);setMessage("");try{const formData=new FormData(event.currentTarget);const submittedCurrentPassword=String(formData.get("currentPassword")??"");const submittedNewPassword=String(formData.get("newPassword")??"");const response=await apiFetch("/api/auth/change-password",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({currentPassword:submittedCurrentPassword,newPassword:submittedNewPassword})});const data=await readResponseJson<{message?:string}>(response,"密码修改响应无效，请重试。");if(!response.ok){setMessage(data.message??"密码修改失败");return;}await onChanged();}catch(failure){setMessage(failure instanceof Error?failure.message:"网络异常，密码修改失败，请重试。");}finally{setSubmitting(false);}}
+  const mismatch=confirmPassword!==""&&newPassword!==confirmPassword;
+  async function submit(event:FormEvent<HTMLFormElement>){event.preventDefault();if(submitting)return;const formData=new FormData(event.currentTarget);const submittedCurrentPassword=String(formData.get("currentPassword")??"");const submittedNewPassword=String(formData.get("newPassword")??"");const submittedConfirmation=String(formData.get("confirmPassword")??"");if(submittedNewPassword!==submittedConfirmation){setMessage("两次输入的新密码不一致");return;}setSubmitting(true);onBusyChange?.(true);setMessage("");try{const response=await apiFetch("/api/auth/change-password",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({currentPassword:submittedCurrentPassword,newPassword:submittedNewPassword})});const data=await readResponseJson<{message?:string}>(response,"密码修改响应无效，请重试。");if(!response.ok){if(response.status===401&&data.message==="尚未登录")window.dispatchEvent(new Event("sampleflow:session-expired"));else setMessage(data.message??"密码修改失败");return;}await onChanged();}catch(failure){setMessage(failure instanceof Error?failure.message:"网络异常，密码修改失败，请重试。");}finally{setSubmitting(false);onBusyChange?.(false);}}
   const currentPasswordError=message==="当前密码错误";
-  return <main className="password-shell"><section className="login-card"><div className="login-heading"><p>首次登录安全设置</p><h2>请修改初始密码</h2><span>6—128 位，并包含英文字母、数字和符号</span></div><form noValidate onSubmit={submit}><PasswordInput id="current-password" name="currentPassword" label="当前密码" value={currentPassword} onChange={(value)=>{setCurrentPassword(value);if(message)setMessage("");}} autoComplete="current-password" describedBy={`current-password-hint${currentPasswordError?" current-password-error":""}`} invalid={currentPasswordError}/><p id="current-password-hint" className="password-hint">当前密码请填写刚才登录时使用的临时密码。</p><PasswordInput id="new-password" name="newPassword" label="新密码" value={newPassword} onChange={(value)=>{setNewPassword(value);if(message)setMessage("");}} autoComplete="new-password"/><p className="password-strength" aria-live="polite">密码强度：{passwordStrength(newPassword)}</p><button type="submit" disabled={submitting} aria-busy={submitting}>{submitting?"正在保存…":"保存新密码"}</button>{message?<p id={currentPasswordError?"current-password-error":undefined} className="form-error" role="alert">{message}</p>:null}</form></section></main>;
+  const mismatchMessage=mismatch||message==="两次输入的新密码不一致";
+  const currentId=`${idPrefix}-current-password`;const hintId=`${idPrefix}-current-password-hint`;const currentErrorId=`${idPrefix}-current-password-error`;const confirmId=`${idPrefix}-confirm-password`;const mismatchId=`${idPrefix}-password-mismatch`;
+  return <form className={idPrefix==="self"?"business-form":undefined} onSubmit={submit}><PasswordInput id={currentId} name="currentPassword" label="当前密码" value={currentPassword} onChange={(value)=>{setCurrentPassword(value);if(message)setMessage("");}} autoComplete="current-password" describedBy={`${currentHint?hintId:""}${currentPasswordError?` ${currentErrorId}`:""}`.trim()||undefined} invalid={currentPasswordError}/>{currentHint?<p id={hintId} className="password-hint">{currentHint}</p>:null}<PasswordInput id={`${idPrefix}-new-password`} name="newPassword" label="新密码" value={newPassword} onChange={(value)=>{setNewPassword(value);if(message)setMessage("");}} autoComplete="new-password"/><p className="password-strength" aria-live="polite">密码强度：{passwordStrength(newPassword)}</p><PasswordInput id={confirmId} name="confirmPassword" label="确认新密码" value={confirmPassword} onChange={(value)=>{setConfirmPassword(value);if(message)setMessage("");}} autoComplete="new-password" describedBy={mismatchMessage?mismatchId:undefined} invalid={mismatchMessage}/>{mismatchMessage?<p id={mismatchId} className="form-error" role="status">两次输入的新密码不一致</p>:null}<button type="submit" disabled={submitting||mismatch||confirmPassword===""} aria-busy={submitting}>{submitting?"正在保存…":submitLabel}</button>{message&&message!=="两次输入的新密码不一致"?<p id={currentPasswordError?currentErrorId:undefined} className="form-error" role="alert">{message}</p>:null}</form>;
+}
+
+function ChangePassword({onChanged,onLogout}:{onChanged:()=>Promise<void>;onLogout:()=>void}){
+  const[loggingOut,setLoggingOut]=useState(false);const[logoutError,setLogoutError]=useState("");
+  useEffect(()=>{document.title="首次登录安全设置 — SampleFlow";},[]);
+  async function switchAccount(){if(loggingOut)return;setLoggingOut(true);setLogoutError("");const result=await logoutCurrentSession();if(result==="logged-out")onLogout();else setLogoutError(result==="active"?"退出登录失败，会话仍然有效，请重试。":"无法确认退出结果，会话仍保留，请检查网络后重试。");setLoggingOut(false);}
+  return <main className="password-shell"><section className="login-card"><div className="login-heading"><p>账号安全</p><h2>首次登录安全设置</h2><span>请修改初始密码；新密码需为 6—128 位，并包含英文字母、数字和符号</span></div><PasswordForm idPrefix="first" submitLabel="保存新密码" currentHint="当前密码请填写刚才登录时使用的临时密码。" onChanged={onChanged}/><button type="button" className="switch-account-action" onClick={switchAccount} disabled={loggingOut}>{loggingOut?"正在退出…":"退出并切换账号"}</button>{logoutError?<p className="form-error" role="alert">{logoutError}</p>:null}</section></main>;
+}
+
+function ChangePasswordModal({onClose}:{onClose:()=>void}){
+  const[busy,setBusy]=useState(false);const[changed,setChanged]=useState(false);
+  return <Modal title="修改密码" note="修改成功后保留当前会话，并撤销该账号的其他会话" onClose={onClose} preventClose={busy}>{changed?<div className="password-change-success"><p>密码已修改，其他已登录会话已退出。</p><div className="modal-actions"><button type="button" onClick={onClose}>继续使用</button></div></div>:<PasswordForm idPrefix="self" submitLabel="修改密码" onBusyChange={setBusy} onChanged={async()=>setChanged(true)}/>}</Modal>;
 }
 
 function Login({ onLogin }: { onLogin: (user: User) => void }) {

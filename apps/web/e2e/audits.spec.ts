@@ -77,7 +77,7 @@ test("审计页面只读展示所属域并支持组合过滤", async ({ database
     await expect(page.getByLabel("动作")).toHaveValue("organization");
     await expect(page.getByLabel("开始时间")).toHaveValue("2026-09-01T20:00");
     await expect(organizationRow).toBeVisible();
-    await expect(page.getByRole("button", { name: /修改|删除/ })).toHaveCount(0);
+    await expect(page.locator(".audit-table").getByRole("button", { name: /修改|删除/ })).toHaveCount(0);
 
     await page.getByRole("button", { name: "退出登录" }).click();
     await login(page, "e2e_audit_hr");

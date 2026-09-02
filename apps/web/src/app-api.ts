@@ -16,10 +16,17 @@ export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {})
     if (csrfToken) headers.set("x-csrf-token", csrfToken);
   }
   const response = await fetch(input, { ...init, headers });
-  if (response.status === 401 && !String(input).startsWith("/api/auth/login")) {
+  if (response.status === 401 && !["/api/auth/login","/api/auth/change-password"].some((path)=>String(input).startsWith(path))) {
     window.dispatchEvent(new Event("sampleflow:session-expired"));
   }
   return response;
+}
+
+export async function logoutCurrentSession():Promise<"logged-out"|"active"|"uncertain">{
+  let requestFailed=false;
+  try{const response=await apiFetch("/api/auth/logout",{method:"POST"});if(response.ok||response.status===401)return "logged-out";}catch{requestFailed=true;}
+  try{if((await apiFetch("/api/auth/me")).status===401)return "logged-out";}catch{return "uncertain";}
+  return requestFailed?"uncertain":"active";
 }
 
 export async function downloadApiFile(input: RequestInfo | URL): Promise<boolean> {

@@ -101,6 +101,7 @@ test("账号弹窗约束键盘焦点，并在写入失败后保留输入安全�
   const uncertainRow = page.getByRole("row").filter({ hasText: "e2e_access_uncertain" });
   await expect(uncertainRow).toBeVisible();
   await uncertainRow.getByRole("button", { name: "重置密码" }).click();
+  await page.getByRole("dialog", { name: "确认重置密码" }).getByRole("button", { name: "确认重置密码" }).click();
   await expect(page.getByRole("dialog", { name: "临时密码已生成" })).toBeVisible();
 });
 

@@ -403,11 +403,18 @@ test("首次登录用户看到密码强度并完成改密", async ({ database, p
       await page.getByLabel("密码", { exact: true }).fill("Before@123");
       await page.getByRole("button", { name: "进入 SampleFlow" }).click();
 
-      await expect(page.getByRole("heading", { name: "请修改初始密码" })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "首次登录安全设置" })).toBeVisible();
+      await expect(page).toHaveTitle("首次登录安全设置 — SampleFlow");
+      await page.getByRole("button", { name: "退出并切换账号" }).click();
+      await expect(page.getByRole("heading", { name: "登录系统" })).toBeVisible();
+      await page.getByLabel("账号").fill("e2e_password_change");
+      await page.getByLabel("密码", { exact: true }).fill("Before@123");
+      await page.getByRole("button", { name: "进入 SampleFlow" }).click();
       await expect(page.getByText("6—128 位，并包含英文字母、数字和符号")).toBeVisible();
       await expect(page.getByText("当前密码请填写刚才登录时使用的临时密码")).toBeVisible();
       const currentPassword = page.getByLabel("当前密码", { exact: true });
       const newPassword = page.getByLabel("新密码", { exact: true });
+      const confirmPassword = page.getByLabel("确认新密码", { exact: true });
       await expect(currentPassword).toHaveAttribute("type", "password");
       await page.getByRole("button", { name: "显示当前密码" }).click();
       await expect(currentPassword).toHaveAttribute("type", "text");
@@ -427,6 +434,10 @@ test("首次登录用户看到密码强度并完成改密", async ({ database, p
       await newPassword.fill("Abc@12");
       await expect(page.getByText("密码强度：弱")).toBeVisible();
       await expect(currentPassword).toHaveValue("Before@123");
+      await confirmPassword.fill("Abc@13");
+      await expect(page.getByText("两次输入的新密码不一致", { exact: true })).toBeVisible();
+      await expect(page.getByRole("button", { name: "保存新密码" })).toBeDisabled();
+      await confirmPassword.fill("Abc@12");
       const dashboardResponse = page.waitForResponse((response) =>
         response.url().includes("/api/performance/dashboard") && response.status() === 200
       );
@@ -450,6 +461,7 @@ test("首次改密延迟失败时禁止重复提交并保留表单", async ({ da
   await page.getByRole("button", { name: "进入 SampleFlow" }).click();
   await page.getByLabel("当前密码", { exact: true }).fill("Before@123");
   await page.getByLabel("新密码", { exact: true }).fill("After@123");
+  await page.getByLabel("确认新密码", { exact: true }).fill("After@123");
 
   let requests=0;
   let release!:()=>void;
@@ -464,6 +476,39 @@ test("首次改密延迟失败时禁止重复提交并保留表单", async ({ da
   await expect(page.getByLabel("当前密码", { exact: true })).toHaveValue("Before@123");
   await expect(page.getByLabel("新密码", { exact: true })).toHaveValue("After@123");
   expect(requests).toBe(1);
+});
+
+test("已登录用户可修改自己的密码并保留当前会话", async ({ database, page }) => {
+  await seedTestUser(database.url, {
+    username: "e2e_self_password",
+    displayName: "E2E 自助改密用户",
+    password: "Before@123",
+    roleCode: "sales_assistant",
+    roleName: "销售助理",
+  });
+  await page.goto("/");
+  await page.getByLabel("账号").fill("e2e_self_password");
+  await page.getByLabel("密码", { exact: true }).fill("Before@123");
+  await page.getByRole("button", { name: "进入 SampleFlow" }).click();
+  await page.getByRole("button", { name: "修改密码" }).click();
+  const dialog=page.getByRole("dialog",{name:"修改密码"});
+  await expect(dialog).toBeVisible();
+  await dialog.getByLabel("当前密码",{exact:true}).fill("Wrong@123");
+  await dialog.getByLabel("新密码",{exact:true}).fill("After@123");
+  await dialog.getByLabel("确认新密码",{exact:true}).fill("After@123");
+  await dialog.getByRole("button",{name:"修改密码"}).click();
+  await expect(dialog.getByRole("alert")).toHaveText("当前密码错误");
+  await dialog.getByLabel("当前密码",{exact:true}).fill("Before@123");
+  await dialog.getByLabel("确认新密码",{exact:true}).fill("After@124");
+  await expect(dialog.getByText("两次输入的新密码不一致",{exact:true})).toBeVisible();
+  await expect(dialog.getByRole("button",{name:"修改密码"})).toBeDisabled();
+  await dialog.getByLabel("确认新密码",{exact:true}).fill("After@123");
+  const changed=page.waitForResponse((response)=>response.url().endsWith("/api/auth/change-password")&&response.status()===200);
+  await dialog.getByRole("button",{name:"修改密码"}).click();
+  await changed;
+  await expect(dialog.getByText("密码已修改，其他已登录会话已退出。",{exact:true})).toBeVisible();
+  await dialog.getByRole("button",{name:"继续使用"}).click();
+  await expect(page.getByRole("heading",{name:"业绩账本总览"})).toBeVisible();
 });
 
 test("系统管理员在账号管理页查看只读角色权限说明", async ({ database, page }) => {

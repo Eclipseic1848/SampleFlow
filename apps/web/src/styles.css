@@ -208,7 +208,9 @@ form button:disabled { cursor: wait; opacity: .72; }
 .sidebar nav button { width: 100%; height: 42px; padding: 0 12px; border: 0; border-radius: 7px; background: transparent; color: #aebdce; display: flex; align-items: center; gap: 11px; font-size: 14px; cursor: pointer; }
 .sidebar nav button:hover { background: #1c3049; color: #fff; }
 .sidebar nav button.active { background: var(--blue); color: #fff; }
-.sidebar-user { margin-top: auto; padding: 16px 8px 0; border-top: 1px solid #2e4056; display: grid; grid-template-columns: 34px 1fr 28px; align-items: center; gap: 9px; }
+.sidebar-account-action { min-height: 38px; margin-top: auto; padding: 0 10px; border: 1px solid #40536b; border-radius: 7px; color: #c5d0dd; background: transparent; display: flex; align-items: center; gap: 9px; cursor: pointer; }
+.sidebar-account-action:hover { border-color: #718399; color: #fff; background: #1c3049; }
+.sidebar-user { margin-top: 10px; padding: 16px 8px 0; border-top: 1px solid #2e4056; display: grid; grid-template-columns: 34px 1fr 28px; align-items: center; gap: 9px; }
 .avatar { width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; color: #133c34; background: #81dbc9; font-size: 13px; font-weight: 800; }
 .sidebar-user div:nth-child(2) { min-width: 0; display: grid; gap: 3px; }
 .sidebar-user strong { font-size: 13px; }
@@ -392,6 +394,9 @@ th { color: #607084; background: #fafbfc; font-weight: 600; }
 .modal-actions { margin-top: 24px; display: flex; justify-content: flex-end; gap: 10px; }
 .modal-actions button { width: auto; height: 40px; margin: 0; border: 1px solid var(--line); border-radius: 6px; color: #39495d; background: #fff; }
 .modal-actions button[type="submit"] { border-color: var(--blue); color: #fff; background: var(--blue); }
+.password-change-success { padding: 22px 24px 24px; }
+.password-change-success p { margin: 0; color: #42546b; }
+.switch-account-action { width: 100%; min-height: 42px; margin-top: 12px; border: 1px solid #bfcbd9; border-radius: 8px; color: #42546b; background: #fff; font-weight: 700; cursor: pointer; }
 .approval-evidence { margin-bottom: 20px; display: grid; gap: 14px; }
 .approval-evidence h3, .approval-evidence h4 { margin: 0; color: var(--navy); font-size: 14px; }
 .approval-facts { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
@@ -547,7 +552,8 @@ th { color: #607084; background: #fafbfc; font-weight: 600; }
   .login-panel { min-height: auto; padding: 48px 28px 64px; }
   .app-shell { grid-template-columns: 72px 1fr; }
   .sidebar { padding-inline: 10px; }
-  .sidebar nav span, .sidebar-user div:nth-child(2), .sidebar-user button { display: none; }
+  .sidebar nav span, .sidebar-account-action span, .sidebar-user div:nth-child(2), .sidebar-user button { display: none; }
+  .sidebar-account-action { width: 100%; justify-content: center; }
   .sidebar-brand, .sidebar nav button { justify-content: center; }
   .sidebar-brand { padding: 0; }
   .sidebar-brand img { width: 52px; }
