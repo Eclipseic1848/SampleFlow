@@ -45,13 +45,11 @@ export function OrdersPage({ user }: { user: User }) {
   },[]);
   useEffect(()=>{
     if(isComposing||draftFilters.search.trim()===committedFilters.search)return;
-    const timer=window.setTimeout(()=>commitFilters({...committedFilters,search:draftFilters.search},"push",false),300);
+    const timer=window.setTimeout(()=>commitFilters({...committedFilters,search:draftFilters.search},"replace",false),300);
     return()=>window.clearTimeout(timer);
   },[draftFilters.search,isComposing,committedFilters,commitFilters]);
   const filterRequestKey=JSON.stringify(committedFilters);
-  const lastFilterRequestKey=useRef<string|null>(null);
   useEffect(() => {
-    if(lastFilterRequestKey.current!==filterRequestKey){lastFilterRequestKey.current=filterRequestKey;setOrders([]);setPreviousCursor(null);setNextCursor(null);}
     const controller=new AbortController();setLoadState("loading");setLoadError("");
     const params=new URLSearchParams();for(const [key,value] of Object.entries(committedFilters))if(value)params.set(key,value);if(pageCursor)params.set("cursor",pageCursor);
     apiFetch(`/api/performance/orders?${params.toString()}`,{signal:controller.signal}).then(async(response)=>{
@@ -90,7 +88,7 @@ export function OrdersPage({ user }: { user: User }) {
         <label className="field"><span>客户单位筛选</span><input value={draftFilters.customerUnit} maxLength={300} onChange={(event)=>updateFilter("customerUnit",event.target.value)}/></label>
       </div><div className="order-filter-actions"><button type="button" onClick={()=>commitFilters({...emptyOrderFilters})}>清除筛选</button><button type="submit">应用筛选</button></div></form>
       <div className="orders-table-wrap"><table><thead><tr><th scope="col">订单编号</th><th scope="col">客户</th><th scope="col">业务员</th><th scope="col">当前营业额</th><th scope="col">计入业绩</th><th scope="col">状态</th><th scope="col">操作</th></tr></thead><tbody>{!loading&&orders.length === 0 ? <tr><td colSpan={7} className="empty-cell">{emptyMessage}</td></tr> : orders.map((order) => <tr key={order.id}><td>{order.orderNo}</td><td>{order.customerName}</td><td>{order.salespersonName}</td><td>{formatMoney(order.currentRevenue)}</td><td>{formatMoney(order.countedAmount)}</td><td><Status state={order.lifecycleState}/></td><td><button className="table-action" onClick={() => setSelected(order)}>查看 / 调整</button></td></tr>)}</tbody></table></div>
-      <nav className="table-pagination" aria-label="订单分页"><button type="button" disabled={loading||!previousCursor} onClick={()=>movePage(previousCursor)}>上一页</button><button type="button" disabled={loading||!nextCursor} onClick={()=>movePage(nextCursor)}>下一页</button></nav>
+      <nav className="table-pagination" aria-label="订单分页"><button type="button" disabled={loadState!=="ready"||!previousCursor} onClick={()=>movePage(previousCursor)}>上一页</button><button type="button" disabled={loadState!=="ready"||!nextCursor} onClick={()=>movePage(nextCursor)}>下一页</button></nav>
     </section>
     {showCreate ? <CreateOrder onClose={() => setShowCreate(false)} onSaved={async () => { setShowCreate(false); await refresh(); }} /> : null}
     {showImport ? <ExcelImportDialog user={user} onClose={() => setShowImport(false)} onImported={async () => { setShowImport(false); await refresh(); }} /> : null}

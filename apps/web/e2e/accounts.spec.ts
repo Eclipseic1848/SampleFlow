@@ -4,7 +4,7 @@ import { expect, test } from "./full-stack.js";
 
 const { Client } = pg;
 
-test("系统管理员搜索分页账号并审计固定角色组合变更", async ({ database, page }) => {
+test("系统管理员搜索分页账号并审计固定角色组合变更", async ({ context, database, page }) => {
   const adminId = await seedTestUser(database.url, {
     username: "e2e_accounts_admin",
     displayName: "E2E 账号管理员",
@@ -47,6 +47,12 @@ test("系统管理员搜索分页账号并审计固定角色组合变更", async
     await expect(page.getByText("第 2 页 · 本页 7 个账号", { exact: true })).toBeVisible();
     await expect.poll(() => new URL(page.url()).searchParams.get("accountPage")).toBe("1");
     expect(new URL(page.url()).searchParams.get("accountCursor")).toBeTruthy();
+    const coldPage = await context.newPage();
+    await coldPage.goto(page.url());
+    await expect(coldPage.getByRole("heading", { name: "账号管理" })).toBeVisible();
+    await expect(coldPage.getByText("第 2 页 · 本页 7 个账号", { exact: true })).toBeVisible();
+    await expect(coldPage.getByRole("button", { name: "上一页" })).toBeDisabled();
+    await coldPage.close();
     await page.reload();
     await expect(page.getByText("第 2 页 · 本页 7 个账号", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "上一页" }).click();
@@ -142,7 +148,7 @@ test("系统管理员搜索分页账号并审计固定角色组合变更", async
     await page.getByLabel("搜索账号").fill("失败");
     await page.getByRole("button", { name: "搜索账号" }).click();
     await expect(page.getByRole("alert")).toHaveText("账号服务暂不可用");
-    await expect(targetRow).not.toBeVisible();
+    await expect(targetRow).toBeVisible();
     await page.getByRole("button", { name: "重试查询" }).click();
     await expect(page.getByText("没有符合条件的账号。", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "清除账号搜索" }).click();
@@ -150,6 +156,10 @@ test("系统管理员搜索分页账号并审计固定角色组合变更", async
     await expect(page.getByLabel("搜索账号")).toHaveValue("");
     await expect.poll(() => new URL(page.url()).searchParams.get("accountSearch")).toBe(null);
     await expect(page.getByText("第 1 页 · 本页 50 个账号", { exact: true })).toBeVisible();
+    await page.getByLabel("搜索账号").pressSequentially("甲乙", { delay: 350 });
+    await expect(page).toHaveURL(/accountSearch=%E7%94%B2%E4%B9%99/);
+    await page.goBack();
+    await expect.poll(() => new URL(page.url()).searchParams.get("accountSearch")).not.toBe("甲");
   } finally {
     await setup.end();
   }

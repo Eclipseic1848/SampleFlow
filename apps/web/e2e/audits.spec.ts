@@ -13,7 +13,7 @@ async function login(page: Page, username: string) {
   await page.getByRole("button", { name: "进入 SampleFlow" }).click();
 }
 
-test("审计页面只读展示所属域并支持组合过滤", async ({ database, page }) => {
+test("审计页面只读展示所属域并支持组合过滤", async ({ context, database, page }) => {
   const adminId = await seedTestUser(database.url, { username: "e2e_audit_admin", displayName: "E2E 审计管理员", password: "Audits@123", roleCode: "system_admin", roleName: "系统管理员" });
   await seedTestUser(database.url, { username: "e2e_audit_hr", displayName: "E2E 审计人事", password: "Audits@123", roleCode: "hr", roleName: "人事部" });
   const actorId = await seedTestUser(database.url, { username: "e2e_audit_actor", displayName: "E2E 审计业务员", password: "Audits@123", roleCode: "salesperson", roleName: "业务员" });
@@ -54,12 +54,23 @@ test("审计页面只读展示所属域并支持组合过滤", async ({ database
     expect(new URL(page.url()).searchParams.get("auditCursor")).toBeTruthy();
     await expect(page.getByText("创建账号", { exact: true })).toHaveCount(0);
     await expect(page.getByRole("cell", { name: "组织分页记录" }).first()).toBeVisible();
+    const secondPageUrl = page.url();
     const secondPageRows = await page.locator(".audit-table tbody tr").allTextContents();
+    const coldPage = await context.newPage();
+    await coldPage.goto(secondPageUrl);
+    await expect(coldPage.getByRole("heading",{name:"审计查询"})).toBeVisible();
+    await expect(coldPage.getByRole("cell", { name: "组织分页记录" }).first()).toBeVisible();
+    await expect(coldPage.getByRole("button", { name: "上一页" })).toBeDisabled();
+    await coldPage.close();
     await page.reload();
     await expect(page.getByRole("heading", { name: "审计查询" })).toBeVisible();
     await expect(page.getByRole("cell", { name: "组织分页记录" }).first()).toBeVisible();
     expect(await page.locator(".audit-table tbody tr").allTextContents()).toEqual(secondPageRows);
+    await page.getByRole("button", { name: "上一页" }).click();
+    await expect(page.getByRole("cell", { name: "创建账号" })).toBeVisible();
     await page.goBack();
+    await expect(page.getByRole("cell", { name: "组织分页记录" }).first()).toBeVisible();
+    await page.goForward();
     await expect(page.getByRole("cell", { name: "创建账号" })).toBeVisible();
     await page.getByLabel("动作").fill("organization");
     await page.getByRole("button", { name: "查询审计" }).click();

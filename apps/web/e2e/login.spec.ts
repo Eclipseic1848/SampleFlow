@@ -197,7 +197,7 @@ test("订单台账以前后游标稳定浏览并在刷新后开启新快照", as
     });
     await ledger.getByRole("button", { name: "下一页" }).click();
     await expect(page.getByText("分页暂时失败", { exact: true })).toBeVisible();
-    await ledger.getByRole("button", { name: "下一页" }).click();
+    await page.getByRole("button", { name: "重试查询" }).click();
     await expect(ledger.getByText("E2E-CURSOR-0051", { exact: true })).toBeVisible();
     await ledger.getByRole("button", { name: "下一页" }).click();
     await expect(ledger.getByText("E2E-CURSOR-0001", { exact: true })).toBeVisible();
@@ -287,8 +287,15 @@ test("订单组合筛选由 URL 恢复并区分空集、失败和无权限", asy
     const ledger = page.locator("section.orders-card").filter({ has: page.getByRole("heading", { name: "订单台账" }) });
 
     await page.getByLabel("订单月份").fill(matching.month);
+    await page.getByRole("button", { name: "应用筛选" }).click();
+    const orderSearch = page.getByLabel("定位订单");
+    await orderSearch.pressSequentially("甲乙", { delay: 350 });
+    await expect(page).toHaveURL(/orderSearch=%E7%94%B2%E4%B9%99/);
+    await page.goBack();
+    await expect(orderSearch).toHaveValue("");
+    await page.getByLabel("订单月份").fill(matching.month);
     await page.getByLabel("部门筛选").fill(matching.department);
-    await page.getByLabel("定位订单").fill("E2E-FILTER-");
+    await orderSearch.fill("E2E-FILTER-");
     await expect(page).toHaveURL(/orderSearch=E2E-FILTER-/);
     await expect(page.getByLabel("订单月份")).toHaveValue(matching.month);
     await expect(page.getByLabel("部门筛选")).toHaveValue(matching.department);
@@ -352,7 +359,7 @@ test("订单组合筛选由 URL 恢复并区分空集、失败和无权限", asy
     await page.getByLabel("客户单位筛选").fill("不存在的单位");
     await page.getByRole("button", { name: "应用筛选" }).click();
     await expect(page.getByRole("alert")).toHaveText("筛选加载失败");
-    await expect(ledger.getByText("E2E-FILTER-0001", { exact: true })).toHaveCount(0);
+    await expect(ledger.getByText("E2E-FILTER-0001", { exact: true })).toBeVisible();
     await expect(ledger.getByRole("button", { name: "上一页" })).toBeDisabled();
     await expect(ledger.getByRole("button", { name: "下一页" })).toBeDisabled();
     responseMode = "live";
