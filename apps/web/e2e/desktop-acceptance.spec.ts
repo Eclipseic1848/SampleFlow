@@ -51,6 +51,41 @@ async function expectHorizontallyReachable(page: import("@playwright/test").Page
   expect(box!.x + box!.width).toBeLessThanOrEqual(viewport!.width);
 }
 
+async function expectPaginationControlsAligned(page: import("@playwright/test").Page) {
+  const centers = await page.locator(".table-pagination").first().locator(":scope > .page-size-select, :scope > button, :scope > .page-number-list").evaluateAll((elements) => elements.map((element) => {
+    const box = element.getBoundingClientRect();
+    return box.top + box.height / 2;
+  }));
+  expect(centers).toHaveLength(4);
+  expect(Math.max(...centers) - Math.min(...centers)).toBeLessThanOrEqual(1);
+}
+
+async function expectSearchDecorationsClear(page: import("@playwright/test").Page) {
+  const input = page.getByLabel("搜索组织、人员或负责人");
+  await expect(input).toBeVisible();
+  const iconSpacing = await input.evaluate((element) => {
+    const inputBox = element.getBoundingClientRect();
+    const iconBox = element.parentElement!.querySelector("svg")!.getBoundingClientRect();
+    return {
+      textGap: inputBox.left + Number.parseFloat(getComputedStyle(element).paddingLeft) - iconBox.right,
+      centerOffset: Math.abs(inputBox.top + inputBox.height / 2 - iconBox.top - iconBox.height / 2),
+    };
+  });
+  expect(iconSpacing.textGap).toBeGreaterThanOrEqual(4);
+  expect(iconSpacing.centerOffset).toBeLessThanOrEqual(1);
+
+  await input.fill("E2E");
+  const clear = page.getByRole("button", { name: "清除搜索" });
+  await expect(clear).toBeVisible();
+  const [inputBox, clearBox] = await Promise.all([input.boundingBox(), clear.boundingBox()]);
+  expect(inputBox).not.toBeNull();
+  expect(clearBox).not.toBeNull();
+  expect(clearBox!.x).toBeGreaterThanOrEqual(inputBox!.x);
+  expect(clearBox!.x + clearBox!.width).toBeLessThanOrEqual(inputBox!.x + inputBox!.width);
+  await clear.click();
+  await expect(input).toHaveValue("");
+}
+
 async function waitForPageReady(page: import("@playwright/test").Page, heading: string) {
   await expect(page.getByRole("heading", { name: heading, level: 1 })).toBeVisible();
   await page.waitForLoadState("networkidle");
@@ -85,6 +120,11 @@ test("桌面关键页面无横向溢出且操作可达", async ({ database, page
   await page.getByRole("button", { name: "搜索账号" }).click();
   await expect(page).toHaveURL(/accountSearch=e2e_desktop_layout/);
   await expectHorizontallyReachable(page, page.getByRole("button", { name: "创建账号" }));
+  await expectPaginationControlsAligned(page);
+
+  await page.goto("/?page=organization");
+  await waitForPageReady(page, "组织架构");
+  await expectSearchDecorationsClear(page);
 
   const pages = [
     ["overview", "业绩账本总览"],
