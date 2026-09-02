@@ -47,8 +47,7 @@ export function decidePerformanceEvent(state: PerformanceState, command: Perform
     return { eventType: "restart", deltaAmount: money(state.currentRevenue), next: { ...state, countedAmount: state.currentRevenue, lifecycle: state.currentRevenue > 0 ? "active" : "zero" } };
   }
   if (state.lifecycle !== "zero" || state.currentRevenue !== 0 || state.countedAmount !== 0) throw new PerformanceRuleError("只有零金额订单可以首次计入");
-  if (command.amount <= 0) throw new PerformanceRuleError("首次计入金额必须大于零");
   const amount = money(command.amount);
+  if (amount <= 0) throw new PerformanceRuleError("首次计入金额必须大于零");
   return { eventType: "first_include", deltaAmount: amount, next: { currentRevenue: amount, countedAmount: amount, lifecycle: "active" } };
 }
-

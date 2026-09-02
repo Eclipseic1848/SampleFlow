@@ -22,6 +22,34 @@ async function completeTour(page: import("@playwright/test").Page) {
   await expect(dialog).toBeHidden();
 }
 
+test("总览等待异步内容就绪后再播放完整引导",async({database,page})=>{
+  await seedTestUser(database.url,{
+    username:"e2e_tour_overview_ready",
+    displayName:"E2E 总览引导就绪",
+    password:"Tour@123",
+    roleCode:"sales_assistant",
+    roleName:"销售助理",
+  });
+  let releaseDashboard!:()=>void;
+  let markRequested!:()=>void;
+  const dashboardReleased=new Promise<void>((resolve)=>{releaseDashboard=resolve;});
+  const dashboardRequested=new Promise<void>((resolve)=>{markRequested=resolve;});
+  await page.route("**/api/performance/dashboard",async(route)=>{markRequested();await dashboardReleased;await route.continue();});
+  await page.goto("/?page=overview");
+  await login(page,"e2e_tour_overview_ready");
+  await dashboardRequested;
+  const dialog=page.locator(".onboarding-bubble");
+  await expect(page.getByRole("heading",{name:"业绩账本总览"})).toBeVisible();
+  await expect(dialog).toBeHidden();
+  releaseDashboard();
+  await expect(dialog.getByRole("heading",{name:"从这里进入工作页面"})).toBeVisible();
+  for(const title of ["业绩总览","目标与账本指标","最近业绩事件"]){
+    await dialog.getByRole("button",{name:"下一步"}).click();
+    await expect(dialog.getByRole("heading",{name:title})).toBeVisible();
+  }
+  await dialog.getByRole("button",{name:"跳过本页"}).click();
+});
+
 test("首次自动播放，完成后不再打扰且可以手动重播", async ({ database, page }) => {
   const userId = await seedTestUser(database.url, {
     username: "e2e_tour_persistence",

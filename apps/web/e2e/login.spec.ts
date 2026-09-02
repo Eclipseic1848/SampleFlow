@@ -308,6 +308,7 @@ test("订单组合筛选由 URL 恢复并区分空集、失败和无权限", asy
     await page.getByLabel("客户单位筛选").fill(matching.customerUnit);
     await page.getByRole("button", { name: "应用筛选" }).click();
     await expect(ledger.getByText("E2E-FILTER-0051", { exact: true })).toBeVisible();
+    await expect.poll(()=>new URL(page.url()).searchParams.get("orderSnapshot")).toBeTruthy();
     await expect(ledger.getByText("E2E-OTHER-0001", { exact: true })).toHaveCount(0);
     await expect(page).toHaveURL(/page=orders/);
     for (const value of ["orderMonth=2026-08", "orderStatus=active", "orderRegion=CN-JS"]) await expect(page).toHaveURL(new RegExp(value));
@@ -318,6 +319,7 @@ test("订单组合筛选由 URL 恢复并区分空集、失败和无权限", asy
     const secondPageUrl = page.url();
     expect(secondPageUrl).toContain("orderPage=2");
     expect(secondPageUrl).toContain("orderPageSize=50");
+    expect(new URL(secondPageUrl).searchParams.get("orderSnapshot")).toBeTruthy();
     await page.reload();
     await expect(ledger.getByText("E2E-FILTER-0001", { exact: true })).toBeVisible();
     await ledger.getByRole("button", { name: "查看 / 调整" }).click();

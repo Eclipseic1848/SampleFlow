@@ -45,7 +45,8 @@ test("组织初始化可重放，保留金额并拒绝同来源替换映射", as
         const order = await client.query<{id:string}>(
           `insert into performance_orders(qingflow_order_no,customer_name,customer_unit,salesperson_name,source_received_on,
              original_amount,current_revenue,counted_amount,lifecycle_state,posted_at)
-           values($1,'客户','单位',$2,$3,100,100,$4,'active',now()) returning id::text`,
+           values($1,'客户','单位',$2,$3,100,greatest($4::numeric,0),$4,
+             case when $4::numeric>0 then 'active' else 'historical_review_required' end,now()) returning id::text`,
           [`IMPORT-${index+1}`,row[0],`2026-01-0${index+2}`,row[3]],
         );
         await client.query(

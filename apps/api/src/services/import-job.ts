@@ -1472,10 +1472,6 @@ export async function confirmImportBatch(database: Database, batchId: string, ac
         priorEventCount = Number(existing.event_count);
         preserveHistoricalReview = existing.lifecycle_state === "historical_review_required";
       } else {
-        const total = Math.round(orderRows.reduce((sum, row) => sum + row.amount, 0) * 100) / 100;
-        const lifecycle = allLegacy
-          ? total > 0 ? "active" : orderRows.length === 1 && total === 0 ? "zero" : "historical_review_required"
-          : "draft";
         const inserted = await client.query<{ id: string }>(
           `insert into performance_orders(qingflow_order_no,customer_name,customer_unit,business_region_source_text,business_region_code,
              salesperson_person_id,salesperson_name,service_type,source_received_on,original_amount,current_revenue,counted_amount,
@@ -1483,7 +1479,7 @@ export async function confirmImportBatch(database: Database, batchId: string, ac
            values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,0,0,$11,$12,now()) returning id::text`,
           [orderNo, first.customerName, first.customerUnit, first.businessRegionSourceText, first.businessRegionCode,
            first.organization.personId, first.organization.salespersonName, first.serviceType || null, first.occurredOn,
-           Math.max(0, first.amount), lifecycle, actorUserId],
+           Math.max(0, first.amount), "draft", actorUserId],
         );
         orderId = inserted.rows[0]!.id;
         importedOrders += 1;

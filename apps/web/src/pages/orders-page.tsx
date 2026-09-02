@@ -6,8 +6,8 @@ import { Field, Modal, PaginatedCollection, Pagination, Status, parsePageNumber,
 
 const emptyOrderFilters:OrderFilters={search:"",month:"",status:"",salesperson:"",department:"",group:"",region:"",customerUnit:""};
 const orderFilterUrlKeys:Record<keyof OrderFilters,string>={search:"orderSearch",month:"orderMonth",status:"orderStatus",salesperson:"orderSalesperson",department:"orderDepartment",group:"orderGroup",region:"orderRegion",customerUnit:"orderCustomerUnit"};
-function readOrderUrlState(){const params=new URLSearchParams(window.location.search);const filters={...emptyOrderFilters};for(const key of Object.keys(orderFilterUrlKeys) as Array<keyof OrderFilters>)filters[key]=params.get(orderFilterUrlKeys[key])??"";return{filters,page:parsePageNumber(params.get("orderPage")),pageSize:parsePageSize(params.get("orderPageSize"))};}
-function writeOrderUrlState(filters:OrderFilters,page:number,pageSize:PageSize,mode:"push"|"replace"="push"){const params=new URLSearchParams(window.location.search);params.set("page","orders");for(const key of Object.keys(orderFilterUrlKeys) as Array<keyof OrderFilters>){if(filters[key])params.set(orderFilterUrlKeys[key],filters[key]);else params.delete(orderFilterUrlKeys[key]);}params.delete("orderCursor");params.set("orderPage",String(page));params.set("orderPageSize",String(pageSize));window.history[mode==="push"?"pushState":"replaceState"]({},"",`${window.location.pathname}?${params.toString()}${window.location.hash}`);}
+function readOrderUrlState(){const params=new URLSearchParams(window.location.search);const filters={...emptyOrderFilters};for(const key of Object.keys(orderFilterUrlKeys) as Array<keyof OrderFilters>)filters[key]=params.get(orderFilterUrlKeys[key])??"";return{filters,page:parsePageNumber(params.get("orderPage")),pageSize:parsePageSize(params.get("orderPageSize")),snapshot:params.get("orderSnapshot")};}
+function writeOrderUrlState(filters:OrderFilters,page:number,pageSize:PageSize,mode:"push"|"replace"="push",snapshot?:string|null){const params=new URLSearchParams(window.location.search);params.set("page","orders");for(const key of Object.keys(orderFilterUrlKeys) as Array<keyof OrderFilters>){if(filters[key])params.set(orderFilterUrlKeys[key],filters[key]);else params.delete(orderFilterUrlKeys[key]);}params.delete("orderCursor");if(snapshot===null)params.delete("orderSnapshot");else if(snapshot!==undefined)params.set("orderSnapshot",snapshot);params.set("orderPage",String(page));params.set("orderPageSize",String(pageSize));window.history[mode==="push"?"pushState":"replaceState"]({},"",`${window.location.pathname}?${params.toString()}${window.location.hash}`);}
 
 export function OrdersPage({ user }: { user: User }) {
   const canEdit=user.capabilities.editPerformance;
@@ -28,19 +28,20 @@ export function OrdersPage({ user }: { user: User }) {
   const [page,setPage]=useState(initialUrlState.page);
   const [pageSize,setPageSize]=useState<PageSize>(initialUrlState.pageSize);
   const [totalCount,setTotalCount]=useState(0);
+  const snapshotRef=useRef(initialUrlState.snapshot);
   const searchRef = useRef<HTMLInputElement>(null);
   const commitFilters=useCallback((value:OrderFilters,historyMode:"push"|"replace"="push",updateDraft=true)=>{
     const normalized:OrderFilters={
       search:value.search.trim(),month:value.month.trim(),status:value.status.trim(),salesperson:value.salesperson.trim(),
       department:value.department.trim(),group:value.group.trim(),region:value.region.trim(),customerUnit:value.customerUnit.trim(),
     };
-    writeOrderUrlState(normalized,1,pageSize,historyMode);
+    snapshotRef.current=null;writeOrderUrlState(normalized,1,pageSize,historyMode,null);
     if(updateDraft)setDraftFilters(normalized);
     setPage(1);
     setCommittedFilters(normalized);
   },[pageSize]);
   useEffect(()=>{
-    const restore=()=>{const restored=readOrderUrlState();setDraftFilters(restored.filters);setCommittedFilters(restored.filters);setPage(restored.page);setPageSize(restored.pageSize);};
+    const restore=()=>{const restored=readOrderUrlState();snapshotRef.current=restored.snapshot;setDraftFilters(restored.filters);setCommittedFilters(restored.filters);setPage(restored.page);setPageSize(restored.pageSize);setRefreshVersion((value)=>value+1);};
     window.addEventListener("popstate",restore);return()=>window.removeEventListener("popstate",restore);
   },[]);
   useEffect(()=>{
@@ -51,12 +52,12 @@ export function OrdersPage({ user }: { user: User }) {
   const filterRequestKey=JSON.stringify(committedFilters);
   useEffect(() => {
     const controller=new AbortController();setLoadState("loading");setLoadError("");
-    const params=new URLSearchParams({page:String(page),pageSize:String(pageSize)});for(const [key,value] of Object.entries(committedFilters))if(value)params.set(key,value);
+    const params=new URLSearchParams({page:String(page),pageSize:String(pageSize)});for(const [key,value] of Object.entries(committedFilters))if(value)params.set(key,value);if(snapshotRef.current)params.set("snapshot",snapshotRef.current);
     apiFetch(`/api/performance/orders?${params.toString()}`,{signal:controller.signal}).then(async(response)=>{
-      const data=await readResponseJson<{orders?:Order[];page?:number;pageSize?:PageSize;totalCount?:number;message?:string}>(response,"订单服务响应无效，请重试");
+      const data=await readResponseJson<{orders?:Order[];page?:number;pageSize?:PageSize;totalCount?:number;snapshot?:string;message?:string}>(response,"订单服务响应无效，请重试");
       if(response.status===403){setOrders([]);setTotalCount(0);setLoadState("forbidden");return;}
       if(!response.ok)throw new Error(data.message??"订单加载失败");
-      const total=data.totalCount??0;const lastPage=Math.max(1,Math.ceil(total/pageSize));if(page>lastPage){writeOrderUrlState(committedFilters,lastPage,pageSize,"replace");setPage(lastPage);return;}
+      if(data.snapshot){snapshotRef.current=data.snapshot;writeOrderUrlState(committedFilters,page,pageSize,"replace",data.snapshot);}const total=data.totalCount??0;const lastPage=Math.max(1,Math.ceil(total/pageSize));if(page>lastPage){writeOrderUrlState(committedFilters,lastPage,pageSize,"replace",snapshotRef.current);setPage(lastPage);return;}
       setOrders(data.orders??[]);
       setTotalCount(total);
       setLoadState("ready");
@@ -65,16 +66,16 @@ export function OrdersPage({ user }: { user: User }) {
   }, [filterRequestKey,page,pageSize,refreshVersion]);
   const loading=loadState==="loading";
   const hasFilters=Object.values(committedFilters).some(Boolean);
-  async function refresh() { setRefreshVersion((value)=>value+1); }
-  function changePage(nextPage:number){writeOrderUrlState(committedFilters,nextPage,pageSize);setPage(nextPage);}
-  function changePageSize(nextPageSize:PageSize){writeOrderUrlState(committedFilters,1,nextPageSize);setPageSize(nextPageSize);setPage(1);}
+  async function refresh() { snapshotRef.current=null;writeOrderUrlState(committedFilters,page,pageSize,"replace",null);setRefreshVersion((value)=>value+1); }
+  function changePage(nextPage:number){writeOrderUrlState(committedFilters,nextPage,pageSize,"push",snapshotRef.current);setPage(nextPage);}
+  function changePageSize(nextPageSize:PageSize){snapshotRef.current=null;writeOrderUrlState(committedFilters,1,nextPageSize,"push",null);setPageSize(nextPageSize);setPage(1);}
   function clearSearch(){setDraftFilters((current)=>({...current,search:""}));commitFilters({...committedFilters,search:""},"push",false);window.requestAnimationFrame(()=>searchRef.current?.focus());}
   function updateFilter(key:keyof OrderFilters,value:string){setDraftFilters((current)=>({...current,[key]:value}));}
   async function exportOrders(){if(exporting)return;const params=new URLSearchParams();for(const [key,value] of Object.entries(committedFilters))if(value)params.set(key,value);const query=params.toString();setExporting(true);setExportError("");try{await downloadApiFile(`/api/exports/performance.csv${query?`?${query}`:""}`);}catch(failure){setExportError(failure instanceof Error?failure.message:"导出失败，请重试。");}finally{setExporting(false);}}
   const emptyMessage=loadState==="forbidden"?"无可显示订单。":loadState==="error"?"订单加载失败，可重试。":hasFilters?"没有符合当前组合条件的订单。":"暂无订单数据。";
   return <main className="dashboard orders-page" data-onboarding-page="orders"><header data-onboarding="page-header"><div><h1>订单业绩</h1><p>按订单编号维护不可变业绩事件；已入账记录不能覆盖或删除</p></div>{canExport||canEdit ? <div className="header-actions" data-onboarding="page-actions">{canExport?<button className="secondary-action" disabled={exporting} onClick={exportOrders}>{exporting?"正在导出…":"导出当前授权范围匹配订单"}</button>:null}{canEdit?<><button className="secondary-action" onClick={() => setShowImport(true)}><FileUp size={16}/>Excel 导入</button><button className="primary-action" onClick={() => setShowCreate(true)}><Plus size={16}/>录入新订单</button></>:null}</div> : null}</header>
     {exportError?<p className="page-message" role="alert">{exportError}</p>:null}
-    {loadState==="error"?<div className="query-feedback"><p className="page-message" role="alert">{loadError}</p><button type="button" onClick={()=>setRefreshVersion((value)=>value+1)}>重试查询</button></div>:null}
+    {loadState==="error"?<div className="query-feedback"><p className="page-message" role="alert">{loadError}</p><button type="button" onClick={()=>refresh()}>重试查询</button></div>:null}
     {loadState==="forbidden"?<div className="permission-note"><ShieldCheck size={18}/>当前账号没有订单查看权限。</div>:null}
     {!canEdit ? <div className="permission-note"><ShieldCheck size={18}/>当前角色仅可查看。只有销售助理及销售助理组长可以录入或调整业绩。</div> : null}
     <LedgerGovernancePanel user={user} onChanged={refresh}/>

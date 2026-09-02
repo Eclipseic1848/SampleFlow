@@ -2,7 +2,7 @@
 
 > 更新时间：2026-09-02（America/Los_Angeles）
 >
-> 当前结论：**当前版本中可由工程代理独立完成的 P1 代码与桌面 Web UI/UX 修复（包括全站统一页码分页）均已完成并合入 `main`。剩余 P1 全部是人工 Gate：真实数据业务 UAT 与公司服务器验收。当前没有真实数据授权，也没有公司服务器，绝不能把自动化、合成数据或本机 Docker 结果冒充这些验收。**
+> 当前结论：**全仓复审新增的 6 个 P1 工程问题已建立为 #118—#123，并在现有 checkout 的 `codex/p1-audit-remediation` 分支完成修复与本地验收；尚待提交、PR CI、合并和远端关闭核验。之后剩余 P1 仍是人工 Gate：真实数据业务 UAT 与公司服务器验收。当前没有真实数据授权，也没有公司服务器，绝不能把自动化、合成数据或本机 Docker 结果冒充这些验收。**
 
 ## 1. 我们在做什么
 
@@ -36,6 +36,7 @@ SampleFlow 是销售业绩、目标、组织、账号和审计管理的桌面 We
 - 默认分支：`main`
 - UI/UX 审查交付：[PR #113](https://github.com/Eclipseic1848/SampleFlow/pull/113)，已 squash merge。
 - 统一页码分页交付：[Issue #116](https://github.com/Eclipseic1848/SampleFlow/issues/116) / [PR #117](https://github.com/Eclipseic1848/SampleFlow/pull/117)。
+- 本轮复审整改：[#118](https://github.com/Eclipseic1848/SampleFlow/issues/118)—[#123](https://github.com/Eclipseic1848/SampleFlow/issues/123)，本地分支 `codex/p1-audit-remediation`，PR 尚未创建。
 - PR #113 合并提交：`a1505add0191cb2bd4176bf01c993c523569ae27`
 - PR required check：run `33591249761`，SUCCESS，7分08秒。
 - 合并后 `main` quality gate：run `33591736403`，SUCCESS，5分29秒。
@@ -60,7 +61,18 @@ docker compose -f docker-compose.dev.yml ps
 
 ### 2.2 当前 P1
 
-当前没有 `ready-for-agent` 的 P1。以下 Issue 必须保持 `ready-for-human`，直到真实条件成立：
+本轮 `ready-for-agent` P1 已完成本地实现，待 PR 合并自动关闭：
+
+| Issue | 本地结果 |
+| --- | --- |
+| #118 金额精度与账本状态不变量 | 统一 API 两位小数校验；首次计入先按分舍入；迁移 025 在数据库层约束状态与金额组合 |
+| #119 读路径表级锁 | 删除账号、审计和分析查询中的 `LOCK TABLE ... SHARE`；回归证明读取不等待在途写入 |
+| #120 超范围页总数 | 订单和审计用单语句 CTE 同时返回精确 `totalCount` 与空页 |
+| #121 页码稳定快照 | 订单、审计、分析页码查询返回绑定用户与筛选的 cutoff 快照；URL 跨页、刷新和历史恢复复用 |
+| #122 总览异步引导 | 总览数据或失败状态就绪后才自动开始，避免首次引导缺少异步目标步骤 |
+| #123 分页合同文档 | `README.md`、`UX-CONTRACT.md` 与 P1 规格同步真实分页和快照语义 |
+
+以下 Issue 必须保持 `ready-for-human`，直到真实条件成立：
 
 | Issue | 当前事实 | 关闭条件 |
 | --- | --- | --- |
@@ -88,6 +100,7 @@ https://github.com/Eclipseic1848/SampleFlow/issues/65#issuecomment-5504522089
 | #101 搜索与历史 | 账号、订单、审计搜索/分页与 URL、刷新、前进后退一致；冷启动深链不会伪造“上一页” |
 | #112 后台信息架构 | 创建账号明确“新建人员/绑定已有人员”和多角色；组织按部门/小组、当前/历史分组并支持搜索；文本域可垂直调整 |
 | #116 统一页码分页 | 所有数据表格与可增长业务清单默认 20 条，可选 10／20／50／100 条；支持总数、当前页／总页数、可点击页码、上一页和下一页；服务端大列表返回 `page`／`pageSize`／`totalCount`，旧游标调用保持兼容 |
+| #118—#123 全仓复审整改 | 金额边界和数据库不变量、无阻塞读取、超范围精确总数、稳定页码快照、异步引导与权威文档已完成本地修复；等待 PR/CI/合并 |
 
 ### 3.2 既有 P1 工程能力
 
@@ -100,20 +113,21 @@ https://github.com/Eclipseic1848/SampleFlow/issues/65#issuecomment-5504522089
 - 数据库迁移哈希、bigint 字符串边界、认证与限速、CSRF/Origin、最小权限容器、备份恢复、结构化日志与指标。
 - 受保护下载、稳定游标、筛选 URL、写入不确定状态恢复和失败真相。
 - 统一分页控件与 URL 恢复：账号、订单、审计和分析穿透使用服务端页码，其余已加载业务集合使用共享客户端分页；筛选或每页条数变化回到第 1 页。
-- 当前迁移为 `001`—`024`；不要改写已应用迁移。
+- 当前迁移为 `001`—`025`；不要改写已应用迁移。
 
 ## 4. 验收证据
 
 最终产品源码与测试变更的证据：
 
-- 本地 API：158/158。
-- 本地 Web Playwright：49/49。
+- 本地 API：160/160。
+- 本地 Web Playwright：50/50；最后的快照重试微调另有订单 1/1、审计 1/1 定向通过。
 - CI 竞态修复相关用例：12/12。
 - 容器契约：11/11。
 - API/Web 类型检查和生产构建：通过。
 - 分页合同回归覆盖 10／20／50／100 条、页码直达、总数、筛选／URL 恢复、非法每页条数及游标／页码互斥。
 - 隔离 Compose：首装、真实升级、ready/smoke、代理大请求、备份、新库恢复、最小权限、恢复库登录全部通过。
-- `npm audit --omit=dev`：0 vulnerabilities。
+- 本轮隔离 Compose 明确验证迁移 024 到 025 的真实升级并通过全部运行验收，且只清理本轮 `sfsecurity*` 资源。
+- `npm audit --omit=dev --package-lock-only`：0 vulnerabilities。本机 Node 22/npm 10 对已安装树返回 `Invalid package tree`；项目要求 Node 24，最终以干净 CI 的 `npm ci` 后标准审计为准。
 - `docker compose --env-file .env.example config --quiet`：通过。
 - PR #113 第二轮 required check：SUCCESS。
 - 合并后 `main` quality gate：SUCCESS。
@@ -129,7 +143,7 @@ https://github.com/Eclipseic1848/SampleFlow/issues/65#issuecomment-5504522089
 
 ## 5. 当前卡点
 
-没有剩余可由工程代理自行完成的 P1 代码任务。唯一卡点：
+本轮代码与本地验收完成；当前工程步骤是提交、推送、创建 PR、等待 required check、合并并核验 #118—#123 关闭。完成后只剩人工 Gate：
 
 1. #63：缺真实数据授权、来源哈希、权威组织/区域映射、批准的隔离环境、业务验收人和签字。
 2. #64：缺公司服务器、域名/HTTPS、正式秘密、备份存储、监控、RPO/RTO、维护窗口和运维责任人。
@@ -137,6 +151,13 @@ https://github.com/Eclipseic1848/SampleFlow/issues/65#issuecomment-5504522089
 4. 没有外部发布授权；不得创建 Tag、GitHub Release 或真实部署。
 
 ## 6. 下一步计划
+
+### 6.0 当前分支收口
+
+1. 仅暂存本轮明确文件，提交并推送 `codex/p1-audit-remediation`。
+2. 创建包含 `Closes #118`—`Closes #123` 的 PR。
+3. required check 通过后 squash merge；核验 6 个 Issue 自动关闭和最新 `main` CI。
+4. 用最终 PR、merge SHA、run ID 和远端 P1 状态再次刷新本交接文档。
 
 ### 6.1 当真实数据条件齐全时
 
@@ -200,6 +221,8 @@ https://github.com/Eclipseic1848/SampleFlow/issues/65#issuecomment-5504522089
 19. **GitHub 写入结果不确定时先查远端。** 遇到 TLS/EOF 先查 Issue、PR、分支和 run，不要重复写入。
 20. **页码 API 与旧游标 API 不得混用。** 桌面 Web 使用 `page`／`pageSize`／`totalCount`；兼容调用可继续使用游标，但单个请求同时提交两种模式必须返回 400。
 21. **本机代理可能只让部分 HTTPS 客户端成功。** 2026-09-02 曾出现 GitHub API 可访问但 Git、Docker Hub 和 npm 间歇 TLS/EOF；写入失败先查远端，Git 必要时一次性指定本机代理、HTTP/1.1、TLS 1.2 与 OpenSSL，禁止关闭证书校验。
+22. **金额两位小数校验不能使用固定极小误差。** 接近 `99_999_999_999.99` 时 IEEE-754 乘 100 误差可超过 `1e-7`；必须保留按数值规模计算的容差及大金额回归用例。
+23. **页码快照不能靠表级共享锁。** 用不可变递增 cutoff 冻结集合；令牌必须绑定当前用户和查询条件，筛选、每页条数、主动刷新或失败重试时重建。
 
 ## 9. 新会话接手顺序
 

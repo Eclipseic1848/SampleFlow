@@ -141,7 +141,7 @@ test("退出失败保留会话，受保护请求只在 401 时回到登录", asy
   });
   await page.getByRole("button", { name: "导出当前授权范围匹配订单" }).click();
   await expect(page.getByRole("heading", { name: "登录系统", exact: true })).toBeVisible();
-  await expect(page).toHaveURL(/\?page=orders&orderSearch=keep$/);
+  await expect(page).toHaveURL(/\?page=orders&orderSearch=keep&orderPage=1&orderPageSize=20$/);
 });
 
 test("目标创建原样提交超出 JavaScript 安全整数范围的标识", async ({ database, page }) => {

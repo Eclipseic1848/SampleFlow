@@ -84,8 +84,16 @@ test("干净隔离数据库可应用全部现有迁移", async () => {
         "022_freeze_analysis_dimension_pagination.sql",
         "023_immutable_confirmations_and_audit.sql",
         "024_auth_throttle_cleanup.sql",
+        "025_enforce_performance_order_state_amounts.sql",
       ]);
       assert.ok(result.rows.every((row) => /^[a-f0-9]{64}$/.test(row.sha256)));
+      await assert.rejects(
+        client.query(
+          `insert into performance_orders(qingflow_order_no,customer_name,customer_unit,salesperson_name,source_received_on,original_amount,current_revenue,counted_amount,lifecycle_state)
+           values('INVALID-ACTIVE-STATE','约束客户','约束单位','约束业务员',current_date,1,0,0,'active')`,
+        ),
+        /performance_orders_state_amounts_check/,
+      );
     } finally {
       await client.end();
     }

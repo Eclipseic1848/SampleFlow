@@ -149,6 +149,8 @@ test("业绩分析页显示事件快照地区、外贸、客户单位和待补�
   await expect(drilldown.getByRole("heading", { name: "2026年8月订单与事件" })).toBeVisible();
   await expect(drilldown.getByRole("row", { name: /E2E-ANALYSIS.*E2E 分析客户.*1.*¥100\.00/ })).toBeVisible();
   await expect(drilldown.getByRole("row", { name: /第 1 条.*首次录入.*¥100\.00.*江苏省.*客户单位甲/ })).toBeVisible();
+  await expect.poll(()=>new URL(page.url()).searchParams.get("analysisCustomerSnapshot")).toBeTruthy();
+  await expect.poll(()=>new URL(page.url()).searchParams.get("analysisEventSnapshot")).toBeTruthy();
   expect(Object.fromEntries(new URL(page.url()).searchParams)).toMatchObject({analysisMonth:"2026-08",analysisRegion:"CN-JS",analysisCustomer:"客户单位甲",analysisEventMonth:"2026-08"});
   await page.reload();
   await expect(analysis.getByRole("region", { name: "分析穿透" }).getByRole("heading", { name: "2026年8月订单与事件" })).toBeVisible();
@@ -238,14 +240,14 @@ test("第二批客户穿透可通过刷新和浏览器历史恢复", async ({ da
       const customers = secondPage
         ? [{ customerUnit: "客户51", eventCount: 0, totalAmount: "0.00" }]
         : Array.from({ length: pageSize }, (_, index) => ({ customerUnit: `客户${String(index + 1).padStart(2, "0")}`, eventCount: 0, totalAmount: "0.00" }));
-      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ level, regionCode: "CN-JS", regionName: "江苏省", month: "2026-08", eventCount: 0, totalAmount: "0.00", customerCount: 51, nextCursor: null, page: pageNumber, pageSize, totalCount: 51, customers }) });
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ level, regionCode: "CN-JS", regionName: "江苏省", month: "2026-08", eventCount: 0, totalAmount: "0.00", customerCount: 51, nextCursor: null, snapshot:"mock-customer-snapshot", page: pageNumber, pageSize, totalCount: 51, customers }) });
       return;
     }
     if (level === "months") {
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ level, regionCode: "CN-JS", regionName: "江苏省", customerUnit: url.searchParams.get("customerUnit"), year: "2026", eventCount: 0, totalAmount: "0.00", months: [{ month: "2026-08", eventCount: 0, totalAmount: "0.00" }] }) });
       return;
     }
-    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ level: "events", regionCode: "CN-JS", regionName: "江苏省", customerUnit: url.searchParams.get("customerUnit"), month: "2026-08", eventCount: 0, totalAmount: "0.00", nextCursor: null, page: 1, pageSize: 20, totalCount: 0, orders: [] }) });
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ level: "events", regionCode: "CN-JS", regionName: "江苏省", customerUnit: url.searchParams.get("customerUnit"), month: "2026-08", eventCount: 0, totalAmount: "0.00", nextCursor: null, snapshot:"mock-event-snapshot", page: 1, pageSize: 20, totalCount: 0, orders: [] }) });
   });
 
   await page.goto(`/?${new URLSearchParams({ page: "analysis", analysisMonth: "2026-08", analysisRegion: "CN-JS", analysisCustomer: "客户51", analysisEventMonth: "2026-08", analysisCustomerPage: "2", analysisCustomerPageSize: "50" })}`);

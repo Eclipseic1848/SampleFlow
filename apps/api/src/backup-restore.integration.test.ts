@@ -179,7 +179,7 @@ test("自定义格式备份只恢复到显式新库且保持来源与恢复摘�
         SOURCE_DB_NAME: targetName,
       }, backupDirectory);
       assert.equal(targetSummary.stdout, sourceSummary.stdout);
-      assert.match(sourceSummary.stdout, /^schema_migrations\|24\|[a-f0-9]{32}$/m);
+      assert.match(sourceSummary.stdout, /^schema_migrations\|25\|[a-f0-9]{32}$/m);
       assert.match(sourceSummary.stdout, /^users\|1\|[a-f0-9]{32}$/m);
 
       const appDatabaseUrl = roleUrl(targetUrl.toString(), roles.app, roles.appPassword);
