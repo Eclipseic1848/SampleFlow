@@ -1,8 +1,8 @@
 # SampleFlow 零上下文交接
 
-> 更新时间：2026-09-01（America/Los_Angeles）
+> 更新时间：2026-09-02（America/Los_Angeles）
 >
-> 当前结论：**当前版本中可由工程代理独立完成的 P1 代码与桌面 Web UI/UX 修复均已完成并合入 `main`。剩余 P1 全部是人工 Gate：真实数据业务 UAT 与公司服务器验收。当前没有真实数据授权，也没有公司服务器，绝不能把自动化、合成数据或本机 Docker 结果冒充这些验收。**
+> 当前结论：**当前版本中可由工程代理独立完成的 P1 代码与桌面 Web UI/UX 修复（包括全站统一页码分页）均已完成并合入 `main`。剩余 P1 全部是人工 Gate：真实数据业务 UAT 与公司服务器验收。当前没有真实数据授权，也没有公司服务器，绝不能把自动化、合成数据或本机 Docker 结果冒充这些验收。**
 
 ## 1. 我们在做什么
 
@@ -22,6 +22,7 @@ SampleFlow 是销售业绩、目标、组织、账号和审计管理的桌面 We
 - 当前没有公司服务器，不执行或假装执行服务器验收。
 - 地图必须包含台湾省；前端不需要南海展示。
 - 前端必须使用真实公司 Logo，不恢复 “SF” 占位标。
+- 所有数据表格和可增长业务清单统一分页：默认 20 条，可选 10／20／50／100 条，并可直接点击页码。
 - 目标确认只取消手写签名；保留登录身份、目标版本、固定确认声明、时间和不可修改审计。
 - 常规实现、测试、提交、推送、PR、CI 绿后合并与 Issue 关闭可依据证据自行执行。
 - GitHub Release、Tag、真实外部发布、正式密钥/权限、真实或生产数据、不可逆操作仍是人工门禁。
@@ -34,10 +35,11 @@ SampleFlow 是销售业绩、目标、组织、账号和审计管理的桌面 We
 - 本地路径：`F:\new branch\SampleFlow`
 - 默认分支：`main`
 - UI/UX 审查交付：[PR #113](https://github.com/Eclipseic1848/SampleFlow/pull/113)，已 squash merge。
-- 功能合并提交：`a1505add0191cb2bd4176bf01c993c523569ae27`
+- 统一页码分页交付：[Issue #116](https://github.com/Eclipseic1848/SampleFlow/issues/116) / [PR #117](https://github.com/Eclipseic1848/SampleFlow/pull/117)。
+- PR #113 合并提交：`a1505add0191cb2bd4176bf01c993c523569ae27`
 - PR required check：run `33591249761`，SUCCESS，7分08秒。
 - 合并后 `main` quality gate：run `33591736403`，SUCCESS，5分29秒。
-- #101、#106—#112 已由 PR #113 自动关闭。
+- #101、#106—#112 已由 PR #113 自动关闭；#116 由 PR #117 自动关闭。
 - 本轮没有创建 worktree 或额外项目目录。
 - 没有创建 Tag、GitHub Release，也没有部署到真实服务器。
 
@@ -49,6 +51,8 @@ git fetch origin main
 git rev-parse HEAD
 git rev-parse origin/main
 gh pr view 113 --repo Eclipseic1848/SampleFlow
+gh pr view 117 --repo Eclipseic1848/SampleFlow
+gh issue view 116 --repo Eclipseic1848/SampleFlow
 gh issue list --repo Eclipseic1848/SampleFlow --label "priority:P1" --state open
 gh run list --repo Eclipseic1848/SampleFlow --workflow "SampleFlow quality gate" --limit 10
 docker compose -f docker-compose.dev.yml ps
@@ -83,6 +87,7 @@ https://github.com/Eclipseic1848/SampleFlow/issues/65#issuecomment-5504522089
 | #111 真实表达 | 加载失败不伪装成空数据或零；负值图表保留真实零线；审计动作、实体与数据使用中文可读表达 |
 | #101 搜索与历史 | 账号、订单、审计搜索/分页与 URL、刷新、前进后退一致；冷启动深链不会伪造“上一页” |
 | #112 后台信息架构 | 创建账号明确“新建人员/绑定已有人员”和多角色；组织按部门/小组、当前/历史分组并支持搜索；文本域可垂直调整 |
+| #116 统一页码分页 | 所有数据表格与可增长业务清单默认 20 条，可选 10／20／50／100 条；支持总数、当前页／总页数、可点击页码、上一页和下一页；服务端大列表返回 `page`／`pageSize`／`totalCount`，旧游标调用保持兼容 |
 
 ### 3.2 既有 P1 工程能力
 
@@ -94,6 +99,7 @@ https://github.com/Eclipseic1848/SampleFlow/issues/65#issuecomment-5504522089
 - 角色/权限维度新手引导：8 个桌面页面、首次自动、完成后不打扰、始终可重播、跳过全部、键盘、焦点与 ARIA。
 - 数据库迁移哈希、bigint 字符串边界、认证与限速、CSRF/Origin、最小权限容器、备份恢复、结构化日志与指标。
 - 受保护下载、稳定游标、筛选 URL、写入不确定状态恢复和失败真相。
+- 统一分页控件与 URL 恢复：账号、订单、审计和分析穿透使用服务端页码，其余已加载业务集合使用共享客户端分页；筛选或每页条数变化回到第 1 页。
 - 当前迁移为 `001`—`024`；不要改写已应用迁移。
 
 ## 4. 验收证据
@@ -105,11 +111,13 @@ https://github.com/Eclipseic1848/SampleFlow/issues/65#issuecomment-5504522089
 - CI 竞态修复相关用例：12/12。
 - 容器契约：11/11。
 - API/Web 类型检查和生产构建：通过。
+- 分页合同回归覆盖 10／20／50／100 条、页码直达、总数、筛选／URL 恢复、非法每页条数及游标／页码互斥。
 - 隔离 Compose：首装、真实升级、ready/smoke、代理大请求、备份、新库恢复、最小权限、恢复库登录全部通过。
 - `npm audit --omit=dev`：0 vulnerabilities。
 - `docker compose --env-file .env.example config --quiet`：通过。
 - PR #113 第二轮 required check：SUCCESS。
 - 合并后 `main` quality gate：SUCCESS。
+- PR #117 required check 与合并后 `main` quality gate：SUCCESS；实时 run ID 用第 2.1 节命令复核。
 
 首轮 PR CI 曾暴露三处 Linux 时序竞态，不是产品逻辑失败：
 
@@ -190,6 +198,8 @@ https://github.com/Eclipseic1848/SampleFlow/issues/65#issuecomment-5504522089
 17. **不要把 CI 绿色等同于真实 UAT、服务器或发布。** 四类证据分别取证、分别授权。
 18. **不要自动恢复移动端、进入 P2、迁移真实数据或部署服务器。**
 19. **GitHub 写入结果不确定时先查远端。** 遇到 TLS/EOF 先查 Issue、PR、分支和 run，不要重复写入。
+20. **页码 API 与旧游标 API 不得混用。** 桌面 Web 使用 `page`／`pageSize`／`totalCount`；兼容调用可继续使用游标，但单个请求同时提交两种模式必须返回 400。
+21. **本机代理可能只让部分 HTTPS 客户端成功。** 2026-09-02 曾出现 GitHub API 可访问但 Git、Docker Hub 和 npm 间歇 TLS/EOF；写入失败先查远端，Git 必要时一次性指定本机代理、HTTP/1.1、TLS 1.2 与 OpenSSL，禁止关闭证书校验。
 
 ## 9. 新会话接手顺序
 
