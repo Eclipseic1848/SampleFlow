@@ -36,6 +36,21 @@ test("业绩分析页显示事件快照地区、外贸、客户单位和待补�
        returning id::text`,
       [order.rows[0]!.id, person.rows[0]!.id],
     );
+    const taiwanOrder=await client.query<{id:string}>(
+      `insert into performance_orders
+         (qingflow_order_no,customer_name,customer_unit,business_region_source_text,business_region_code,
+          salesperson_person_id,salesperson_name,source_received_on,original_amount,current_revenue,counted_amount,lifecycle_state,posted_at)
+       values('E2E-ANALYSIS-TW','E2E 台湾客户','台湾客户单位','台湾省','CN-TW',$1,'E2E 分析助理',
+              '2026-08-06',10,10,10,'active',now()) returning id::text`,
+      [person.rows[0]!.id],
+    );
+    await client.query(
+      `insert into performance_events
+         (order_id,event_type,delta_amount,resulting_current_revenue,resulting_counted_amount,accounting_month,occurred_on,reason,
+          salesperson_person_id,salesperson_name,department_name,group_name)
+       values($1,'initial',10,10,10,'2026-08-01','2026-08-06','台湾省分析',$2,'E2E 分析助理','E2E 部','E2E 组')`,
+      [taiwanOrder.rows[0]!.id,person.rows[0]!.id],
+    );
     await client.query(
       `with large_orders as (
          insert into performance_orders
@@ -76,13 +91,14 @@ test("业绩分析页显示事件快照地区、外贸、客户单位和待补�
   const analysis = page.getByRole("region", { name: "地区与客户单位分析" });
   await analysis.getByLabel("分析月份").fill("2026-08");
   await expect(analysis.getByText("已映射金额 + 待补齐金额与授权范围总账完全对平。", { exact: true })).toBeVisible();
-  await expect(analysis.getByText("¥101,000,000,000,153.99", { exact: true })).toBeVisible();
-  await expect(analysis.getByText("¥101,000,000,000,123.99", { exact: true })).toBeVisible();
+  await expect(analysis.getByText("¥101,000,000,000,163.99", { exact: true })).toBeVisible();
+  await expect(analysis.getByText("¥101,000,000,000,133.99", { exact: true })).toBeVisible();
   await expect(analysis.getByText("¥30.00", { exact: true })).toBeVisible();
 
   const provinces = analysis.getByRole("table", { name: "省份汇总" });
   await expect(provinces.getByRole("row", { name: /江苏省.*102.*¥101,000,000,000,098\.99/ })).toBeVisible();
   await expect(provinces.getByRole("row", { name: /浙江省.*1.*¥50\.00/ })).toBeVisible();
+  await expect(provinces.getByRole("row", { name: /CN-TW.*1.*¥10\.00/ })).toBeVisible();
   await expect(provinces.getByText("外贸", { exact: true })).toHaveCount(0);
   await expect(analysis.getByText("外贸（EXT-TRADE）", { exact: true })).toBeVisible();
   await expect(analysis.getByText("1 条事件 · -¥25.00", { exact: true })).toBeVisible();
@@ -103,7 +119,7 @@ test("业绩分析页显示事件快照地区、外贸、客户单位和待补�
   await expect(map.locator(".analysis-map-boundary")).toHaveCount(0);
   const southernEdge = await map.locator("[data-region-code]").evaluateAll((elements) => Math.max(...elements.map((element) => { const box = (element as SVGGraphicsElement).getBBox(); return box.y + box.height; })));
   expect(southernEdge).toBeLessThanOrEqual(608.01);
-  await expect(analysis.getByText("台湾省资料暂缺", { exact: true })).toBeVisible();
+  await expect(analysis.getByText("台湾省 1 条事件 · ¥10.00", { exact: true })).toBeVisible();
   const jiangsu = map.getByRole("button", { name: "地图选择江苏省，102 条事件，金额 ¥101,000,000,000,098.99" });
   const zhejiang = map.getByRole("button", { name: "地图选择浙江省，1 条事件，金额 ¥50.00" });
   await expect(jiangsu).toBeVisible();
@@ -180,7 +196,7 @@ test("业绩分析页显示事件快照地区、外贸、客户单位和待补�
   await requestStarted;
   try {
     await expect(analysis.getByRole("status")).toHaveText("正在读取地区与客户单位分析…");
-    await expect(analysis.getByText("¥101,000,000,000,153.99", { exact: true })).toHaveCount(0);
+    await expect(analysis.getByText("¥101,000,000,000,163.99", { exact: true })).toHaveCount(0);
   } finally {
     releaseResponse();
   }
@@ -231,6 +247,7 @@ test("第二批客户穿透可通过刷新和浏览器历史恢复", async ({ da
   await page.getByLabel("账号").fill("e2e_analysis_restore");
   await page.getByLabel("密码", { exact: true }).fill("Analysis@123");
   await page.getByRole("button", { name: "进入 SampleFlow" }).click();
+  await expect(page.getByText("台湾省资料暂缺", { exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "客户51月度趋势" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "2026年8月订单与事件" })).toBeVisible();
   expect(customerRequests).toBeGreaterThanOrEqual(2);

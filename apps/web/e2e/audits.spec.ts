@@ -8,12 +8,12 @@ test.use({ timezoneId: "America/Los_Angeles" });
 
 async function login(page: Page, username: string) {
   await page.goto("/");
-  await page.getByLabel("账号").fill(username);
+  await page.getByLabel("账号", { exact: true }).fill(username);
   await page.getByLabel("密码", { exact: true }).fill("Audits@123");
   await page.getByRole("button", { name: "进入 SampleFlow" }).click();
 }
 
-test("审计页面只读展示所属域并支持组合过滤", async ({ database, page }) => {
+test("审计页面只读展示所属域并支持组合过滤", async ({ context, database, page }) => {
   const adminId = await seedTestUser(database.url, { username: "e2e_audit_admin", displayName: "E2E 审计管理员", password: "Audits@123", roleCode: "system_admin", roleName: "系统管理员" });
   await seedTestUser(database.url, { username: "e2e_audit_hr", displayName: "E2E 审计人事", password: "Audits@123", roleCode: "hr", roleName: "人事部" });
   const actorId = await seedTestUser(database.url, { username: "e2e_audit_actor", displayName: "E2E 审计业务员", password: "Audits@123", roleCode: "salesperson", roleName: "业务员" });
@@ -48,24 +48,35 @@ test("审计页面只读展示所属域并支持组合过滤", async ({ database
     await login(page, "e2e_audit_admin");
     await page.getByRole("button", { name: "审计查询" }).click();
     await expect(page.getByRole("heading", { name: "审计查询" })).toBeVisible();
-    await expect(page.getByRole("cell", { name: "auth.account_created" })).toBeVisible();
+    await expect(page.getByRole("cell", { name: "创建账号" })).toBeVisible();
     await expect(page.getByText("performance.order_posted", { exact: true })).not.toBeVisible();
     await page.getByRole("button", { name: "下一页" }).click();
     expect(new URL(page.url()).searchParams.get("auditCursor")).toBeTruthy();
-    await expect(page.getByText("auth.account_created", { exact: true })).toHaveCount(0);
-    await expect(page.getByRole("cell", { name: "organization.pagination_fixture" }).first()).toBeVisible();
+    await expect(page.getByText("创建账号", { exact: true })).toHaveCount(0);
+    await expect(page.getByRole("cell", { name: "组织分页记录" }).first()).toBeVisible();
+    const secondPageUrl = page.url();
     const secondPageRows = await page.locator(".audit-table tbody tr").allTextContents();
+    const coldPage = await context.newPage();
+    await coldPage.goto(secondPageUrl);
+    await expect(coldPage.getByRole("heading",{name:"审计查询"})).toBeVisible();
+    await expect(coldPage.getByRole("cell", { name: "组织分页记录" }).first()).toBeVisible();
+    await expect(coldPage.getByRole("button", { name: "上一页" })).toBeDisabled();
+    await coldPage.close();
     await page.reload();
     await expect(page.getByRole("heading", { name: "审计查询" })).toBeVisible();
-    await expect(page.getByRole("cell", { name: "organization.pagination_fixture" }).first()).toBeVisible();
+    await expect(page.getByRole("cell", { name: "组织分页记录" }).first()).toBeVisible();
     expect(await page.locator(".audit-table tbody tr").allTextContents()).toEqual(secondPageRows);
+    await page.getByRole("button", { name: "上一页" }).click();
+    await expect(page.getByRole("cell", { name: "创建账号" })).toBeVisible();
     await page.goBack();
-    await expect(page.getByRole("cell", { name: "auth.account_created" })).toBeVisible();
+    await expect(page.getByRole("cell", { name: "组织分页记录" }).first()).toBeVisible();
+    await page.goForward();
+    await expect(page.getByRole("cell", { name: "创建账号" })).toBeVisible();
     await page.getByLabel("动作").fill("organization");
     await page.getByRole("button", { name: "查询审计" }).click();
-    await expect(page.getByRole("cell", { name: "organization.unit_created" })).toBeVisible();
-    await expect(page.getByText("auth.account_created", { exact: true })).not.toBeVisible();
-    const organizationRow = page.getByRole("row").filter({ hasText: "organization.unit_created" });
+    await expect(page.getByRole("cell", { name: "新增组织单元" })).toBeVisible();
+    await expect(page.getByText("创建账号", { exact: true })).not.toBeVisible();
+    const organizationRow = page.getByRole("row").filter({ hasText: "新增组织单元" });
     await expect(organizationRow).toContainText(/2026.*9.*1.*20:30/);
     await page.getByLabel("开始时间").fill("2026-09-01T20:00");
     const timeRequest = page.waitForRequest((request) => new URL(request.url()).searchParams.has("from"));
@@ -77,13 +88,16 @@ test("审计页面只读展示所属域并支持组合过滤", async ({ database
     await expect(page.getByLabel("动作")).toHaveValue("organization");
     await expect(page.getByLabel("开始时间")).toHaveValue("2026-09-01T20:00");
     await expect(organizationRow).toBeVisible();
-    await expect(page.getByRole("button", { name: /修改|删除/ })).toHaveCount(0);
+    await expect(page.locator(".audit-table").getByRole("button", { name: /修改|删除/ })).toHaveCount(0);
 
     await page.getByRole("button", { name: "退出登录" }).click();
     await login(page, "e2e_audit_hr");
     await page.getByRole("button", { name: "审计查询" }).click();
-    await expect(page.getByRole("cell", { name: "performance.order_posted" })).toBeVisible();
-    await expect(page.getByText("auth.account_created", { exact: true })).not.toBeVisible();
+    await expect(page.getByRole("cell", { name: "订单入账" })).toBeVisible();
+    await expect(page.getByText("创建账号", { exact: true })).not.toBeVisible();
+    await expect(page.getByText("客户：E2E 审计客户", { exact: true })).toBeVisible();
+    await expect(page.locator(".audit-data").filter({ hasText: /[{}]/ })).toHaveCount(0);
+    await expect(page.getByText(/auth\.account_created|organization\.unit_created|performance\.order_posted/)).toHaveCount(0);
     await expect(page.getByText(/E2E-TEMP-CANARY|E2E-TOKEN-CANARY/)).toHaveCount(0);
   } finally {
     await setup.end();

@@ -139,7 +139,7 @@ test("退出失败保留会话，受保护请求只在 401 时回到登录", asy
   await page.route("**/api/exports/performance.csv*", async (route) => {
     await route.fulfill({ status: 401, contentType: "application/json", body: '{"message":"会话已过期"}' });
   });
-  await page.getByRole("button", { name: "导出全部匹配订单" }).click();
+  await page.getByRole("button", { name: "导出当前授权范围匹配订单" }).click();
   await expect(page.getByRole("heading", { name: "登录系统", exact: true })).toBeVisible();
   await expect(page).toHaveURL(/\?page=orders&orderSearch=keep$/);
 });
@@ -180,14 +180,70 @@ test("总览失败后显示错误并可重试成功", async ({ database, page })
     roleCode: "sales_assistant",
     roleName: "销售助理",
   });
-  let fail=true;
-  await page.route("**/api/performance/dashboard",async(route)=>{if(fail){await route.fulfill({status:503,contentType:"application/json",body:'{"message":"总览暂不可用"}'});return;}await new Promise((resolve)=>setTimeout(resolve,200));await route.continue();});
+  let fail=true;let allNegative=false;
+  await page.route("**/api/performance/dashboard",async(route)=>{if(fail){await route.fulfill({status:503,contentType:"application/json",body:'{"message":"总览暂不可用"}'});return;}const response=await route.fetch();const body=await response.json();await route.fulfill({response,json:{...body,month:"2026-09",monthly:allNegative?[{month:"2026-01",total:"-100"},{month:"2026-02",total:"-50"}]:[{month:"2026-01",total:"-100"},{month:"2026-02",total:"50"}],groups:[{id:"negative",name:"负向组",total:"-100"},{id:"positive",name:"正向组",total:"50"}]}});});
   await page.goto("/");
   await login(page,"e2e_overview_retry");
   await expect(page.getByRole("alert")).toHaveText("总览加载失败");
   await expect(page.getByText("总览暂时不可用",{exact:true})).toBeVisible();
+  await expect(page.getByRole("heading",{name:"月度业绩趋势"})).toHaveCount(0);
+  await expect(page.getByRole("heading",{name:"小组业绩"})).toHaveCount(0);
   fail=false;
   await page.getByRole("button",{name:"重试总览"}).click();
-  await expect(page.getByText("正在加载真实业绩账本…",{exact:true})).toBeVisible();
   await expect(page.getByText(/月 · 原始账本，不代表正式绩效结果/)).toBeVisible();
+  const chart=page.getByRole("img",{name:"2026年1月至12月业绩折线图"});
+  const zeroY=Number(await chart.locator(".trend-zero-baseline").getAttribute("y1"));
+  const points=chart.locator("circle");
+  expect(Number(await points.nth(0).getAttribute("cy"))).toBeGreaterThan(zeroY);
+  expect(Number(await points.nth(1).getAttribute("cy"))).toBeLessThan(zeroY);
+  await expect(page.locator(".rank-row").nth(0)).toContainText("负向组");
+  await expect(page.locator(".rank-row").nth(0).locator("i")).toHaveClass(/negative/);
+  allNegative=true;
+  await page.reload();
+  const negativeChart=page.getByRole("img",{name:"2026年1月至12月业绩折线图"});
+  const negativeZeroY=Number(await negativeChart.locator(".trend-zero-baseline").getAttribute("y1"));
+  expect(Number(await negativeChart.locator("circle").nth(0).getAttribute("cy"))).toBeGreaterThan(negativeZeroY);
+  expect(Number(await negativeChart.locator("circle").nth(1).getAttribute("cy"))).toBeGreaterThan(negativeZeroY);
+});
+
+test("目标、组织、账号与审计查询区分失败和真实空集", async ({ database, page }) => {
+  const userId=await seedTestUser(database.url,{username:"e2e_truthful_states",displayName:"E2E 真实状态",password:"Routes@123",roleCode:"system_admin",roleName:"系统管理员"});
+  await seedTestUser(database.url,{username:"e2e_truthful_hr_seed",displayName:"E2E 人事种子",password:"Routes@123",roleCode:"hr",roleName:"人事部"});
+  await seedTestUser(database.url,{username:"e2e_truthful_manager_seed",displayName:"E2E 经理种子",password:"Routes@123",roleCode:"sales_manager",roleName:"销售经理"});
+  const client=new Client({connectionString:database.url});await client.connect();try{await client.query("insert into user_roles(user_id,role_code) values($1,'hr'),($1,'sales_manager')",[userId]);}finally{await client.end();}
+  const failures={goals:true,organization:true,accounts:true,audits:true};
+  await page.route("**/api/goals",async(route)=>route.fulfill({status:failures.goals?503:200,contentType:"application/json",body:failures.goals?'{"message":"目标服务不可用"}':'{"goals":[]}'}));
+  await page.route("**/api/organization",async(route)=>route.fulfill({status:failures.organization?503:200,contentType:"application/json",body:failures.organization?'{"message":"组织服务不可用"}':'{"units":[],"assignments":[],"responsibilities":[]}'}));
+  await page.route("**/api/admin/users*",async(route)=>route.fulfill({status:failures.accounts?503:200,contentType:"application/json",body:failures.accounts?'{"message":"账号服务不可用"}':'{"users":[],"roles":[],"permissionMatrix":[],"nextCursor":null}'}));
+  await page.route("**/api/audits*",async(route)=>route.fulfill({status:failures.audits?503:200,contentType:"application/json",body:failures.audits?'{"message":"审计服务不可用"}':'{"audits":[],"nextCursor":null}'}));
+  await page.goto("/");await login(page,"e2e_truthful_states");
+
+  await page.getByRole("button",{name:"目标管理"}).click();
+  await expect(page.getByRole("alert")).toHaveText("目标服务不可用");
+  await expect(page.getByText("0 条记录",{exact:true})).toHaveCount(0);
+  await expect(page.getByText(/暂无目标/)).toHaveCount(0);
+  failures.goals=false;await page.getByRole("button",{name:"重试目标"}).click();
+  await expect(page.getByText(/暂无目标/)).toBeVisible();
+
+  await page.getByRole("button",{name:"组织架构"}).click();
+  await expect(page.getByRole("alert")).toHaveText("组织服务不可用");
+  await expect(page.getByText("0 个组织单元",{exact:true})).toHaveCount(0);
+  await expect(page.getByText("暂无当前有效任职",{exact:true})).toHaveCount(0);
+  failures.organization=false;await page.getByRole("button",{name:"重试加载组织"}).click();
+  await expect(page.getByText("暂无组织单元",{exact:true})).toBeVisible();
+  await expect(page.getByText("暂无当前有效任职",{exact:true})).toBeVisible();
+
+  await page.getByRole("button",{name:"账号管理"}).click();
+  await expect(page.getByRole("alert")).toHaveText("账号服务不可用");
+  await expect(page.getByText(/本页 0 个账号/)).toHaveCount(0);
+  await expect(page.getByText("暂无角色权限定义",{exact:true})).toHaveCount(0);
+  failures.accounts=false;await page.getByRole("button",{name:"重试查询"}).click();
+  await expect(page.getByText("暂无账号数据。",{exact:true})).toBeVisible();
+  await expect(page.getByText("暂无角色权限定义",{exact:true})).toBeVisible();
+
+  await page.getByRole("button",{name:"审计查询"}).click();
+  await expect(page.getByRole("alert")).toHaveText("审计服务不可用");
+  await expect(page.getByText("本页 0 条记录",{exact:true})).toHaveCount(0);
+  failures.audits=false;await page.getByRole("button",{name:"重试查询"}).click();
+  await expect(page.getByText("没有符合当前权限和条件的审计记录。",{exact:true})).toBeVisible();
 });
