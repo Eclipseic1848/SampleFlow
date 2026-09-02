@@ -119,7 +119,8 @@ test("业绩分析页显示事件快照地区、外贸、客户单位和待补�
   await expect(map.locator(".analysis-map-boundary")).toHaveCount(0);
   const southernEdge = await map.locator("[data-region-code]").evaluateAll((elements) => Math.max(...elements.map((element) => { const box = (element as SVGGraphicsElement).getBBox(); return box.y + box.height; })));
   expect(southernEdge).toBeLessThanOrEqual(608.01);
-  await expect(analysis.getByText("台湾省 1 条事件 · ¥10.00", { exact: true })).toBeVisible();
+  await expect(analysis.getByText("台湾省 1 条事件 · ¥10.00", { exact: true })).toHaveCount(0);
+  await expect(analysis.getByText(/省级轮廓/)).toHaveCount(0);
   const jiangsu = map.getByRole("button", { name: "地图选择江苏省，102 条事件，金额 ¥101,000,000,000,098.99" });
   const zhejiang = map.getByRole("button", { name: "地图选择浙江省，1 条事件，金额 ¥50.00" });
   await expect(jiangsu).toBeVisible();
@@ -247,7 +248,7 @@ test("第二批客户穿透可通过刷新和浏览器历史恢复", async ({ da
   await page.getByLabel("账号").fill("e2e_analysis_restore");
   await page.getByLabel("密码", { exact: true }).fill("Analysis@123");
   await page.getByRole("button", { name: "进入 SampleFlow" }).click();
-  await expect(page.getByText("台湾省资料暂缺", { exact: true })).toBeVisible();
+  await expect(page.getByText("台湾省资料暂缺", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "客户51月度趋势" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "2026年8月订单与事件" })).toBeVisible();
   expect(customerRequests).toBeGreaterThanOrEqual(2);
