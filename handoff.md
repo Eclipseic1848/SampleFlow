@@ -4,11 +4,11 @@
 >
 > 工程基线：PR [#138](https://github.com/Eclipseic1848/SampleFlow/pull/138) 已合并，`origin/main` 为 `6c346c495bce854874a4e7171b01f0b8442c2b4a`；主分支 [quality gate 33726596730](https://github.com/Eclipseic1848/SampleFlow/actions/runs/33726596730) 全部通过。
 >
-> 当前停点：本地位于同一目录的 `codex/update-handoff-after-138` 分支，HEAD `5f5a61d825e49f42493161e5c487ad0957b44892`。工作树现有 41 个已修改文件和 1 个新增迁移文件，混合包含用户此前未提交工作、全工程审查修复与前端 UX 审查修复；必须整体保护。原“相对 `main` 只有 `handoff.md`”判断已经失效。文档 PR [#139](https://github.com/Eclipseic1848/SampleFlow/pull/139) 保持开放，其 CI [33727571426](https://github.com/Eclipseic1848/SampleFlow/actions/runs/33727571426) 已通过，但没有在本次修复中操作。
+> 当前停点：本地位于 `codex/fix-audit-ux`，提交 `1895e3e452786bb7f1f2007114f46bca8d68ace7` 已推送，独立 PR [#153](https://github.com/Eclipseic1848/SampleFlow/pull/153) 指向 `main`。提交前用 42 项精确文件清单暂存，并从 `origin/main` 生成与保护快照相同的树；当前工作树干净。本地保护分支 `codex/fix-audit-ux-source` 保留原混合工作树快照 `6523c52`。文档 PR [#139](https://github.com/Eclipseic1848/SampleFlow/pull/139) 仍保持开放且未被修改。
 >
-> 最高优先级：前端 UX 审查的 13 项问题已创建为 GitHub Issue #140—#152，并在本地逐项完成最小修复；最终 Web E2E 51/51、类型检查和生产构建通过。Issues 仍保持 OPEN，当前没有提交、推送、PR、Issue 评论/关闭、部署或真实数据操作；下一步先由用户检查结果，再决定是否授权后续 GitHub 写入。
+> 最高优先级：全工程审查和前端 UX 审查修复已进入 PR #153；前端 13 项 Issue #140—#152 由 PR 的 `Closes` 引用关联，合并前仍保持 OPEN。最终 Web E2E 51/51、类型检查和生产构建通过；根级 `npm.cmd run verify` 的完整证据见 0B。当前未合并、发布、部署，也未操作真实数据；下一步只检查 PR #153 的最终提交 CI，合并仍需用户单独确认。
 
-## 0C. 2026-09-03 前端 UX 审查 Issue 与本地修复完成点
+## 0C. 2026-09-03 前端 UX 审查 Issue、修复与 PR 完成点
 
 ### GitHub Issues
 
@@ -16,7 +16,7 @@
 - P0：#140 表单字段级校验与首错聚焦；#141 Excel 导入忙碌期禁止关闭；#142 长表单未保存离开保护；#143 审计变更摘要与按需详情。
 - P1：#144 审批中心待办分层；#145 后台刷新保留结果；#146 总览穿透失败原地重试；#147 新手引导 Esc 会话语义；#148 组织页中等桌面布局；#149 临时密码安全复制。
 - P2：#150 侧栏真实链接；#151 移除全表 MutationObserver 扫描；#152 生产登录状态用户文案。
-- 未创建标签、评论或关闭 Issue；这些远端写入不在本次授权内。
+- 未创建标签或额外 Issue 评论；PR #153 已用 `Closes #140`—`Closes #152` 关联，Issues 将在 PR 合并后自动关闭，当前仍为 OPEN。
 
 ### 本地实现
 
@@ -36,8 +36,8 @@
 - `npm.cmd run build --workspace @sampleflow/web`：通过；生产 bundle 包含用户文案，不包含“前端、API 与数据库已连接”。
 - `npm.cmd run test:e2e --workspace @sampleflow/web`：最终完整运行 51/51 通过；覆盖 1280、1024、200% 缩放、WCAG 2.2 A/AA、审批全流程、并发穿透、引导、账号复制、导航、筛选和业务权限。
 - 静态检查确认所有 `orders-table-wrap` 在渲染处直接带 `tabIndex={0}`、`role="region"` 与可访问名称；`git diff --check` 通过，仅有 Windows LF/CRLF 提示。
-- 当前 41 个已修改文件和 1 个新增迁移文件仍全部未提交且来源混合。禁止 reset、clean、checkout、stash、广泛暂存，禁止为提交或关闭 Issue 改写已经正确的功能。
-- 没有运行真实数据、生产服务或业务 UAT；没有提交、推送、创建 PR、评论/关闭 Issue、部署或发布。
+- 42 个文件已通过精确清单暂存并提交；交付分支树与保护快照一致，未为提交改写已经正确的功能。当前工作树干净，本地保护分支仍保留提交前快照。
+- 已提交、推送并创建 PR #153；没有运行真实数据、生产服务或业务 UAT，也没有合并、部署或发布。
 
 ## 0B. 2026-09-03 全工程审查修复完成点
 
@@ -63,9 +63,9 @@
 
 ### 当前保护边界与下一步
 
-- 当前 30 个已修改文件和新增迁移均未提交；其中包含本次修复前已经存在的用户改动，禁止 reset、clean、checkout、stash、广泛暂存或为提交而改写正确功能。
-- 本次没有 GitHub、PR、Issue、部署或发布操作。
-- 下一步只应先检查本节、`git status --short --branch` 和当前 HEAD；用户确认功能后，才按其明确授权处理提交或远端工作。
+- 本节记录的是 0C 之前的历史停点；当时的改动现已连同前端 UX 修复进入 PR #153，当前状态以文件顶部和 0C 为准。
+- 仍禁止 reset、clean、stash、广泛暂存或为 GitHub 交付改写已经正确的功能；没有部署、发布或真实数据操作。
+- 下一步只应检查 PR #153 的最终提交 CI；合并需用户单独确认。
 
 ## 0A. 2026-09-03 全工程代码审查记录（已由 0B 修复结论取代）
 
@@ -163,13 +163,13 @@
 2. 先只读复核：`git status --short --branch`、`git rev-parse HEAD`、`git rev-parse origin/main`、`gh issue list --state open --label P1`、`gh run list --branch main --limit 5`。
 3. 阅读本文件、`CONTEXT.md`、`docs/adr/` 和目标 Issue；不要从旧聊天推断易失状态。
 4. 如果用户只说“继续”，先执行第 8.0 节的现场恢复。页面恢复且用户确认后，才可继续其他 P1 工作。
-5. 未经用户明确同意，不合并 PR #139，不切换分支，不重启服务，不修改代码或数据库。
+5. 不合并 PR #139 或 #153，不重启真实服务，不修改真实数据库；任何合并、发布和部署仍需用户单独确认。
 
 ## 1. 项目、目标与权限边界
 
 SampleFlow 是面向桌面 Web 的销售订单、业绩、目标、组织、账号和审计管理系统。主要技术栈：React 19、Vite 8、Fastify 5、TypeScript、PostgreSQL 16、Docker Compose、npm workspaces。
 
-本阶段目标是完成当前版本 GitHub 上所有 P1 任务。用户已授权代理基于证据自行执行常规工程判断：实现、测试、提交、推送、PR、CI 通过后的合并与 Issue 关闭。以下事项仍保留人工门禁：
+本阶段目标是完成当前版本 GitHub 上所有 P1 任务。本次已获授权执行实现、测试、提交、推送、创建 PR 以及用关闭引用关联 Issue；PR 合并仍保留人工门禁。以下事项也仍保留人工门禁：
 
 - GitHub Release、npm/PyPI 等真实外部发布；
 - 密钥、权限、生产数据和不可逆操作；
