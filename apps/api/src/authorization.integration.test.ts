@@ -155,6 +155,18 @@ async function seedAuthorizationScenario(databaseUrl: string) {
   }
 }
 
+test("总览趋势返回授权范围内全部历史月份", async () => {
+  await withMigratedTestDatabase(async (database) => {
+    await seedAuthorizationScenario(database.url);
+    await withTestApi(database.url, async (app) => {
+      const cookie = await loginCookie(app, "scope_alice");
+      const response = await app.inject({ method: "GET", url: "/api/performance/dashboard?month=2025-08", headers: { cookie } });
+      assert.equal(response.statusCode, 200, response.body);
+      assert.deepEqual(response.json().monthly, [{ month: "2026-08", total: "100.00" }]);
+    });
+  });
+});
+
 test("纯系统管理员没有业务读取或导出权限", async () => {
   await withMigratedTestDatabase(async (database) => {
     await seedAuthorizationScenario(database.url);

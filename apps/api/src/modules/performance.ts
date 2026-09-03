@@ -1366,9 +1366,8 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
       const monthly = await client.query<{ month: string; total: string }>(
         `select to_char(e.accounting_month, 'YYYY-MM') as month,sum(credit.attributed_amount)::text as total
          from performance_events e join performance_event_attributions credit on credit.event_id=e.id
-         where extract(year from e.accounting_month) = extract(year from $1::date)
-           and ${performanceAttributionScopeSql("credit", 2)}
-         group by e.accounting_month order by e.accounting_month`, [`${month}-01`, ...scopeValues]);
+         where ${performanceAttributionScopeSql("credit", 1)}
+         group by e.accounting_month order by e.accounting_month`, scopeValues);
       const groups = await client.query<{ id: string; name: string; total: string }>(
         `select coalesce(credit.group_unit_id::text,'legacy:'||credit.group_name) as id,
                 string_agg(distinct credit.group_name,' / ' order by credit.group_name) as name,

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import { apiFetch, downloadApiFile, eventTypeName, formatMoney, readResponseJson } from "../app-api";
 import type { DashboardData, DepartmentAchievement, DepartmentAchievementDrilldown, GroupAchievement, GroupAchievementDrilldown, GroupAchievementMember, PersonalAchievement, PersonalAchievementDrilldown, SalesAchievement, SalesAchievementDrilldown } from "../app-types";
 import { Metric, Modal, PaginatedCollection, Status } from "../shared-ui";
@@ -9,6 +9,7 @@ export function Overview({ canEdit, canExport, onEnterOrders }: { canEdit: boole
   const [exportError,setExportError]=useState("");
   const [exporting,setExporting]=useState(false);
   const [revision,setRevision]=useState(0);
+  const [trendYear,setTrendYear]=useState<string|null>(null);
   const [showPersonalDetails,setShowPersonalDetails]=useState(false);
   const [personalDetailKind,setPersonalDetailKind]=useState<"actual"|"gap">("actual");
   const [personalDetails,setPersonalDetails]=useState<PersonalAchievementDrilldown|null>(null);
@@ -53,6 +54,9 @@ export function Overview({ canEdit, canExport, onEnterOrders }: { canEdit: boole
   const departments=data?.departmentAchievements??[];
   const organizationDepartments=organizationDetails?("departments" in organizationDetails?organizationDetails.departments:[organizationDetails]):[];
   const dashboardDescription=sales?"销售组织目标与不可变业绩事件":departments.length?"个人、部门目标与不可变业绩事件":personal?"个人目标与不可变业绩事件":"原始账本，不代表正式绩效结果";
+  const currentTrendYear=data?.month.slice(0,4)??"";
+  const trendYears=data?[...new Set([currentTrendYear,...data.monthly.map((item)=>item.month.slice(0,4))])].sort((left,right)=>right.localeCompare(left)):[];
+  const displayedTrendYear=trendYear&&trendYears.includes(trendYear)?trendYear:currentTrendYear;
   async function exportOrders(){if(exporting)return;setExporting(true);setExportError("");try{await downloadApiFile("/api/exports/performance.csv");}catch(failure){setExportError(failure instanceof Error?failure.message:"导出失败，请重试。");}finally{setExporting(false);}}
   return <main className="dashboard" data-onboarding-page="overview" data-onboarding-ready={data||loadError?"true":"false"}><header data-onboarding="page-header"><div><h1>业绩账本总览</h1><p>{data ? `${data.month.replace("-", " 年 ")} 月 · ${dashboardDescription}` : loadError?"总览暂时不可用":"正在加载真实业绩账本…"}</p></div><div className="header-actions" data-onboarding="page-actions">{canExport?<button className="secondary-action" disabled={exporting} onClick={exportOrders}>{exporting?"正在导出…":"导出当前授权范围订单"}</button>:null}{canEdit?<button className="primary-action" onClick={onEnterOrders}>录入订单业绩</button>:null}</div></header>
       {exportError?<p className="page-message" role="alert">{exportError}</p>:null}
@@ -68,7 +72,7 @@ export function Overview({ canEdit, canExport, onEnterOrders }: { canEdit: boole
         onClose={()=>{groupDetailsRequest.current+=1;setSelectedGroup(null);}}
       >{groupDetailsError?<p className="form-error group-drilldown" role="alert">{groupDetailsError}</p>:groupDetails?<div className="group-drilldown"><AchievementMembers members={groupDetails.members}/></div>:<p className="group-drilldown">正在读取小组业绩构成…</p>}</Modal>:null}
       <section className="metric-band" data-onboarding="primary-content"><Metric label="账本净额" value={formatMoney(data.metrics.total)} note={`${data.metrics.eventCount} 条授权范围事件`}/><Metric label="正式报表" value="从生效目标进入" note="未生效不计算达成率"/><Metric label="待处理审批" value={String(data.metrics.pendingApprovals)} note="目标确认与变更" warning/><Metric label="负向调整" value={formatMoney(data.metrics.negativeTotal)} note="暂停与金额变更" negative/></section>
-      <section className="dashboard-grid"><article className="trend-panel"><PanelTitle title="月度业绩趋势" note={`${data.month.slice(0,4)} 年授权范围业绩净额`}/><TrendChart year={data.month.slice(0,4)} monthly={data.monthly}/></article><article className="ranking-panel"><PanelTitle title="小组业绩" note="按事件发生时组织归属"/><PaginatedCollection items={data.groups} label="小组业绩排名">{(pageItems)=><>{pageItems.map((group) => {const total=Number(group.total);return <div className="rank-row" key={group.id}><span>{data.groups.indexOf(group)+1}</span><div><strong>{group.name}</strong><span><i className={total<0?"negative":""} style={{width:`${Math.abs(total)/maxGroup*50}%`}}/></span></div><b className={total<0?"negative":""}>{total<0?"负向 ":"正向 "}{formatMoney(group.total)}</b></div>;})}</>}</PaginatedCollection></article></section>
+      <section className="dashboard-grid"><article className="trend-panel"><PanelTitle title="月度业绩趋势" note={`${displayedTrendYear} 年授权范围业绩净额`} action={<label className="trend-year-filter"><span>年份</span><select aria-label="趋势年份" value={displayedTrendYear} onChange={(event)=>setTrendYear(event.target.value)}>{trendYears.map((year)=><option key={year} value={year}>{year} 年</option>)}</select></label>}/><TrendChart key={displayedTrendYear} year={displayedTrendYear} monthly={data.monthly}/></article><article className="ranking-panel"><PanelTitle title="小组业绩" note="按事件发生时组织归属"/><PaginatedCollection items={data.groups} label="小组业绩排名">{(pageItems)=><>{pageItems.map((group) => {const total=Number(group.total);return <div className="rank-row" key={group.id}><span>{data.groups.indexOf(group)+1}</span><div><strong>{group.name}</strong><span><i className={total<0?"negative":""} style={{width:`${Math.abs(total)/maxGroup*50}%`}}/></span></div><b className={total<0?"negative":""}>{total<0?"负向 ":"正向 "}{formatMoney(group.total)}</b></div>;})}</>}</PaginatedCollection></article></section>
       <section className="events-panel" data-onboarding="secondary-content"><div className="panel-title"><div><h2>最近业绩事件</h2><p>入账后不可覆盖或删除</p></div><button onClick={onEnterOrders}>查看全部</button></div><PaginatedCollection items={data.recent} label="最近业绩事件">{(pageItems)=><table><thead><tr><th>订单编号</th><th>业务员</th><th>事件类型</th><th>记账月</th><th>金额</th><th>组织归属</th><th>状态</th></tr></thead><tbody>{pageItems.map((event) => <tr key={`${event.orderNo}-${event.month}-${event.amount}`}><td>{event.orderNo}</td><td>{event.salespersonName}</td><td>{eventTypeName(event.eventType)}</td><td>{event.month}</td><td className={Number(event.amount)<0?"negative":""}>{formatMoney(event.amount)}</td><td>{event.groupName}</td><td>已入账</td></tr>)}</tbody></table>}</PaginatedCollection></section></>:null}
     </main>;
 }
@@ -102,6 +106,19 @@ function AchievementMembers({members}:{members:GroupAchievementMember[]}){
   </section>)}</>}</PaginatedCollection>:null;
 }
 
-function PanelTitle({ title, note }: { title: string; note: string }) { return <div className="panel-title"><div><h2>{title}</h2><p>{note}</p></div></div>; }
+function PanelTitle({ title, note, action }: { title: string; note: string; action?: ReactNode }) { return <div className="panel-title"><div><h2>{title}</h2><p>{note}</p></div>{action}</div>; }
 
-function TrendChart({year,monthly}:{year:string;monthly:Array<{month:string;total:string}>}) { const totals=new Map(monthly.map((item)=>[item.month,item.total]));const raw=Array.from({length:12},(_,index)=>totals.get(`${year}-${String(index+1).padStart(2,"0")}`)??"0");const filled=raw.map(Number);const minimum=Math.min(0,...filled);const maximum=Math.max(0,...filled);const span=Math.max(1,maximum-minimum);const x=(index:number)=>44+index*(526/11);const y=(value:number)=>190-((value-minimum)/span)*150;const points=filled.map((value,index)=>`${x(index)},${y(value)}`).join(" ");const description=raw.map((value,index)=>`${index+1}月 ${formatMoney(value)}`).join("；");return <div className="chart"><svg viewBox="0 0 590 220" role="img" aria-label={`${year}年1月至12月业绩折线图`}><desc>{description}</desc><g className="grid-lines">{[40,90,140,190].map((lineY)=><line key={lineY} x1="42" y1={lineY} x2="570" y2={lineY}/>)}</g><line className="trend-zero-baseline" x1="42" y1={y(0)} x2="570" y2={y(0)}/><polyline points={points} fill="none" stroke="#2f6fed" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round"/>{filled.map((value,index)=><circle className={value<0?"trend-point-negative":undefined} key={index} cx={x(index)} cy={y(value)} r="5" fill="#fff" stroke="#2f6fed" strokeWidth="3"/>)}</svg><div className="chart-labels">{Array.from({length:12},(_,index)=><span key={index}>{index+1}月</span>)}</div></div>; }
+function TrendChart({year,monthly}:{year:string;monthly:Array<{month:string;total:string}>}) {
+  const [activePoint,setActivePoint]=useState<number|null>(null);
+  const totals=new Map(monthly.map((item)=>[item.month,item.total]));
+  const raw=Array.from({length:12},(_,index)=>totals.get(`${year}-${String(index+1).padStart(2,"0")}`)??"0");
+  const filled=raw.map(Number);
+  const minimum=Math.min(0,...filled);
+  const maximum=Math.max(0,...filled);
+  const span=Math.max(1,maximum-minimum);
+  const x=(index:number)=>44+index*(526/11);
+  const y=(value:number)=>190-((value-minimum)/span)*150;
+  const points=filled.map((value,index)=>`${x(index)},${y(value)}`).join(" ");
+  const description=raw.map((value,index)=>`${index+1}月 ${formatMoney(value)}`).join("；");
+  return <div className="chart"><div className="chart-plot"><svg viewBox="0 0 590 220" role="img" aria-label={`${year}年1月至12月业绩折线图`}><desc>{description}</desc><g className="grid-lines">{[40,90,140,190].map((lineY)=><line key={lineY} x1="42" y1={lineY} x2="570" y2={lineY}/>)}</g><line className="trend-zero-baseline" x1="42" y1={y(0)} x2="570" y2={y(0)}/><polyline points={points} fill="none" stroke="#2f6fed" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round"/>{filled.map((value,index)=><circle className={value<0?"trend-point trend-point-negative":"trend-point"} data-month={`${index+1}月`} role="img" aria-label={`${index+1}月 ${formatMoney(raw[index]!)}`} tabIndex={0} key={index} cx={x(index)} cy={y(value)} r="6" fill="#fff" stroke="#2f6fed" strokeWidth="3" onMouseEnter={()=>setActivePoint(index)} onMouseLeave={()=>setActivePoint(null)} onFocus={()=>setActivePoint(index)} onBlur={()=>setActivePoint(null)}/>)}</svg>{activePoint!==null?<div className="trend-tooltip" role="tooltip" style={{left:`${Math.min(92,Math.max(8,x(activePoint)/590*100))}%`,top:`${y(filled[activePoint]!)/220*100}%`}}>{activePoint+1}月 {formatMoney(raw[activePoint]!)}</div>:null}</div><div className="chart-labels">{Array.from({length:12},(_,index)=><span key={index}>{index+1}月</span>)}</div></div>;
+}

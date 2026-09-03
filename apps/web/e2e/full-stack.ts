@@ -104,7 +104,7 @@ export const test = base.extend<{ database: FullStackDatabase; dismissOnboarding
   dismissOnboarding: [async ({ onboardingEnabled, page }, use) => {
     if (!onboardingEnabled) {
       await page.addLocatorHandler(page.locator(".onboarding-bubble"), async (dialog) => {
-        await dialog.getByRole("button", { name: "跳过全部引导" }).click();
+        await dialog.getByRole("button", { name: "跳过全部引导" }).evaluate((button: HTMLButtonElement) => button.click());
       });
     }
     await use();
