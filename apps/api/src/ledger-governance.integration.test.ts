@@ -22,6 +22,7 @@ async function writeHeaders(app:Parameters<Parameters<typeof withTestApi>[1]>[0]
 
 async function seedLedgerScenario(databaseUrl:string){
   const member=await seedTestUser(databaseUrl,{username:"ledger_member",displayName:"账本业务员",password:"Role@123",roleCode:"salesperson",roleName:"业务员"});
+  const collaborator=await seedTestUser(databaseUrl,{username:"ledger_collaborator",displayName:"账本协作人",password:"Role@123",roleCode:"salesperson",roleName:"业务员"});
   const leader=await seedTestUser(databaseUrl,{username:"ledger_leader",displayName:"账本组长",password:"Role@123",roleCode:"sales_leader",roleName:"业务员组长"});
   const supervisor=await seedTestUser(databaseUrl,{username:"ledger_supervisor",displayName:"账本主管",password:"Role@123",roleCode:"sales_supervisor",roleName:"业务主管"});
   const assistant=await seedTestUser(databaseUrl,{username:"ledger_assistant",displayName:"账本销售助理",password:"Role@123",roleCode:"sales_assistant",roleName:"销售助理"});
@@ -29,22 +30,66 @@ async function seedLedgerScenario(databaseUrl:string){
   const hr=await seedTestUser(databaseUrl,{username:"ledger_hr",displayName:"账本人事",password:"Role@123",roleCode:"hr",roleName:"人事部"});
   const client=new Client({connectionString:databaseUrl});await client.connect();
   try{
-    const people=await client.query<{user_id:string;id:string}>("select user_id::text,p.id::text from people p where user_id=any($1::bigint[])",[[member,leader,supervisor,assistant,assistantLeader,hr]]);
+    const people=await client.query<{user_id:string;id:string}>("select user_id::text,p.id::text from people p where user_id=any($1::bigint[])",[[member,collaborator,leader,supervisor,assistant,assistantLeader,hr]]);
     const personId=(userId:string)=>people.rows.find((row)=>row.user_id===userId)!.id;
     const department=await client.query<{id:string}>("insert into org_units(name,unit_type) values('账本部门','department') returning id::text");
     const group=await client.query<{id:string}>("insert into org_units(name,unit_type,parent_id) values('账本小组','group',$1) returning id::text",[department.rows[0]!.id]);
     await client.query("begin");
     await client.query(`insert into org_responsibilities(person_id,org_unit_id,responsibility_type,effective_from) values($1,$3,'leader','2026-01-01'),($2,$4,'supervisor','2026-01-01')`,[personId(leader),personId(supervisor),group.rows[0]!.id,department.rows[0]!.id]);
-    await client.query("insert into org_memberships(person_id,department_id,group_id,effective_from) values($1,$2,$3,'2026-01-01')",[personId(member),department.rows[0]!.id,group.rows[0]!.id]);
+    await client.query("insert into org_memberships(person_id,department_id,group_id,effective_from) values($1,$3,$4,'2026-01-01'),($2,$3,$4,'2026-01-01')",[personId(member),personId(collaborator),department.rows[0]!.id,group.rows[0]!.id]);
     await client.query("update org_units set is_active=true where id=any($1::bigint[])",[[department.rows[0]!.id,group.rows[0]!.id]]);
     await client.query("commit");
     return {
-      memberPersonId:personId(member),leaderPersonId:personId(leader),supervisorPersonId:personId(supervisor),
+      memberPersonId:personId(member),collaboratorPersonId:personId(collaborator),leaderPersonId:personId(leader),supervisorPersonId:personId(supervisor),
       assistantPersonId:personId(assistant),assistantLeaderPersonId:personId(assistantLeader),hrPersonId:personId(hr),
       departmentId:department.rows[0]!.id,groupId:group.rows[0]!.id,
     };
   }finally{await client.end();}
 }
+
+test("负数新订单保留应收未收语义且协作业绩按比例分配不放大公司总额",async()=>{
+  await withMigratedTestDatabase(async(database)=>{
+    const scenario=await seedLedgerScenario(database.url);
+    await withTestApi(database.url,async(app)=>{
+      const assistant=await writeHeaders(app,"ledger_assistant");
+      const primary=await writeHeaders(app,"ledger_member");
+      const collaborator=await writeHeaders(app,"ledger_collaborator");
+      const created=await app.inject({method:"POST",url:"/api/performance/orders",headers:assistant,payload:{
+        orderNo:"RECEIVABLE-COLLAB-1",customerName:"协作客户",customerUnit:"协作单位",businessRegionSourceText:"台湾省",
+        businessRegionCode:"CN-TW",salespersonPersonId:scenario.memberPersonId,collaboratorPersonId:scenario.collaboratorPersonId,
+        collaborationRatio:0.2,serviceType:"检测服务",sourceReceivedOn:"2026-08-15",amount:-10000,reason:"应收未收",
+      }});
+      assert.equal(created.statusCode,201,created.body);
+      const orderId=created.json<{id:string}>().id;
+      const order=await app.inject({method:"GET",url:"/api/performance/orders?orderNo=RECEIVABLE-COLLAB-1",headers:{cookie:assistant.cookie}});
+      assert.equal(order.statusCode,200,order.body);
+      const orderRow=order.json().orders[0];
+      assert.equal(orderRow.lifecycleState,"receivable_pending");
+      assert.equal(orderRow.currentRevenue,"-10000.00");
+      assert.equal(orderRow.businessRegionCode,"CN-TW");
+      assert.equal(orderRow.collaboratorName,"账本协作人");
+      assert.equal(orderRow.collaborationRatio,"0.200000");
+      assert.equal(orderRow.serviceType,"检测服务");
+      assert.equal(orderRow.note,"应收未收");
+      const primaryDashboard=await app.inject({method:"GET",url:"/api/performance/dashboard?month=2026-08",headers:{cookie:primary.cookie}});
+      const collaboratorDashboard=await app.inject({method:"GET",url:"/api/performance/dashboard?month=2026-08",headers:{cookie:collaborator.cookie}});
+      const companyDashboard=await app.inject({method:"GET",url:"/api/performance/dashboard?month=2026-08",headers:{cookie:assistant.cookie}});
+      assert.equal(primaryDashboard.json().metrics.total,"-8000.00");
+      assert.equal(collaboratorDashboard.json().metrics.total,"-2000.00");
+      assert.equal(companyDashboard.json().metrics.total,"-10000.00");
+      const adjusted=await app.inject({method:"POST",url:`/api/performance/orders/${orderId}/events`,headers:assistant,payload:{type:"revenue_change",newAmount:5000,reason:"到账并转正",idempotencyKey:"receivable-collab-settle"}});
+      assert.equal(adjusted.statusCode,201,adjusted.body);
+      assert.equal(adjusted.json().state.lifecycle,"active");
+      const adjustedOrder=await app.inject({method:"GET",url:"/api/performance/orders?orderNo=RECEIVABLE-COLLAB-1",headers:{cookie:assistant.cookie}});
+      assert.equal(adjustedOrder.json().orders[0].note,"应收未收");
+      const credits=new Client({connectionString:database.url});await credits.connect();
+      try{
+        const amounts=await credits.query<{attribution_role:string;amount:string}>(`select attribution_role,sum(attributed_amount)::text amount from performance_event_attributions credit join performance_events event on event.id=credit.event_id where event.order_id=$1 group by attribution_role order by attribution_role`,[orderId]);
+        assert.deepEqual(amounts.rows,[{attribution_role:"collaborator",amount:"1000.00"},{attribution_role:"primary",amount:"4000.00"}]);
+      }finally{await credits.end();}
+    },{clock:()=>new Date("2026-09-01T01:02:03.000Z")});
+  });
+});
 
 test("正常调整由服务端确定操作日并按稳定顺序幂等追加不可变事件",async()=>{
   await withMigratedTestDatabase(async(database)=>{

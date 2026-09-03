@@ -98,7 +98,7 @@ test("业绩分析页显示事件快照地区、外贸、客户单位和待补�
   const provinces = analysis.getByRole("table", { name: "省份汇总" });
   await expect(provinces.getByRole("row", { name: /江苏省.*102.*¥101,000,000,000,098\.99/ })).toBeVisible();
   await expect(provinces.getByRole("row", { name: /浙江省.*1.*¥50\.00/ })).toBeVisible();
-  await expect(provinces.getByRole("row", { name: /CN-TW.*1.*¥10\.00/ })).toBeVisible();
+  await expect(provinces.getByRole("row", { name: /台湾省.*1.*¥10\.00/ })).toBeVisible();
   await expect(provinces.getByText("外贸", { exact: true })).toHaveCount(0);
   await expect(analysis.getByText("外贸（EXT-TRADE）", { exact: true })).toBeVisible();
   await expect(analysis.getByText("1 条事件 · -¥25.00", { exact: true })).toBeVisible();

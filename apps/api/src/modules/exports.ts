@@ -28,9 +28,9 @@ async function auditOrderExport(db:Database,input:{actorUserId:string;filters:Or
     [input.actorUserId,input.requestId,JSON.stringify({filterSummary,rowCount:input.rowCount,status:input.status,requestId:input.requestId,fileSha256:input.fileSha256,...(input.failureCode?{failureCode:input.failureCode}:{})}),ipAddress],
   );
 }
-type OrderExportRow={orderNo:string;customerName:string;customerUnit:string;salespersonName:string;departmentName:string|null;groupName:string|null;businessRegionSourceText:string|null;businessRegionCode:string|null;sourceReceivedOn:string;currentRevenue:string;countedAmount:string;lifecycleState:string};
+type OrderExportRow={orderNo:string;customerName:string;customerUnit:string;salespersonName:string;departmentName:string|null;groupName:string|null;businessRegionSourceText:string|null;businessRegionCode:string|null;sourceReceivedOn:string;serviceType:string|null;note:string|null;collaboratorName:string|null;collaborationRatio:string|null;currentRevenue:string;countedAmount:string;lifecycleState:string};
 type PausableSource={pause():void;resume():void};
-const orderExportHeader=["订单编号","客户","客户单位","业务员","部门","小组","来源区域原文","标准业务区域","到样日期","当前营业额","当前计入金额","状态"];
+const orderExportHeader=["收样月份","日期","订单编号","客户姓名","客户单位","省份","业务员","部门","组别","系统营业额","服务类型","备注","协作人","协作比例","当前计入金额","状态"];
 export async function registerExports(app:FastifyInstance,db:Database,clock:()=>Date=()=>new Date()){
   app.get("/api/exports/formal-reports/:goalId.csv",async(request,reply)=>{
     if(!request.currentUser)return reply.code(401).send({message:"尚未登录"});
@@ -79,6 +79,8 @@ export async function registerExports(app:FastifyInstance,db:Database,clock:()=>
                    latest.department_name as "departmentName",latest.group_name as "groupName",
                    performance_orders.business_region_source_text as "businessRegionSourceText",
                    performance_orders.business_region_code as "businessRegionCode",performance_orders.source_received_on::text as "sourceReceivedOn",
+                    performance_orders.service_type as "serviceType",latest.note,
+                   performance_orders.collaborator_name as "collaboratorName",performance_orders.collaboration_ratio::text as "collaborationRatio",
                    performance_orders.current_revenue::text as "currentRevenue",performance_orders.counted_amount::text as "countedAmount",
                    performance_orders.lifecycle_state as "lifecycleState"
             from performance_orders
@@ -99,7 +101,7 @@ export async function registerExports(app:FastifyInstance,db:Database,clock:()=>
     query.on("row",(row:OrderExportRow)=>{
       if(finished)return;
       rowCount+=1;
-      write(`\r\n${csvLine([row.orderNo,row.customerName,row.customerUnit,row.salespersonName,row.departmentName,row.groupName,row.businessRegionSourceText,standardBusinessRegionName(row.businessRegionCode??"")??row.businessRegionCode,row.sourceReceivedOn,Number(row.currentRevenue),Number(row.countedAmount),row.lifecycleState])}`);
+      write(`\r\n${csvLine([`${Number(row.sourceReceivedOn.slice(5,7))}月`,row.sourceReceivedOn,row.orderNo,row.customerName,row.customerUnit,row.businessRegionSourceText??standardBusinessRegionName(row.businessRegionCode??"")??row.businessRegionCode,row.salespersonName,row.departmentName,row.groupName,Number(row.currentRevenue),row.serviceType,row.note,row.collaboratorName,row.collaborationRatio===null?null:Number(row.collaborationRatio),Number(row.countedAmount),row.lifecycleState])}`);
     });
     query.once("error",fail);
     query.once("end",()=>{

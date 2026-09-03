@@ -14,6 +14,19 @@ const standard: ImportLayout = {
   },
 };
 
+const sheet3: ImportLayout = {
+  sheetName: "分子",
+  expectedHeaders: ["收样月份", "日期", "订单编号（来源于轻流系统）", "客户姓名", "客户单位", "省份", "业务员", "部门", "组别", "系统营业额", "服务类型", "备注", null, "协作人", "协作比例"],
+  columnMapping: {
+    sourceMonth: "收样月份", occurredOn: "日期", sourceRecordId: "订单编号（来源于轻流系统）",
+    orderNo: "订单编号（来源于轻流系统）", customerName: "客户姓名", customerUnit: "客户单位",
+    businessRegionSourceText: "省份", salespersonSourceKey: "业务员", sourceDepartment: "部门",
+    sourceGroup: "组别", amount: "系统营业额", serviceType: "服务类型", reason: "备注",
+    collaboratorSourceKey: "协作人", collaborationRatio: "协作比例",
+  },
+  fixedEventType: "initial",
+};
+
 test("同一领域字段可由两个获批列布局精确映射，不猜测列名", () => {
   const date = new Date("2026-03-05T00:00:00Z");
   const standardRows = mapImportWorksheetRows([
@@ -119,11 +132,26 @@ test("获批历史布局可保留忽略列、固定历史事件类型并精确�
   assert.equal(rows[0]?.amount, -25.5);
 });
 
+test("Sheet3 新订单布局保留负数、组织来源与协作比例", () => {
+  const rows = mapImportWorksheetRows([
+    sheet3.expectedHeaders!,
+    ["3月", new Date("2026-03-05T00:00:00Z"), "SF-001", "客户甲", "单位甲", "台湾省", "业务员甲", "销售部", "一组", -100, "检测", "应收未收", null, "业务员乙", 0.2],
+  ], sheet3);
+  assert.deepEqual(rows[0], {
+    sheet: "分子", rowNumber: 2, sourceRecordId: "SF-001", sourceMonth: "3月", orderNo: "SF-001",
+    occurredOn: "2026-03-05", customerName: "客户甲", customerUnit: "单位甲", businessRegionSourceText: "台湾省",
+    salespersonSourceKey: "业务员甲", sourceDepartment: "销售部", sourceGroup: "一组", serviceType: "检测",
+    collaboratorSourceKey: "业务员乙", collaborationRatio: 0.2, eventType: "initial", amount: -100, reason: "应收未收",
+  });
+});
+
 test("可下载的标准模板与标准配置兼容且不含公式", async () => {
   const template = fileURLToPath(new URL("../../../web/public/SampleFlow标准业绩导入模板.xlsx", import.meta.url));
   const bytes = await readFile(template);
-  const rows = await parseImportWorkbook("SampleFlow标准业绩导入模板.xlsx", bytes, standard);
+  const rows = await parseImportWorkbook("SampleFlow标准业绩导入模板.xlsx", bytes, sheet3);
   assert.equal(rows.length, 1);
   assert.equal(rows[0]?.orderNo, "001-A");
   assert.equal(rows[0]?.businessRegionSourceText, "外贸");
+  assert.equal(rows[0]?.sourceDepartment, "E2E 销售部");
+  assert.equal(rows[0]?.sourceGroup, "E2E 销售组");
 });

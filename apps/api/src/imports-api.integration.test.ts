@@ -128,18 +128,20 @@ test("导入配置草稿与批准遵守销售助理组长/人事职责分离", a
       const templateConfig = {
         configKey: "standard-template",
         name: "标准模板",
-        sheetName: "业绩导入",
-        expectedHeaders: ["来源记录标识", "轻流订单编号", "发生日期", "客户姓名", "客户单位", "业务区域", "业务员来源标识", "服务类型", "事件类型", "金额", "原因"],
+        sheetName: "分子",
+        expectedHeaders: ["收样月份", "日期", "订单编号（来源于轻流系统）", "客户姓名", "客户单位", "省份", "业务员", "部门", "组别", "系统营业额", "服务类型", "备注", null, "协作人", "协作比例"],
         columnMapping: {
-          sourceRecordId: "来源记录标识", orderNo: "轻流订单编号", occurredOn: "发生日期",
-          customerName: "客户姓名", customerUnit: "客户单位", businessRegionSourceText: "业务区域",
-          salespersonSourceKey: "业务员来源标识", serviceType: "服务类型", eventType: "事件类型",
-          amount: "金额", reason: "原因",
+          sourceMonth: "收样月份", occurredOn: "日期", sourceRecordId: "订单编号（来源于轻流系统）",
+          orderNo: "订单编号（来源于轻流系统）", customerName: "客户姓名", customerUnit: "客户单位",
+          businessRegionSourceText: "省份", salespersonSourceKey: "业务员", sourceDepartment: "部门",
+          sourceGroup: "组别", amount: "系统营业额", serviceType: "服务类型", reason: "备注",
+          collaboratorSourceKey: "协作人", collaborationRatio: "协作比例",
         },
-        requiredColumns: ["sourceRecordId", "orderNo", "occurredOn", "customerName", "customerUnit", "businessRegionSourceText", "salespersonSourceKey", "serviceType", "eventType", "amount", "reason"],
+        requiredColumns: ["sourceMonth", "occurredOn", "orderNo", "customerName", "customerUnit", "businessRegionSourceText", "salespersonSourceKey", "sourceDepartment", "sourceGroup", "amount", "serviceType"],
         allowedEventTypes: ["initial"],
         businessRegionMapping: { 外贸: "EXT-TRADE" },
         personMapping: {},
+        fixedEventType: "initial",
         allowLegacySourceKey: false,
       };
       const templateCreated = await app.inject({ method: "POST", url: "/api/imports/configs", headers: leader, payload: templateConfig });

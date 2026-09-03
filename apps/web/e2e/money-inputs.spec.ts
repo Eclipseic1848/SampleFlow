@@ -42,7 +42,7 @@ test("空金额不会变成零元，并保留各业务动作的零值边界", as
   }));
   await page.getByRole("button", { name: "订单业绩", exact: true }).click();
 
-  await page.route("**/api/performance/people", (route) => route.fulfill({
+  await page.route("**/api/performance/people*", (route) => route.fulfill({
     status: 200,
     contentType: "application/json",
     body: JSON.stringify({ people: [{ id: "1", displayName: "E2E 金额边界" }] }),
@@ -59,19 +59,18 @@ test("空金额不会变成零元，并保留各业务动作的零值边界", as
   await page.getByRole("button", { name: "录入新订单" }).click();
   const dialog = page.getByRole("dialog", { name: "录入订单业绩" });
   await dialog.getByLabel("订单编号").fill("MONEY-BOUNDARY-001");
-  await dialog.getByLabel("收到日期").fill("2026-09-01");
-  await dialog.getByLabel("客户名称").fill("金额边界客户");
+  await dialog.getByLabel("日期", { exact: true }).fill("2026-09-01");
+  await dialog.getByLabel("客户姓名").fill("金额边界客户");
   await dialog.getByLabel("客户单位", { exact: true }).fill("金额边界单位");
-  await dialog.getByLabel("来源区域原文").fill("外贸");
-  await dialog.getByLabel("标准业务区域").selectOption("EXT-TRADE");
-  await dialog.getByLabel("业务员").selectOption("1");
+  await dialog.getByLabel("省份").selectOption("EXT-TRADE");
+  await dialog.getByLabel("业务员", { exact: true }).selectOption("1");
 
   const amount = dialog.getByLabel("营业额");
   await dialog.getByRole("button", { name: "确认入账" }).click();
   expect(requestCount).toBe(0);
   await expect(amount).toBeFocused();
   await expect(amount).toHaveAttribute("aria-invalid", "true");
-  await expect(dialog.getByText("请输入营业额。")).toBeVisible();
+  await expect(dialog.getByText("请输入系统营业额。")).toBeVisible();
 
   await amount.fill("0");
   await dialog.getByRole("button", { name: "确认入账" }).click();

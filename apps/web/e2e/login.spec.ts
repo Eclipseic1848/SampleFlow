@@ -98,7 +98,7 @@ test("销售助理组长可在桌面端预检并确认合成历史分析维度�
     const sourceBytes=await readFile(importTemplate);const sourceHash=createHash("sha256").update(sourceBytes).digest("hex");
     const client=new Client({connectionString:database.url});await client.connect();
     try{
-      const standard=await client.query<{sheet_name:string;expected_headers:unknown[];column_mapping:ImportLayout["columnMapping"]}>("select sheet_name,expected_headers,column_mapping from import_configs where config_key='standard-performance'");
+      const standard=await client.query<{sheet_name:string;expected_headers:unknown[];column_mapping:ImportLayout["columnMapping"]}>("select sheet_name,expected_headers,column_mapping from import_configs where config_key='standard-performance' order by version desc limit 1");
       const columnMapping={...standard.rows[0]!.column_mapping};delete columnMapping.sourceRecordId;delete columnMapping.eventType;
       const parsed=await parseImportWorkbook("SampleFlow标准业绩导入模板.xlsx",sourceBytes,{sheetName:standard.rows[0]!.sheet_name,expectedHeaders:standard.rows[0]!.expected_headers,columnMapping,personMapping:{},fixedEventType:"legacy_adjustment"});
       const source=parsed[0]!;
@@ -924,12 +924,11 @@ test("系统管理员通过页面办理组织异动并保留前后有效期", as
       await page.getByRole("button",{name:"录入新订单"}).click();
       const createOrderDialog=page.getByRole("dialog",{name:"录入订单业绩"});
       await page.getByLabel("订单编号").fill("ORG-TRANSFER-E2E-100");
-      await page.getByLabel("收到日期").fill("2026-07-15");
-      await page.getByLabel("客户名称").fill("组织异动客户");
+      await page.getByLabel("日期",{exact:true}).fill("2026-07-15");
+      await page.getByLabel("客户姓名").fill("组织异动客户");
       await page.getByLabel("客户单位",{exact:true}).fill("组织异动测试单位");
-      await page.getByLabel("来源区域原文").fill("外贸组织线索");
-      await createOrderDialog.getByLabel("标准业务区域").selectOption("EXT-TRADE");
-      await createOrderDialog.getByLabel("业务员").selectOption({label:"E2E 异动业务员"});
+      await createOrderDialog.getByLabel("省份").selectOption("EXT-TRADE");
+      await createOrderDialog.getByLabel("业务员",{exact:true}).selectOption({label:"E2E 异动业务员"});
       await page.getByLabel("服务类型").fill("组织快照验收");
       await page.getByLabel("营业额").fill("100");
       await page.getByRole("button",{name:"确认入账"}).click();
@@ -1011,11 +1010,10 @@ test("订单搜索与不可变事件链在浏览器和数据库中保持一致",
       await page.getByRole("button", { name: "录入新订单" }).click();
       const createOrderDialog=page.getByRole("dialog",{name:"录入订单业绩"});
       await page.getByLabel("订单编号").fill("CHAIN-E2E-110");
-      await page.getByLabel("客户名称").fill("事件链客户");
+      await page.getByLabel("客户姓名").fill("事件链客户");
       await page.getByLabel("客户单位",{exact:true}).fill("事件链测试单位");
-      await page.getByLabel("来源区域原文").fill("外贸事件线索");
-      await createOrderDialog.getByLabel("标准业务区域").selectOption("EXT-TRADE");
-      await createOrderDialog.getByLabel("业务员").selectOption({label:"E2E 账本业务员"});
+      await createOrderDialog.getByLabel("省份").selectOption("EXT-TRADE");
+      await createOrderDialog.getByLabel("业务员",{exact:true}).selectOption({label:"E2E 账本业务员"});
       await page.getByLabel("服务类型").fill("浏览器验收");
       await page.getByLabel("营业额").fill("110");
       await page.getByRole("button", { name: "确认入账" }).click();
@@ -1030,7 +1028,7 @@ test("订单搜索与不可变事件链在浏览器和数据库中保持一致",
       await expect(page.getByRole("heading",{name:"不可变事件链"})).toBeVisible();
       await expect(page.getByLabel("事件发生日期")).toHaveCount(0);
       await expect(page.locator(".event-summary b")).toHaveText(["+¥110.00"]);
-      await expect(page.getByText("外贸 (EXT-TRADE) · 来源 外贸事件线索 · 客户单位 事件链测试单位")).toBeVisible();
+      await expect(page.getByText("外贸 (EXT-TRADE) · 来源 外贸 · 客户单位 事件链测试单位")).toBeVisible();
       await expect(adjustDialog.getByRole("button",{name:"修改营业额"})).toHaveAttribute("aria-pressed","true");
       await page.getByLabel("调整后营业额").fill("100");
       await page.getByLabel("原因（必填）").fill("浏览器改单为 100");
@@ -1182,7 +1180,7 @@ test("订单搜索与不可变事件链在浏览器和数据库中保持一致",
       await page.getByRole("button",{name:"执行更正"}).click();
       const executionDialog=page.getByRole("dialog",{name:/执行更正 · CHAIN-E2E-110/});
       await expect(executionDialog).toContainText("将追加不可变更正事件");
-      await executionDialog.getByLabel("调整后营业额").fill("90");
+      await executionDialog.getByLabel("调整后营业额").fill("-25");
       await executionDialog.getByLabel("执行原因").fill("执行获批更正");
       await executionDialog.getByRole("button",{name:"确认追加更正事件"}).click();
       await expect(executionDialog).toBeHidden();
@@ -1190,7 +1188,7 @@ test("订单搜索与不可变事件链在浏览器和数据库中保持一致",
       const evidence=new Client({connectionString:database.url});await evidence.connect();
       try{
         const result=await evidence.query<{delta_amount:string;order_sequence:number}>(`select e.delta_amount::text,e.order_sequence from performance_events e join performance_orders o on o.id=e.order_id where o.qingflow_order_no='CHAIN-E2E-110' order by e.order_sequence`);
-        expect(result.rows.map((row)=>Number(row.delta_amount))).toEqual([110,-10,-100,100,-10]);
+        expect(result.rows.map((row)=>Number(row.delta_amount))).toEqual([110,-10,-100,100,-125]);
         expect(result.rows.map((row)=>row.order_sequence)).toEqual([1,2,3,4,5]);
       }finally{await evidence.end();}
 });

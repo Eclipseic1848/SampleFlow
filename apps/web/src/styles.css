@@ -365,6 +365,7 @@ th { color: #607084; background: #fafbfc; font-weight: 600; }
 .status-active { color: #147465; background: #e3f5f1; }
 .status-paused { color: #a63232; background: #fdeaea; }
 .status-zero { color: #8a640c; background: #fff3d4; }
+.status-receivable_pending { color: #9b2c2c; background: #ffebeb; }
 .status-draft { color: #596779; background: #edf0f4; }
 .status-historical_review_required { color: #8a4f0c; background: #fff0d6; }
 .onboarding-replay { width: 100%; min-height: 42px; margin-top: auto; padding: 0 16px; border: 1px solid #b9ccec; border-radius: 999px; color: #174d99; background: #fff; box-shadow: 0 8px 24px rgba(20, 50, 90, .14); display: flex; align-items: center; justify-content: center; gap: 8px; cursor: pointer; font-size: 13px; font-weight: 700; }

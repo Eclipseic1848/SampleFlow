@@ -9,7 +9,8 @@ export class ImportWorkbookError extends Error {}
 export type ImportLayout = Readonly<{
   sheetName: string;
   expectedHeaders?: readonly unknown[];
-  columnMapping: Readonly<Record<Exclude<ImportColumn, "sourceRecordId" | "eventType" | "businessSequence" | "correctionRequestId">, string> & Partial<Record<"sourceRecordId" | "eventType" | "businessSequence" | "correctionRequestId", string>>>;
+  columnMapping: Readonly<Record<Exclude<ImportColumn, "sourceRecordId" | "eventType" | "businessSequence" | "correctionRequestId" | "sourceMonth" | "sourceDepartment" | "sourceGroup" | "collaboratorSourceKey" | "collaborationRatio">, string>
+    & Partial<Record<"sourceRecordId" | "eventType" | "businessSequence" | "correctionRequestId" | "sourceMonth" | "sourceDepartment" | "sourceGroup" | "collaboratorSourceKey" | "collaborationRatio", string>>>;
   personMapping?: Readonly<Record<string, string>>;
   fixedEventType?: ImportEventType;
 }>;
@@ -53,6 +54,7 @@ export function mapImportWorksheetRows(data: readonly (readonly unknown[])[], la
       : undefined;
     const rawBusinessSequence = layout.columnMapping.businessSequence ? value(row, "businessSequence") : undefined;
     const rawCorrectionRequestId = layout.columnMapping.correctionRequestId ? value(row, "correctionRequestId") : undefined;
+    const rawCollaborationRatio = layout.columnMapping.collaborationRatio ? value(row, "collaborationRatio") : undefined;
     const correctionRequestId = bigintIdCell(rawCorrectionRequestId);
     return [{
       sheet: layout.sheetName,
@@ -60,6 +62,7 @@ export function mapImportWorksheetRows(data: readonly (readonly unknown[])[], la
       ...(typeof rawBusinessSequence === "number" ? { businessSequence: rawBusinessSequence } : {}),
       ...(correctionRequestId === undefined ? {} : { correctionRequestId }),
       ...(sourceRecordId ? { sourceRecordId } : {}),
+      ...(layout.columnMapping.sourceMonth ? { sourceMonth: textCell(value(row, "sourceMonth")) } : {}),
       orderNo: textCell(value(row, "orderNo")),
       occurredOn: dateCell(value(row, "occurredOn")),
       customerName: textCell(value(row, "customerName")),
@@ -69,7 +72,17 @@ export function mapImportWorksheetRows(data: readonly (readonly unknown[])[], la
         const sourceValue = textCell(value(row, "salespersonSourceKey"));
         return layout.personMapping?.[sourceValue] ?? sourceValue;
       })(),
+      ...(layout.columnMapping.sourceDepartment ? { sourceDepartment: textCell(value(row, "sourceDepartment")) } : {}),
+      ...(layout.columnMapping.sourceGroup ? { sourceGroup: textCell(value(row, "sourceGroup")) } : {}),
       serviceType: textCell(value(row, "serviceType")),
+      ...(layout.columnMapping.collaboratorSourceKey ? {
+        collaboratorSourceKey: (() => {
+          const sourceValue = textCell(value(row, "collaboratorSourceKey"));
+          return layout.personMapping?.[sourceValue] ?? sourceValue;
+        })(),
+      } : {}),
+      ...(rawCollaborationRatio === undefined || rawCollaborationRatio === null || rawCollaborationRatio === "" ? {}
+        : { collaborationRatio: typeof rawCollaborationRatio === "number" ? rawCollaborationRatio : Number.NaN }),
       eventType,
       amount,
       reason: textCell(value(row, "reason")),

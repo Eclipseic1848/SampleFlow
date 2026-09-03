@@ -32,3 +32,11 @@ test("首次计入金额舍入为零时拒绝改变账本状态", () => {
     PerformanceRuleError,
   );
 });
+
+test("负数首次入账表示应收未收并可通过营业额调整解除", () => {
+  const pending = decidePerformanceEvent({ currentRevenue: 0, countedAmount: 0, lifecycle: "draft" }, { type: "initial", amount: -2000 });
+  assert.deepEqual(pending.next, { currentRevenue: -2000, countedAmount: -2000, lifecycle: "receivable_pending" });
+  const settled = decidePerformanceEvent(pending.next, { type: "revenue_change", newAmount: 2000 });
+  assert.equal(settled.deltaAmount, 4000);
+  assert.deepEqual(settled.next, { currentRevenue: 2000, countedAmount: 2000, lifecycle: "active" });
+});

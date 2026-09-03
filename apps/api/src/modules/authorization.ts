@@ -105,6 +105,16 @@ export function canReadPerformance(access: PerformanceAccess): boolean {
 export function performanceScopeSql(alias: string, firstParameter: number): string {
   return `($${firstParameter}::boolean
     or ${alias}.salesperson_person_id=any($${firstParameter + 1}::bigint[])
+    or ${alias}.collaborator_person_id=any($${firstParameter + 1}::bigint[])
+    or ${alias}.group_unit_id=any($${firstParameter + 2}::bigint[])
+    or ${alias}.collaborator_group_unit_id=any($${firstParameter + 2}::bigint[])
+    or ${alias}.department_unit_id=any($${firstParameter + 3}::bigint[])
+    or ${alias}.collaborator_department_unit_id=any($${firstParameter + 3}::bigint[]))`;
+}
+
+export function performanceAttributionScopeSql(alias: string, firstParameter: number): string {
+  return `($${firstParameter}::boolean
+    or ${alias}.salesperson_person_id=any($${firstParameter + 1}::bigint[])
     or ${alias}.group_unit_id=any($${firstParameter + 2}::bigint[])
     or ${alias}.department_unit_id=any($${firstParameter + 3}::bigint[]))`;
 }

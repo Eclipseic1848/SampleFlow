@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: superseded by ADR-0031
 ---
 
 # 新系统不保留协作人和协作比例

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { Database } from "../db.js";
-import { nonnegativeMoneySchema, pageNumberSchema, pageSizeSchema, postgresBigintIdSchema } from "../validation.js";
+import { nonnegativeMoneySchema, pageNumberSchema, pageSizeSchema, postgresBigintIdSchema, signedMoneySchema } from "../validation.js";
 import { businessDate } from "../domain/business-time.js";
 import {
   decidePerformanceEvent,
@@ -12,7 +12,7 @@ import {
 } from "../domain/performance.js";
 import { standardBusinessRegionName } from "../domain/business-regions.js";
 import { hasAnyRole, PERFORMANCE_EDITOR_ROLES } from "./auth.js";
-import { canReadPerformance, pendingGoalSql, pendingGoalValues, performanceScopeSql, performanceScopeValues, resolvePerformanceAccess } from "./authorization.js";
+import { canReadPerformance, pendingGoalSql, pendingGoalValues, performanceAttributionScopeSql, performanceScopeSql, performanceScopeValues, resolvePerformanceAccess } from "./authorization.js";
 import { recordEventAnalysisDimensions } from "./event-analysis-dimensions.js";
 import { achievementCalculationReason, loadFormalReport } from "./formal-reports.js";
 import { latestOrderEventJoinSql, normalizeOrderFilters, orderFilterQuerySchema, orderFilterSql, orderFilterValues, type OrderFilters } from "./order-query.js";
@@ -150,6 +150,13 @@ function analysisQueryDigest(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value), "utf8").digest("base64url");
 }
 
+function scopedEventAmountsSql(firstParameter: number): string {
+  return `select credit.event_id,sum(credit.attributed_amount)::numeric(14,2) as delta_amount
+    from performance_event_attributions credit
+    where ${performanceAttributionScopeSql("credit", firstParameter)}
+    group by credit.event_id`;
+}
+
 function encodeAnalysisCursor(value: AnalysisCustomerCursor | AnalysisEventCursor | AnalysisSnapshot): string {
   return Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
 }
@@ -168,7 +175,8 @@ function resultingLifecycleStateSql(alias: string): string {
   return `case when ${alias}.event_type='legacy_adjustment' then null
     when ${alias}.event_type='pause' then 'paused'
     when ${alias}.event_type in ('restart','first_include') then 'active'
-    when ${alias}.resulting_current_revenue>0 then 'active' else 'zero' end`;
+    when ${alias}.resulting_current_revenue>0 then 'active'
+    when ${alias}.resulting_current_revenue<0 then 'receivable_pending' else 'zero' end`;
 }
 
 const DEPARTMENT_ACHIEVEMENT_ROLES = ["sales_supervisor", "sales_manager", "hr", "general_manager"] as const;
@@ -184,10 +192,19 @@ const createOrderSchema = z.strictObject({
   businessRegionSourceText: z.string().trim().min(1).max(100),
   businessRegionCode: z.string().refine((value) => standardBusinessRegionName(value) !== undefined, "必须选择标准业务区域"),
   salespersonPersonId: postgresBigintIdSchema,
+  collaboratorPersonId: postgresBigintIdSchema.optional(),
+  collaborationRatio: z.number().finite().gt(0).lt(1).multipleOf(0.000001).optional(),
   serviceType: z.string().trim().max(200).optional().default(""),
   sourceReceivedOn: dateSchema,
-  amount: moneySchema,
+  amount: signedMoneySchema,
   reason: z.string().trim().max(500).optional().default("首次录入"),
+}).superRefine((value, context) => {
+  if ((value.collaboratorPersonId === undefined) !== (value.collaborationRatio === undefined)) {
+    context.addIssue({ code: "custom", message: "协作人和协作比例必须同时填写或同时留空" });
+  }
+  if (value.collaboratorPersonId === value.salespersonPersonId) {
+    context.addIssue({ code: "custom", path: ["collaboratorPersonId"], message: "协作人不能与业务员相同" });
+  }
 });
 
 const eventBase = {
@@ -196,7 +213,7 @@ const eventBase = {
   correctionRequestId: postgresBigintIdSchema.optional(),
 };
 const eventSchema = z.discriminatedUnion("type", [
-  z.strictObject({ type: z.literal("revenue_change"), newAmount: moneySchema, ...eventBase }),
+  z.strictObject({ type: z.literal("revenue_change"), newAmount: signedMoneySchema, ...eventBase }),
   z.strictObject({ type: z.literal("pause"), ...eventBase }),
   z.strictObject({ type: z.literal("restart"), ...eventBase }),
   z.strictObject({ type: z.literal("first_include"), amount: moneySchema.positive(), ...eventBase }),
@@ -212,6 +229,9 @@ type OrderRow = {
   salesperson_person_id: string;
   salesperson_name: string;
   service_type: string | null;
+  collaborator_person_id: string | null;
+  collaborator_name: string | null;
+  collaboration_ratio: string | null;
   source_received_on: string;
   original_amount: string;
   current_revenue: string;
@@ -231,7 +251,7 @@ type PersonalAchievementEvent = Readonly<{
   sequence: number;
   reason: string | null;
   resultingCountedAmount: string;
-  resultingLifecycleState: "active" | "paused" | "zero" | null;
+  resultingLifecycleState: "active" | "paused" | "zero" | "receivable_pending" | null;
   departmentName: string | null;
   groupName: string | null;
 }>;
@@ -279,7 +299,7 @@ type AnalysisEventRow = Readonly<{
   deltaAmount: string;
   resultingCurrentRevenue: string;
   resultingCountedAmount: string;
-  resultingLifecycleState: "active" | "paused" | "zero" | null;
+  resultingLifecycleState: "active" | "paused" | "zero" | "receivable_pending" | null;
   accountingMonth: string;
   occurredOn: string;
   reason: string | null;
@@ -321,16 +341,17 @@ async function loadPersonalAchievement(database: QueryDatabase, personId: string
      )
      select (select goal_id from active_goal) as goal_id,
             (select target_amount::text from active_goal) as target_amount,
-            coalesce(sum(event.delta_amount),0)::numeric(14,2)::text as actual_amount,
+            coalesce(sum(credit.attributed_amount),0)::numeric(14,2)::text as actual_amount,
             case when (select target_amount from active_goal)>0
-                 then ((select target_amount from active_goal)-coalesce(sum(event.delta_amount),0))::numeric(14,2)::text
+                 then ((select target_amount from active_goal)-coalesce(sum(credit.attributed_amount),0))::numeric(14,2)::text
                  else null end as gap_amount,
             case when (select target_amount from active_goal)>0
-                 then round(coalesce(sum(event.delta_amount),0)*100/(select target_amount from active_goal),2)::text
+                 then round(coalesce(sum(credit.attributed_amount),0)*100/(select target_amount from active_goal),2)::text
                  else null end as achievement_rate,
             count(event.id)::text as event_count
      from performance_events event
-     where event.accounting_month=$1::date and event.salesperson_person_id=$2`,
+     join performance_event_attributions credit on credit.event_id=event.id and credit.salesperson_person_id=$2
+     where event.accounting_month=$1::date`,
     [`${periodMonth}-01`, personId],
   );
   return formatAchievement(result.rows[0]!, periodMonth, today);
@@ -365,12 +386,13 @@ async function loadPersonalAchievementEvents(database: QueryDatabase, personId: 
        where g.period_month=$1::date and g.goal_level='personal' and g.owner_person_id=$2
      ),personal_events as (
        select event.id,event.order_id,orders.qingflow_order_no,orders.customer_name,
-              event.event_type,event.delta_amount,event.resulting_current_revenue,event.resulting_counted_amount,
+              event.event_type,credit.attributed_amount as delta_amount,event.resulting_current_revenue,event.resulting_counted_amount,
               event.accounting_month,event.occurred_on,event.order_sequence,event.reason,
-              event.department_name,event.group_name
+              credit.department_name,credit.group_name
        from performance_events event
+       join performance_event_attributions credit on credit.event_id=event.id and credit.salesperson_person_id=$2
        join performance_orders orders on orders.id=event.order_id
-       where event.accounting_month=$1::date and event.salesperson_person_id=$2
+       where event.accounting_month=$1::date
      )
      select (select goal_id from active_goal) as goal_id,
             (select target_amount::text from active_goal) as target_amount,
@@ -460,10 +482,10 @@ async function loadGroupAchievements(database: QueryDatabase, groupIds: string[]
     member_count: string;
   }>(
     `with event_group_names as (
-       select distinct on (event.group_unit_id) event.group_unit_id,event.group_name
-       from performance_events event
-       where event.accounting_month=$1::date and event.group_unit_id=any($2::bigint[])
-       order by event.group_unit_id,event.occurred_on desc,event.order_sequence desc,event.id desc
+       select distinct on (credit.group_unit_id) credit.group_unit_id,credit.group_name
+       from performance_events event join performance_event_attributions credit on credit.event_id=event.id
+       where event.accounting_month=$1::date and credit.group_unit_id=any($2::bigint[])
+       order by credit.group_unit_id,event.occurred_on desc,event.order_sequence desc,event.id desc
      ),selected_groups as (
        select unit.id,coalesce(snapshot.group_name,unit.name) as name
        from org_units unit
@@ -479,18 +501,20 @@ async function loadGroupAchievements(database: QueryDatabase, groupIds: string[]
      )
      select selected.id::text as group_id,selected.name as group_name,
             goal.goal_id,goal.target_amount::text,
-            coalesce(sum(event.delta_amount),0)::numeric(14,2)::text as actual_amount,
+            coalesce(sum(credit.attributed_amount),0)::numeric(14,2)::text as actual_amount,
             case when goal.target_amount>0
-                 then (goal.target_amount-coalesce(sum(event.delta_amount),0))::numeric(14,2)::text
+                 then (goal.target_amount-coalesce(sum(credit.attributed_amount),0))::numeric(14,2)::text
                  else null end as gap_amount,
             case when goal.target_amount>0
-                 then round(coalesce(sum(event.delta_amount),0)*100/goal.target_amount,2)::text
+                 then round(coalesce(sum(credit.attributed_amount),0)*100/goal.target_amount,2)::text
                  else null end as achievement_rate,
             count(event.id)::text as event_count,
-             count(distinct coalesce('id:'||event.salesperson_person_id::text,'legacy:'||event.salesperson_name))::text as member_count
+             count(distinct coalesce('id:'||credit.salesperson_person_id::text,'legacy:'||credit.salesperson_name))::text as member_count
      from selected_groups selected
      left join active_goals goal on goal.org_unit_id=selected.id
-     left join performance_events event on event.group_unit_id=selected.id and event.accounting_month=$1::date
+     left join performance_event_attributions credit on credit.group_unit_id=selected.id
+       and credit.event_id in (select id from performance_events where accounting_month=$1::date)
+     left join performance_events event on event.id=credit.event_id and event.accounting_month=$1::date
      group by selected.id,selected.name,goal.goal_id,goal.target_amount
      order by selected.name,selected.id`,
     [`${periodMonth}-01`, groupIds],
@@ -510,9 +534,9 @@ async function loadGroupAchievementDetails(database: QueryDatabase, groupId: str
     events: GroupAchievementEventRow[];
   }>(
     `with event_group_name as (
-       select event.group_name
-       from performance_events event
-       where event.accounting_month=$1::date and event.group_unit_id=$2
+       select credit.group_name
+       from performance_events event join performance_event_attributions credit on credit.event_id=event.id
+       where event.accounting_month=$1::date and credit.group_unit_id=$2
        order by event.occurred_on desc,event.order_sequence desc,event.id desc
        limit 1
      ),selected_group as (
@@ -528,19 +552,20 @@ async function loadGroupAchievementDetails(database: QueryDatabase, groupId: str
        limit 1
       ),group_events as (
         select event.id,event.order_id,orders.qingflow_order_no,orders.customer_name,
-               event.event_type,event.delta_amount,event.resulting_current_revenue,event.resulting_counted_amount,
+               event.event_type,credit.attributed_amount as delta_amount,event.resulting_current_revenue,event.resulting_counted_amount,
                event.accounting_month,event.occurred_on,event.order_sequence,event.reason,
-               event.department_name,event.group_name,event.salesperson_person_id,event.salesperson_name,
-               coalesce('id:'||event.salesperson_person_id::text,'legacy:'||event.salesperson_name) as person_key,
-               sum(event.delta_amount) over(
-                 partition by coalesce('id:'||event.salesperson_person_id::text,'legacy:'||event.salesperson_name)
+               credit.department_name,credit.group_name,credit.salesperson_person_id,credit.salesperson_name,
+               coalesce('id:'||credit.salesperson_person_id::text,'legacy:'||credit.salesperson_name) as person_key,
+               sum(credit.attributed_amount) over(
+                 partition by coalesce('id:'||credit.salesperson_person_id::text,'legacy:'||credit.salesperson_name)
                )::numeric(14,2)::text as member_actual_amount,
-               sum(event.delta_amount) over(
-                 partition by coalesce('id:'||event.salesperson_person_id::text,'legacy:'||event.salesperson_name),event.order_id
+               sum(credit.attributed_amount) over(
+                 partition by coalesce('id:'||credit.salesperson_person_id::text,'legacy:'||credit.salesperson_name),event.order_id
                )::numeric(14,2)::text as order_actual_amount
        from performance_events event
+       join performance_event_attributions credit on credit.event_id=event.id and credit.group_unit_id=$2
        join performance_orders orders on orders.id=event.order_id
-       where event.accounting_month=$1::date and event.group_unit_id=$2
+       where event.accounting_month=$1::date
      )
      select (select name from selected_group) as group_name,
             (select goal_id from active_goal) as goal_id,
@@ -755,14 +780,19 @@ async function loadOrganizationAchievementHierarchy(
 
 export const ORGANIZATION_ACHIEVEMENT_SQL =
     `with scope_events as (
-       select event.*,orders.qingflow_order_no,orders.customer_name,
-              coalesce('id:'||event.department_unit_id::text,'legacy:'||coalesce(event.department_name,'待补齐组织归属')) as department_key,
-              coalesce('id:'||event.group_unit_id::text,'legacy:'||coalesce(event.group_name,'待补齐小组')) as group_key,
-              coalesce('id:'||event.salesperson_person_id::text,'legacy:'||event.salesperson_name) as person_key
+       select event.id,event.order_id,event.event_type,credit.attributed_amount as delta_amount,
+              event.resulting_current_revenue,event.resulting_counted_amount,event.accounting_month,event.occurred_on,
+              event.order_sequence,event.reason,orders.qingflow_order_no,orders.customer_name,
+              credit.department_unit_id,credit.department_name,credit.group_unit_id,credit.group_name,
+              credit.salesperson_person_id,credit.salesperson_name,
+              coalesce('id:'||credit.department_unit_id::text,'legacy:'||coalesce(credit.department_name,'待补齐组织归属')) as department_key,
+              coalesce('id:'||credit.group_unit_id::text,'legacy:'||coalesce(credit.group_name,'待补齐小组')) as group_key,
+              coalesce('id:'||credit.salesperson_person_id::text,'legacy:'||credit.salesperson_name) as person_key
        from performance_events event
+       join performance_event_attributions credit on credit.event_id=event.id
        join performance_orders orders on orders.id=event.order_id
        where event.accounting_month=$1::date
-         and ($3::boolean or event.department_unit_id=any($2::bigint[]))
+         and ($3::boolean or credit.department_unit_id=any($2::bigint[]))
      ),active_department_goals as (
        select distinct on (goal.org_unit_id) goal.id::text as goal_id,goal.org_unit_id,
               version.amount::numeric(14,2) as target_amount
@@ -940,6 +970,7 @@ function commandFromBody(body: z.infer<typeof eventSchema>): PerformanceCommand 
 
 function allowedActions(lifecycle: OrderRow["lifecycle_state"]): string[] {
   if (lifecycle === "active") return ["revenue_change", "pause"];
+  if (lifecycle === "receivable_pending") return ["revenue_change"];
   if (lifecycle === "paused") return ["restart"];
   if (lifecycle === "zero") return ["first_include"];
   return [];
@@ -955,10 +986,17 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
   app.get("/api/performance/people", async (request, reply) => {
     const denied = requireEditor(request, reply);
     if (denied) return denied;
+    const parsed = z.object({ occurredOn: dateSchema.optional() }).safeParse(request.query);
+    if (!parsed.success) return reply.code(400).send({ message: "日期格式无效" });
+    const occurredOn = parsed.data.occurredOn ?? businessDate(clock());
     const result = await db.query(
-      `select distinct p.id::text as id,p.display_name as "displayName"
+      `select p.id::text as id,p.display_name as "displayName",department.name as "departmentName",team.name as "groupName"
        from people p join org_memberships m on m.person_id=p.id
+       join org_units department on department.id=m.department_id and department.unit_type='department'
+       join org_units team on team.id=m.group_id and team.unit_type='group'
+       where m.effective_from<=$1::date and (m.effective_to is null or m.effective_to>=$1::date)
        order by "displayName",id`,
+      [occurredOn],
     );
     return { people: result.rows };
   });
@@ -986,12 +1024,22 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
         return reply.code(403).send({ message: "当前角色没有业务查看权限" });
       }
       const result = await client.query<PerformanceAnalysisRow>(
-        `with scoped_analysis as materialized (
-           select e.delta_amount,dimensions.event_id as dimensions_event_id,
+        `with monthly_events as materialized (
+           select id from performance_events where accounting_month=$1::date
+         ), scoped_credits as materialized (
+           select credit.event_id,credit.attributed_amount
+           from performance_event_attributions credit
+           where ${performanceAttributionScopeSql("credit", 2)}
+         ), scoped_amounts as materialized (
+           select scoped_credits.event_id,sum(scoped_credits.attributed_amount)::numeric(14,2) as delta_amount
+           from scoped_credits join monthly_events on monthly_events.id=scoped_credits.event_id
+           group by scoped_credits.event_id
+         ),
+         scoped_analysis as materialized (
+           select scoped_amounts.delta_amount,dimensions.event_id as dimensions_event_id,
                   dimensions.business_region_code,dimensions.customer_unit
-           from performance_events e
-           left join performance_event_analysis_dimensions dimensions on dimensions.event_id=e.id
-           where e.accounting_month=$1::date and ${performanceScopeSql("e", 2)}
+           from scoped_amounts
+           left join performance_event_analysis_dimensions dimensions on dimensions.event_id=scoped_amounts.event_id
          ), summary as (
            select count(*)::bigint as ledger_count,
                   coalesce(sum(delta_amount),0.00) as ledger_amount,
@@ -1104,14 +1152,17 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
         const result = await client.query<AnalysisCustomersRow>(
           `with dimension_cutoff as (
              select coalesce($10::bigint,max(dimension_sequence)) as sequence from performance_event_analysis_dimensions
+           ), monthly_events as materialized (
+             select id from performance_events where accounting_month=$1::date
+           ), scoped_amounts as materialized (${scopedEventAmountsSql(3)}
            ), raw_scoped_analysis as materialized (
-             select e.id as event_id,e.delta_amount,dimensions.customer_unit
-             from performance_events e
+             select e.id as event_id,scoped_amounts.delta_amount,dimensions.customer_unit
+             from monthly_events e
+             join scoped_amounts on scoped_amounts.event_id=e.id
              join performance_event_analysis_dimensions dimensions on dimensions.event_id=e.id
              cross join dimension_cutoff
-             where e.accounting_month=$1::date and dimensions.business_region_code=$2
+             where dimensions.business_region_code=$2
                and dimensions.dimension_sequence<=dimension_cutoff.sequence
-               and ${performanceScopeSql("e", 3)}
            ), cutoff as (
              select coalesce($9::bigint,max(event_id)) as event_id from raw_scoped_analysis
            ), scoped_analysis as materialized (
@@ -1163,13 +1214,16 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
       }
       if (parsed.data.level === "months") {
         const result = await client.query<AnalysisMonthsRow>(
-          `with scoped_analysis as materialized (
-             select to_char(e.accounting_month,'YYYY-MM') as month,e.delta_amount
-             from performance_events e
+          `with yearly_events as materialized (
+             select id,accounting_month from performance_events
+             where accounting_month >= $1::date and accounting_month < $1::date + interval '1 year'
+           ), scoped_amounts as materialized (${scopedEventAmountsSql(4)}),
+           scoped_analysis as materialized (
+             select to_char(e.accounting_month,'YYYY-MM') as month,scoped_amounts.delta_amount
+             from yearly_events e
+             join scoped_amounts on scoped_amounts.event_id=e.id
              join performance_event_analysis_dimensions dimensions on dimensions.event_id=e.id
-             where e.accounting_month >= $1::date and e.accounting_month < $1::date + interval '1 year'
-               and dimensions.business_region_code=$2 and dimensions.customer_unit=$3
-               and ${performanceScopeSql("e", 4)}
+             where dimensions.business_region_code=$2 and dimensions.customer_unit=$3
            ), months as (
              select month,count(*)::bigint as event_count,sum(delta_amount) as total_amount
              from scoped_analysis group by month
@@ -1203,9 +1257,12 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
       const result = await client.query<AnalysisEventsPageRow>(
         `with dimension_cutoff as (
            select coalesce($10::bigint,max(dimension_sequence)) as sequence from performance_event_analysis_dimensions
+         ), monthly_events as materialized (
+           select * from performance_events where accounting_month=$1::date
+         ), scoped_amounts as materialized (${scopedEventAmountsSql(4)}
          ), raw_scoped_analysis as materialized (
            select e.id as "__eventId",e.id::text,e.order_id::text as "orderId",orders.qingflow_order_no as "orderNo",
-                  orders.customer_name as "customerName",e.event_type as "eventType",e.delta_amount::text as "deltaAmount",
+                  orders.customer_name as "customerName",e.event_type as "eventType",scoped_amounts.delta_amount::text as "deltaAmount",
                   e.resulting_current_revenue::text as "resultingCurrentRevenue",
                   e.resulting_counted_amount::text as "resultingCountedAmount",
                   ${resultingLifecycleStateSql("e")} as "resultingLifecycleState",
@@ -1213,13 +1270,13 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
                   e.salesperson_name as "salespersonName",e.department_name as "departmentName",e.group_name as "groupName",
                   e.order_sequence as sequence,dimensions.business_region_code as "businessRegionCode",
                   dimensions.business_region_source_text as "businessRegionSourceText",dimensions.customer_unit as "customerUnit"
-           from performance_events e
+           from monthly_events e
+           join scoped_amounts on scoped_amounts.event_id=e.id
            join performance_event_analysis_dimensions dimensions on dimensions.event_id=e.id
            join performance_orders orders on orders.id=e.order_id
            cross join dimension_cutoff
-           where e.accounting_month=$1::date and dimensions.business_region_code=$2 and dimensions.customer_unit=$3
+           where dimensions.business_region_code=$2 and dimensions.customer_unit=$3
              and dimensions.dimension_sequence<=dimension_cutoff.sequence
-             and ${performanceScopeSql("e", 4)}
          ), cutoff as (
            select coalesce($9::bigint,max("__eventId")) as event_id from raw_scoped_analysis
          ), scoped_analysis as materialized (
@@ -1302,27 +1359,31 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
       const canViewSalesAchievement = hasAnyRole(currentUser, SALES_ACHIEVEMENT_ROLES);
       const canViewDepartmentAchievement = hasAnyRole(currentUser, DEPARTMENT_ACHIEVEMENT_ROLES);
       const metrics = await client.query<{ total: string; event_count: string; negative_total: string }>(
-        `select coalesce(sum(delta_amount),0)::text as total, count(*)::text as event_count,
-                coalesce(sum(delta_amount) filter (where delta_amount < 0),0)::text as negative_total
-         from performance_events e where accounting_month = $1 and ${performanceScopeSql("e", 2)}`, [`${month}-01`, ...scopeValues]);
+        `select coalesce(sum(credit.attributed_amount),0)::text as total,count(distinct e.id)::text as event_count,
+                coalesce(sum(credit.attributed_amount) filter (where credit.attributed_amount < 0),0)::text as negative_total
+         from performance_events e join performance_event_attributions credit on credit.event_id=e.id
+         where e.accounting_month = $1 and ${performanceAttributionScopeSql("credit", 2)}`, [`${month}-01`, ...scopeValues]);
       const monthly = await client.query<{ month: string; total: string }>(
-        `select to_char(accounting_month, 'YYYY-MM') as month, sum(delta_amount)::text as total
-         from performance_events e where extract(year from accounting_month) = extract(year from $1::date)
-           and ${performanceScopeSql("e", 2)}
-         group by accounting_month order by accounting_month`, [`${month}-01`, ...scopeValues]);
+        `select to_char(e.accounting_month, 'YYYY-MM') as month,sum(credit.attributed_amount)::text as total
+         from performance_events e join performance_event_attributions credit on credit.event_id=e.id
+         where extract(year from e.accounting_month) = extract(year from $1::date)
+           and ${performanceAttributionScopeSql("credit", 2)}
+         group by e.accounting_month order by e.accounting_month`, [`${month}-01`, ...scopeValues]);
       const groups = await client.query<{ id: string; name: string; total: string }>(
-        `select coalesce(e.group_unit_id::text,'legacy:'||e.group_name) as id,
-                string_agg(distinct e.group_name,' / ' order by e.group_name) as name,
-                sum(e.delta_amount)::text as total
-         from performance_events e where e.accounting_month = $1 and ${performanceScopeSql("e", 2)}
-         group by coalesce(e.group_unit_id::text,'legacy:'||e.group_name)
-         order by sum(e.delta_amount) desc limit 5`, [`${month}-01`, ...scopeValues]);
+        `select coalesce(credit.group_unit_id::text,'legacy:'||credit.group_name) as id,
+                string_agg(distinct credit.group_name,' / ' order by credit.group_name) as name,
+                sum(credit.attributed_amount)::text as total
+         from performance_events e join performance_event_attributions credit on credit.event_id=e.id
+         where e.accounting_month = $1 and ${performanceAttributionScopeSql("credit", 2)}
+         group by coalesce(credit.group_unit_id::text,'legacy:'||credit.group_name)
+         order by sum(credit.attributed_amount) desc limit 5`, [`${month}-01`, ...scopeValues]);
       const recent = await client.query(
-        `select o.qingflow_order_no as "orderNo", e.salesperson_name as "salespersonName",
+        `select o.qingflow_order_no as "orderNo",credit.salesperson_name as "salespersonName",
                 e.event_type as "eventType", to_char(e.accounting_month, 'YYYY-MM') as month,
-                e.delta_amount::text as amount, e.group_name as "groupName"
-         from performance_events e join performance_orders o on o.id = e.order_id
-         where e.accounting_month=$1 and ${performanceScopeSql("e", 2)}
+                credit.attributed_amount::text as amount,credit.group_name as "groupName"
+         from performance_events e join performance_event_attributions credit on credit.event_id=e.id
+         join performance_orders o on o.id = e.order_id
+         where e.accounting_month=$1 and ${performanceAttributionScopeSql("credit", 2)}
          order by e.created_at desc, e.id desc limit 8`, [`${month}-01`, ...scopeValues]);
       const pending = await client.query<{ count: string }>(
         `select count(*)::text as count from goal_versions v join goals g on g.id=v.goal_id
@@ -1457,11 +1518,13 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
            select performance_orders.id as "__id",performance_orders.id::text,performance_orders.created_at as "__cursorCreatedAt",
                   qingflow_order_no as "orderNo",customer_name as "customerName",customer_unit as "customerUnit",
                   performance_orders.salesperson_name as "salespersonName",service_type as "serviceType",
+                  business_region_source_text as "businessRegionSourceText",business_region_code as "businessRegionCode",
+                  performance_orders.collaborator_name as "collaboratorName",performance_orders.collaboration_ratio::text as "collaborationRatio",
                   source_received_on as "sourceReceivedOn",original_amount::text as "originalAmount",
                   current_revenue::text as "currentRevenue",counted_amount::text as "countedAmount",
                   lifecycle_state as "lifecycleState",posted_at as "postedAt",
                   latest.department_name as "departmentName",latest.group_name as "groupName",
-                  latest.leader_name as "leaderName",latest.supervisor_name as "supervisorName"
+                  latest.leader_name as "leaderName",latest.supervisor_name as "supervisorName",latest.note
            from performance_orders
            ${latestOrderEventJoinSql("performance_orders", "latest")}
            cross join cutoff
@@ -1491,11 +1554,13 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
     const result = await db.query<OrderListRow>(
       `select id::text, created_at as "__cursorCreatedAt",qingflow_order_no as "orderNo", customer_name as "customerName",
               customer_unit as "customerUnit", performance_orders.salesperson_name as "salespersonName", service_type as "serviceType",
+              business_region_source_text as "businessRegionSourceText",business_region_code as "businessRegionCode",
+              performance_orders.collaborator_name as "collaboratorName",performance_orders.collaboration_ratio::text as "collaborationRatio",
               source_received_on as "sourceReceivedOn", original_amount::text as "originalAmount",
               current_revenue::text as "currentRevenue", counted_amount::text as "countedAmount",
               lifecycle_state as "lifecycleState", posted_at as "postedAt",
               latest.department_name as "departmentName", latest.group_name as "groupName",
-              latest.leader_name as "leaderName", latest.supervisor_name as "supervisorName"
+              latest.leader_name as "leaderName", latest.supervisor_name as "supervisorName",latest.note
        from performance_orders
        ${latestOrderEventJoinSql("performance_orders", "latest")}
        where ${performanceScopeSql("latest", 2)}
@@ -1553,6 +1618,9 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
               e.occurred_on::text as "occurredOn", e.reason, e.salesperson_name as "salespersonName",
               e.department_name as "departmentName", e.group_name as "groupName", e.leader_name as "leaderName",
               e.supervisor_name as "supervisorName", e.occurred_at as "occurredAt", e.order_sequence as sequence,
+              e.service_type as "serviceType",e.collaborator_name as "collaboratorName",
+              e.collaboration_ratio::text as "collaborationRatio",e.collaborator_department_name as "collaboratorDepartmentName",
+              e.collaborator_group_name as "collaboratorGroupName",
               dimensions.business_region_code as "businessRegionCode",
               dimensions.business_region_source_text as "businessRegionSourceText",
               dimensions.customer_unit as "customerUnit",
@@ -1586,15 +1654,19 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
       await client.query("begin");
       await assertAccountingPeriodOpen(client, accountingMonth(input.sourceReceivedOn));
       const organization = await resolveOrganization(client, String(input.salespersonPersonId), input.sourceReceivedOn);
+      const collaboratorOrganization = input.collaboratorPersonId
+        ? await resolveOrganization(client, String(input.collaboratorPersonId), input.sourceReceivedOn)
+        : null;
       const order = await client.query<{ id: string }>(
         `insert into performance_orders
           (qingflow_order_no, customer_name, customer_unit, business_region_source_text, business_region_code,
-           salesperson_person_id, salesperson_name, service_type, source_received_on,
-            original_amount, current_revenue, counted_amount, lifecycle_state, created_by, posted_at)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,now()) returning id::text`,
+           salesperson_person_id, salesperson_name, service_type, collaborator_person_id,collaborator_name,collaboration_ratio,
+           source_received_on,original_amount,current_revenue,counted_amount,lifecycle_state,created_by,posted_at)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,now()) returning id::text`,
         [input.orderNo, input.customerName, input.customerUnit, input.businessRegionSourceText, input.businessRegionCode,
-         organization.personId, organization.salespersonName, input.serviceType || null, input.sourceReceivedOn,
-         input.amount, decision.next.currentRevenue, decision.next.countedAmount, decision.next.lifecycle, request.currentUser!.id],
+         organization.personId, organization.salespersonName, input.serviceType || null,
+         collaboratorOrganization?.personId ?? null,collaboratorOrganization?.salespersonName ?? null,input.collaborationRatio ?? null,
+         input.sourceReceivedOn,input.amount,decision.next.currentRevenue,decision.next.countedAmount,decision.next.lifecycle,request.currentUser!.id],
       );
       const orderId = order.rows[0]!.id;
       const event = await client.query<{id:string}>(
@@ -1602,14 +1674,23 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
           (order_id, event_type, delta_amount, resulting_current_revenue, resulting_counted_amount,
            accounting_month, occurred_on, reason, salesperson_name, department_name, group_name,
            leader_name, supervisor_name, created_by, salesperson_person_id, department_unit_id,
-           group_unit_id, leader_person_id, supervisor_person_id)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+           group_unit_id, leader_person_id, supervisor_person_id,service_type,
+           collaborator_person_id,collaborator_name,collaboration_ratio,collaborator_department_unit_id,collaborator_department_name,
+           collaborator_group_unit_id,collaborator_group_name,collaborator_leader_person_id,collaborator_leader_name,
+           collaborator_supervisor_person_id,collaborator_supervisor_name)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
+                 $21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31)
          returning id::text`,
         [orderId, decision.eventType, decision.deltaAmount, decision.next.currentRevenue,
          decision.next.countedAmount, accountingMonth(input.sourceReceivedOn), input.sourceReceivedOn, input.reason,
          organization.salespersonName, organization.departmentName, organization.groupName, organization.leaderName,
          organization.supervisorName, request.currentUser!.id, organization.personId, organization.departmentId,
-         organization.groupId, organization.leaderPersonId, organization.supervisorPersonId],
+         organization.groupId, organization.leaderPersonId, organization.supervisorPersonId,input.serviceType || null,
+         collaboratorOrganization?.personId ?? null,collaboratorOrganization?.salespersonName ?? null,input.collaborationRatio ?? null,
+         collaboratorOrganization?.departmentId ?? null,collaboratorOrganization?.departmentName ?? null,
+         collaboratorOrganization?.groupId ?? null,collaboratorOrganization?.groupName ?? null,
+         collaboratorOrganization?.leaderPersonId ?? null,collaboratorOrganization?.leaderName ?? null,
+         collaboratorOrganization?.supervisorPersonId ?? null,collaboratorOrganization?.supervisorName ?? null],
       );
       await recordEventAnalysisDimensions(client,event.rows[0]!.id,{
         businessRegionCode:input.businessRegionCode,
@@ -1652,7 +1733,7 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
       await client.query("begin");
       const found = await client.query<OrderRow>(
         `select id::text, qingflow_order_no, customer_name, customer_unit, business_region_source_text, business_region_code,
-                salesperson_person_id::text, salesperson_name, service_type,
+                salesperson_person_id::text, salesperson_name, service_type,collaborator_person_id::text,collaborator_name,collaboration_ratio::text,
                 source_received_on::text, original_amount::text, current_revenue::text,
                 counted_amount::text, lifecycle_state
          from performance_orders where id = $1 for update`,
@@ -1703,19 +1784,32 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
       const eventAccountingMonth=correction?.periodMonth ?? accountingMonth(occurredOn);
       if (!correction) await assertAccountingPeriodOpen(client, eventAccountingMonth);
       const organization = await resolveOrganization(client, order.salesperson_person_id, occurredOn);
+      const collaboratorOrganization = order.collaborator_person_id
+        ? await resolveOrganization(client, order.collaborator_person_id, occurredOn)
+        : null;
       const inserted = await client.query<{ id: string }>(
         `insert into performance_events
           (order_id, event_type, delta_amount, resulting_current_revenue, resulting_counted_amount,
            accounting_month, occurred_on, reason, salesperson_name, department_name, group_name,
            leader_name, supervisor_name, created_by, salesperson_person_id, department_unit_id,
-           group_unit_id, leader_person_id, supervisor_person_id,occurred_at,idempotency_key,request_fingerprint)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+           group_unit_id, leader_person_id, supervisor_person_id,service_type,
+           collaborator_person_id,collaborator_name,collaboration_ratio,collaborator_department_unit_id,collaborator_department_name,
+           collaborator_group_unit_id,collaborator_group_name,collaborator_leader_person_id,collaborator_leader_name,
+           collaborator_supervisor_person_id,collaborator_supervisor_name,
+           occurred_at,idempotency_key,request_fingerprint)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
+                 $21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34)
          returning id::text`,
         [params.data.id, decision.eventType, decision.deltaAmount, decision.next.currentRevenue,
          decision.next.countedAmount, eventAccountingMonth, occurredOn,
          parsed.data.reason, organization.salespersonName, organization.departmentName, organization.groupName,
          organization.leaderName, organization.supervisorName, request.currentUser!.id, organization.personId,
-         organization.departmentId, organization.groupId, organization.leaderPersonId, organization.supervisorPersonId,
+         organization.departmentId, organization.groupId, organization.leaderPersonId, organization.supervisorPersonId,order.service_type,
+         collaboratorOrganization?.personId ?? null,collaboratorOrganization?.salespersonName ?? null,order.collaboration_ratio ? Number(order.collaboration_ratio) : null,
+         collaboratorOrganization?.departmentId ?? null,collaboratorOrganization?.departmentName ?? null,
+         collaboratorOrganization?.groupId ?? null,collaboratorOrganization?.groupName ?? null,
+         collaboratorOrganization?.leaderPersonId ?? null,collaboratorOrganization?.leaderName ?? null,
+         collaboratorOrganization?.supervisorPersonId ?? null,collaboratorOrganization?.supervisorName ?? null,
          operationTime.toISOString(),parsed.data.idempotencyKey,fingerprint],
       );
       await recordEventAnalysisDimensions(client,inserted.rows[0]!.id,{
