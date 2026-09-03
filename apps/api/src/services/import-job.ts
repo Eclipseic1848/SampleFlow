@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { PoolClient } from "pg";
 import type { Database } from "../db.js";
-import { postgresBigintIdSchema } from "../validation.js";
+import { isSignedMoney, postgresBigintIdSchema } from "../validation.js";
 import { businessDate } from "../domain/business-time.js";
 import { AccountingPeriodError, accountingMonth, consumeApprovedCorrection, lockApprovedCorrection } from "../modules/accounting-periods.js";
 import type { OrganizationSnapshot } from "../modules/organization.js";
@@ -16,13 +16,18 @@ export type ImportSourceRow = Readonly<{
   businessSequence?: number;
   correctionRequestId?: string;
   sourceRecordId?: string;
+  sourceMonth?: string;
   orderNo: string;
   occurredOn: string;
   customerName: string;
   customerUnit: string;
   businessRegionSourceText: string;
   salespersonSourceKey: string;
+  sourceDepartment?: string;
+  sourceGroup?: string;
   serviceType: string;
+  collaboratorSourceKey?: string;
+  collaborationRatio?: number;
   eventType: string;
   amount: number;
   reason: string;
@@ -42,6 +47,8 @@ type NormalizedRow = Omit<ImportSourceRow, "eventType"> & Readonly<{
   businessRegionCode: string;
   personId: string;
   organization: OrganizationSnapshot;
+  collaboratorPersonId?: string;
+  collaboratorOrganization?: OrganizationSnapshot;
 }>;
 
 type ExistingImportRecord = Readonly<{
@@ -107,7 +114,7 @@ type ImportConfigRow = {
   business_region_mapping: Record<string, string>;
   expected_reconciliation: ImportReconciliationSummary | null;
   allow_legacy_source_key: boolean;
-  fixed_event_type: "legacy_adjustment" | null;
+  fixed_event_type: "initial" | "legacy_adjustment" | null;
 };
 
 export class ImportJobError extends Error {}
@@ -122,8 +129,9 @@ function sha256(value: Uint8Array | string): string {
 
 function sourcePayloadFingerprint(row: ImportSourceRow): string {
   return sha256(JSON.stringify([
-    row.orderNo, row.occurredOn, row.businessSequence ?? null, row.correctionRequestId ?? null, row.customerName, row.customerUnit, row.businessRegionSourceText,
-    row.salespersonSourceKey, row.serviceType, row.eventType, row.amount, row.reason,
+    row.orderNo, row.occurredOn, row.sourceMonth ?? null, row.businessSequence ?? null, row.correctionRequestId ?? null, row.customerName, row.customerUnit, row.businessRegionSourceText,
+    row.salespersonSourceKey, row.sourceDepartment ?? null, row.sourceGroup ?? null, row.serviceType,
+    row.collaboratorSourceKey ?? null, row.collaborationRatio ?? null, row.eventType, row.amount, row.reason,
   ]));
 }
 
@@ -196,6 +204,29 @@ async function loadOrganizationSnapshots(
     supervisorPersonId: row.supervisor_person_id,
     supervisorName: row.supervisor_name,
   }]));
+}
+
+async function loadPeopleBySourceIdentity(
+  database: Pick<PoolClient, "query">,
+  sourceIdentities: readonly string[],
+): Promise<ReadonlyMap<string, string>> {
+  const requested = [...new Set(sourceIdentities.filter(Boolean))];
+  if (!requested.length) return new Map();
+  const result = await database.query<{ id: string; source_key: string; display_name: string }>(
+    "select id::text,source_key,display_name from people where source_key=any($1::text[]) or display_name=any($1::text[])",
+    [requested],
+  );
+  const resolved = new Map<string, string>();
+  for (const identity of requested) {
+    const sourceKeyMatch = result.rows.find((person) => person.source_key === identity);
+    if (sourceKeyMatch) {
+      resolved.set(identity, sourceKeyMatch.id);
+      continue;
+    }
+    const displayNameMatches = result.rows.filter((person) => person.display_name === identity);
+    if (displayNameMatches.length === 1) resolved.set(identity, displayNameMatches[0]!.id);
+  }
+  return resolved;
 }
 
 async function loadExistingImportRecords(database: Pick<PoolClient, "query">, rows: readonly NormalizedRow[]): Promise<ExistingImportRecord[]> {
@@ -456,12 +487,8 @@ function normalizeRow(
   if (!validDate(row.occurredOn) || row.occurredOn > today) {
     addIssue(issues, row, "OCCURRED_ON_INVALID", "发生日期无效或晚于当前业务日");
   }
-  const centValue = row.amount * 100;
-  if (!Number.isFinite(row.amount) || Math.abs(row.amount) > 99_999_999_999.99 || Math.abs(centValue - Math.round(centValue)) > 1e-7) {
+  if (!isSignedMoney(row.amount)) {
     addIssue(issues, row, "AMOUNT_INVALID", "金额必须是有效的两位小数范围数字");
-  }
-  if ((row.eventType === "initial" || row.eventType === "revenue_change") && row.amount < 0) {
-    addIssue(issues, row, "INITIAL_AMOUNT_NEGATIVE", "首次订单金额不能为负数");
   }
   if (row.eventType === "first_include" && row.amount <= 0) addIssue(issues, row, "FIRST_INCLUDE_AMOUNT_INVALID", "首次计入金额必须大于零");
   if ((row.eventType === "pause" || row.eventType === "restart") && row.amount !== 0) addIssue(issues, row, "STATE_EVENT_AMOUNT_INVALID", "暂停或重启事件的金额必须为 0");
@@ -480,7 +507,31 @@ function normalizeRow(
   if (personId && validDate(row.occurredOn) && !organization) {
     addIssue(issues, row, "ORGANIZATION_NOT_RESOLVED", "发生日期找不到唯一有效组织任职及负责人");
   }
-  if (!businessRegionCode || !personId || !organization || !eventType) return null;
+  if (row.sourceMonth !== undefined && validDate(row.occurredOn) && row.sourceMonth !== `${Number(row.occurredOn.slice(5, 7))}月`) {
+    addIssue(issues, row, "SOURCE_MONTH_MISMATCH", "收样月份必须与日期月份一致");
+  }
+  if (organization && row.sourceDepartment !== undefined && row.sourceDepartment !== organization.departmentName) {
+    addIssue(issues, row, "SOURCE_DEPARTMENT_MISMATCH", "部门与日期当天的组织任职不一致");
+  }
+  if (organization && row.sourceGroup !== undefined && row.sourceGroup !== organization.groupName) {
+    addIssue(issues, row, "SOURCE_GROUP_MISMATCH", "组别与日期当天的组织任职不一致");
+  }
+  const hasCollaborator = Boolean(row.collaboratorSourceKey);
+  const hasRatio = row.collaborationRatio !== undefined;
+  if (hasCollaborator !== hasRatio) addIssue(issues, row, "COLLABORATION_INCOMPLETE", "协作人和协作比例必须同时填写或同时留空");
+  if (hasRatio && (!Number.isFinite(row.collaborationRatio) || row.collaborationRatio! <= 0 || row.collaborationRatio! >= 1 || Math.abs(row.collaborationRatio! * 1_000_000 - Math.round(row.collaborationRatio! * 1_000_000)) > 1e-7)) {
+    addIssue(issues, row, "COLLABORATION_RATIO_INVALID", "协作比例必须大于 0、小于 1，最多保留六位小数");
+  }
+  const collaboratorPersonId = hasCollaborator ? peopleBySourceKey.get(row.collaboratorSourceKey!) : undefined;
+  if (hasCollaborator && !collaboratorPersonId) addIssue(issues, row, "COLLABORATOR_NOT_FOUND", "协作人来源标识无法唯一解析");
+  if (collaboratorPersonId && collaboratorPersonId === personId) addIssue(issues, row, "COLLABORATOR_EQUALS_PRIMARY", "协作人不能与业务员相同");
+  const collaboratorOrganization = collaboratorPersonId && validDate(row.occurredOn)
+    ? organizations.get(organizationKey(collaboratorPersonId, row.occurredOn))
+    : undefined;
+  if (collaboratorPersonId && validDate(row.occurredOn) && !collaboratorOrganization) {
+    addIssue(issues, row, "COLLABORATOR_ORGANIZATION_NOT_RESOLVED", "发生日期找不到协作人的唯一有效组织任职及负责人");
+  }
+  if (!businessRegionCode || !personId || !organization || !eventType || (hasCollaborator && (!collaboratorPersonId || !collaboratorOrganization))) return null;
 
   const sourceKey = row.sourceRecordId
     ? `${config.config_key}:${row.sourceRecordId}`
@@ -492,7 +543,10 @@ function normalizeRow(
     row.amount,
     row.reason,
   ]));
-  return { ...row, eventType, sourceKey, duplicateFingerprint, businessRegionCode, personId, organization };
+  return {
+    ...row, eventType, sourceKey, duplicateFingerprint, businessRegionCode, personId, organization,
+    ...(collaboratorPersonId && collaboratorOrganization ? { collaboratorPersonId, collaboratorOrganization } : {}),
+  };
 }
 
 function normalizeDimensionBackfillRow(
@@ -514,8 +568,7 @@ function normalizeDimensionBackfillRow(
   if (!row.customerUnit || row.customerUnit.length > 300) addIssue(issues, row, "CUSTOMER_UNIT_INVALID", "客户单位必须是 1 至 300 个字符");
   if (!row.businessRegionSourceText || row.businessRegionSourceText.length > 100) addIssue(issues, row, "BUSINESS_REGION_SOURCE_INVALID", "业务区域原文必须是 1 至 100 个字符");
   if (row.reason.length > 500) addIssue(issues, row, "REASON_INVALID", "原因不能超过 500 个字符");
-  const centValue = row.amount * 100;
-  if (!Number.isFinite(row.amount) || Math.abs(row.amount) > 99_999_999_999.99 || Math.abs(centValue - Math.round(centValue)) > 1e-7) {
+  if (!isSignedMoney(row.amount)) {
     addIssue(issues, row, "AMOUNT_INVALID", "金额必须是有效的两位小数范围数字");
   }
   const businessRegionCode = config.business_region_mapping[row.businessRegionSourceText];
@@ -666,14 +719,16 @@ export async function preflightImportRows(database: Database, input: Readonly<{
   const orderNumberForms = new Map<string, string>();
   const initialOrderNos = new Set<string>();
   const reconciliationSourceKeys = new Set<string>();
-  const sourceKeys = [...new Set(input.rows.map((row) => row.salespersonSourceKey))];
-  const people = sourceKeys.length
-    ? await database.query<{ id: string; source_key: string }>("select id::text,source_key from people where source_key=any($1::text[])", [sourceKeys])
-    : { rows: [] };
-  const peopleBySourceKey = new Map(people.rows.map((person) => [person.source_key, person.id]));
+  const sourceKeys = [...new Set(input.rows.flatMap((row) => [row.salespersonSourceKey, row.collaboratorSourceKey ?? ""]))];
+  const peopleBySourceKey = await loadPeopleBySourceIdentity(database, sourceKeys);
   const organizationPairs = input.rows.flatMap((row) => {
     const personId = peopleBySourceKey.get(row.salespersonSourceKey);
-    return personId && validDate(row.occurredOn) ? [{ personId, occurredOn: row.occurredOn }] : [];
+    const collaboratorPersonId = row.collaboratorSourceKey ? peopleBySourceKey.get(row.collaboratorSourceKey) : undefined;
+    if (!validDate(row.occurredOn)) return [];
+    return [
+      ...(personId ? [{ personId, occurredOn: row.occurredOn }] : []),
+      ...(collaboratorPersonId ? [{ personId: collaboratorPersonId, occurredOn: row.occurredOn }] : []),
+    ];
   });
   const organizations = await loadOrganizationSnapshots(database, organizationPairs);
   const today = businessDate(new Date());
@@ -753,7 +808,8 @@ export async function preflightImportRows(database: Database, input: Readonly<{
   if (normalized.length) {
     const existingFacts = await database.query<Record<string, unknown>>(
       `select qingflow_order_no,customer_name,customer_unit,business_region_source_text,business_region_code,
-              salesperson_person_id::text,service_type,source_received_on::text,original_amount::text,
+              salesperson_person_id::text,service_type,collaborator_person_id::text,collaboration_ratio::text,
+              source_received_on::text,original_amount::text,
               current_revenue::text,counted_amount::text,lifecycle_state,
               (select count(*)::int from performance_events where order_id=performance_orders.id and event_type<>'legacy_adjustment') non_legacy_event_count
        from performance_orders where qingflow_order_no=any($1::text[])`,
@@ -1093,6 +1149,12 @@ function orderFactDifferences(existing: Record<string, unknown>, row: Normalized
   if (existing.business_region_code !== row.businessRegionCode) differences.push("businessRegionCode");
   if (String(existing.salesperson_person_id) !== row.personId) differences.push("salespersonPersonId");
   if (String(existing.service_type ?? "") !== row.serviceType) differences.push("serviceType");
+  if (row.eventType === "initial" || row.collaboratorPersonId !== undefined || row.collaborationRatio !== undefined) {
+    if (String(existing.collaborator_person_id ?? "") !== (row.collaboratorPersonId ?? "")) differences.push("collaboratorPersonId");
+    if (existing.collaboration_ratio === null || existing.collaboration_ratio === undefined
+      ? row.collaborationRatio !== undefined
+      : Number(existing.collaboration_ratio) !== row.collaborationRatio) differences.push("collaborationRatio");
+  }
   if (row.eventType === "initial") {
     if (String(existing.source_received_on).slice(0, 10) !== row.occurredOn) differences.push("sourceReceivedOn");
     if (Number(existing.original_amount) !== row.amount) differences.push("originalAmount");
@@ -1109,6 +1171,8 @@ function batchOrderFactDifferences(left: NormalizedRow, right: NormalizedRow): s
   if (left.businessRegionCode !== right.businessRegionCode) differences.push("businessRegionCode");
   if (left.personId !== right.personId) differences.push("salespersonPersonId");
   if (left.serviceType !== right.serviceType) differences.push("serviceType");
+  if (left.collaboratorPersonId !== right.collaboratorPersonId) differences.push("collaboratorPersonId");
+  if (left.collaborationRatio !== right.collaborationRatio) differences.push("collaborationRatio");
   return differences;
 }
 
@@ -1126,15 +1190,25 @@ async function insertEvent(
   const inserted = await client.query<{ id: string }>(
     `insert into performance_events(order_id,event_type,delta_amount,resulting_current_revenue,resulting_counted_amount,
        accounting_month,occurred_on,reason,salesperson_name,department_name,group_name,leader_name,supervisor_name,
-       created_by,salesperson_person_id,department_unit_id,group_unit_id,leader_person_id,supervisor_person_id,
+       created_by,salesperson_person_id,department_unit_id,group_unit_id,leader_person_id,supervisor_person_id,service_type,
+       collaborator_person_id,collaborator_name,collaboration_ratio,collaborator_department_unit_id,collaborator_department_name,
+       collaborator_group_unit_id,collaborator_group_name,collaborator_leader_person_id,collaborator_leader_name,
+       collaborator_supervisor_person_id,collaborator_supervisor_name,
        import_batch_id,source_file_sha256,source_sheet,source_row_number,source_record_id,source_key,source_business_sequence)
-     select $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,b.source_sha256,$21,$22,$23,$24,$25
-     from import_batches b where b.id=$20 returning id::text`,
+     select $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
+            $21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,b.source_sha256,$33,$34,$35,$36,$37
+     from import_batches b where b.id=$32 returning id::text`,
     [orderId, eventType, deltaAmount, resultingCurrentRevenue, resultingCountedAmount, accountingMonth(row.occurredOn), row.occurredOn,
      row.reason, row.organization.salespersonName, row.organization.departmentName, row.organization.groupName,
      row.organization.leaderName, row.organization.supervisorName, actorUserId, row.organization.personId,
      row.organization.departmentId, row.organization.groupId, row.organization.leaderPersonId,
-     row.organization.supervisorPersonId, batchId, row.sheet, row.rowNumber, row.sourceRecordId ?? null, row.sourceKey, row.businessSequence ?? null],
+     row.organization.supervisorPersonId, row.serviceType || null,
+     row.collaboratorOrganization?.personId ?? null, row.collaboratorOrganization?.salespersonName ?? null, row.collaborationRatio ?? null,
+     row.collaboratorOrganization?.departmentId ?? null, row.collaboratorOrganization?.departmentName ?? null,
+     row.collaboratorOrganization?.groupId ?? null, row.collaboratorOrganization?.groupName ?? null,
+     row.collaboratorOrganization?.leaderPersonId ?? null, row.collaboratorOrganization?.leaderName ?? null,
+     row.collaboratorOrganization?.supervisorPersonId ?? null, row.collaboratorOrganization?.supervisorName ?? null,
+     batchId, row.sheet, row.rowNumber, row.sourceRecordId ?? null, row.sourceKey, row.businessSequence ?? null],
   );
   const eventId=inserted.rows[0]!.id;
   await recordEventAnalysisDimensions(client,eventId,{
@@ -1354,11 +1428,21 @@ export async function confirmImportBatch(database: Database, batchId: string, ac
     const preflightRows = loaded.rows.map((item) => item.normalized_data);
     const batchRowIdsBySourceKey = new Map(loaded.rows.map((item) => [item.normalized_data.sourceKey, item.id]));
     ledgerAttempted = true;
-    const currentOrganizations = await loadOrganizationSnapshots(client, preflightRows.map((row) => ({ personId: row.personId, occurredOn: row.occurredOn })));
+    const currentOrganizations = await loadOrganizationSnapshots(client, preflightRows.flatMap((row) => [
+      { personId: row.personId, occurredOn: row.occurredOn },
+      ...(row.collaboratorPersonId ? [{ personId: row.collaboratorPersonId, occurredOn: row.occurredOn }] : []),
+    ]));
     for (const row of preflightRows) {
       const current = currentOrganizations.get(organizationKey(row.personId, row.occurredOn));
       if (!current || !sameOrganizationSnapshot(current, row.organization)) {
         throw new ImportJobError(`第 ${row.rowNumber} 行预检后的组织关系已变化，请重新预检`);
+      }
+      const currentCollaborator = row.collaboratorPersonId
+        ? currentOrganizations.get(organizationKey(row.collaboratorPersonId, row.occurredOn))
+        : undefined;
+      if (row.collaboratorPersonId && (!row.collaboratorOrganization || !currentCollaborator
+        || !sameOrganizationSnapshot(currentCollaborator, row.collaboratorOrganization))) {
+        throw new ImportJobError(`第 ${row.rowNumber} 行预检后的协作人组织关系已变化，请重新预检`);
       }
     }
     const concurrentDuplicates = await loadExistingImportRecords(client, preflightRows);
@@ -1403,6 +1487,7 @@ export async function confirmImportBatch(database: Database, batchId: string, ac
                 performance_order.customer_name,performance_order.customer_unit,
                 performance_order.business_region_source_text,performance_order.business_region_code,
                 performance_order.salesperson_person_id::text,performance_order.service_type,
+                performance_order.collaborator_person_id::text,performance_order.collaboration_ratio::text,
                 performance_order.source_received_on::text,performance_order.original_amount::text,
                 (select count(*)::int from performance_events where order_id=performance_order.id and event_type<>'legacy_adjustment') non_legacy_event_count
          from performance_events event join performance_orders performance_order on performance_order.id=event.order_id
@@ -1433,7 +1518,8 @@ export async function confirmImportBatch(database: Database, batchId: string, ac
     const existingOrders = orderNos.length
       ? await client.query<Record<string, unknown>>(
         `select id::text,qingflow_order_no,customer_name,customer_unit,business_region_source_text,business_region_code,
-                salesperson_person_id::text,service_type,source_received_on::text,original_amount::text,
+                salesperson_person_id::text,service_type,collaborator_person_id::text,collaboration_ratio::text,
+                source_received_on::text,original_amount::text,
                 current_revenue::text,counted_amount::text,lifecycle_state,
                 (select count(*)::int from performance_events where order_id=performance_orders.id) as event_count,
                 (select count(*)::int from performance_events where order_id=performance_orders.id and event_type<>'legacy_adjustment') non_legacy_event_count
@@ -1442,6 +1528,12 @@ export async function confirmImportBatch(database: Database, batchId: string, ac
       )
       : { rows: [] };
     const existingOrdersByOrderNo = new Map(existingOrders.rows.map((order) => [String(order.qingflow_order_no), order]));
+    const inheritedCollaboratorOrganizations = await loadOrganizationSnapshots(client, rows.flatMap((row) => {
+      const collaboratorPersonId = existingOrdersByOrderNo.get(row.orderNo)?.collaborator_person_id;
+      return collaboratorPersonId && !row.collaboratorPersonId
+        ? [{ personId: String(collaboratorPersonId), occurredOn: row.occurredOn }]
+        : [];
+    }));
     const sequenceHistory = await loadOrderSequenceHistory(client, [...normalOrderNos]);
     await assertAccountingPeriodsOpen(client, rows.flatMap((row) => row.correctionRequestId === undefined ? [accountingMonth(row.occurredOn)] : []));
 
@@ -1474,12 +1566,13 @@ export async function confirmImportBatch(database: Database, batchId: string, ac
       } else {
         const inserted = await client.query<{ id: string }>(
           `insert into performance_orders(qingflow_order_no,customer_name,customer_unit,business_region_source_text,business_region_code,
-             salesperson_person_id,salesperson_name,service_type,source_received_on,original_amount,current_revenue,counted_amount,
-             lifecycle_state,created_by,posted_at)
-           values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,0,0,$11,$12,now()) returning id::text`,
+             salesperson_person_id,salesperson_name,service_type,collaborator_person_id,collaborator_name,collaboration_ratio,
+             source_received_on,original_amount,current_revenue,counted_amount,lifecycle_state,created_by,posted_at)
+           values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,0,0,$14,$15,now()) returning id::text`,
           [orderNo, first.customerName, first.customerUnit, first.businessRegionSourceText, first.businessRegionCode,
-           first.organization.personId, first.organization.salespersonName, first.serviceType || null, first.occurredOn,
-           Math.max(0, first.amount), "draft", actorUserId],
+           first.organization.personId, first.organization.salespersonName, first.serviceType || null,
+           first.collaboratorPersonId ?? null, first.collaboratorOrganization?.salespersonName ?? null, first.collaborationRatio ?? null,
+           first.occurredOn, first.amount, "draft", actorUserId],
         );
         orderId = inserted.rows[0]!.id;
         importedOrders += 1;
@@ -1490,6 +1583,19 @@ export async function confirmImportBatch(database: Database, batchId: string, ac
         if (sequenceIssues.length) throw new ImportJobError(`确认时事件顺序已变化，请重新预检：${sequenceIssues[0]!.message}`);
       }
       for (const row of orderRows) {
+        let eventRow = row;
+        if (existing?.collaborator_person_id && !row.collaboratorPersonId && row.eventType !== "legacy_adjustment") {
+          const collaboratorPersonId = String(existing.collaborator_person_id);
+          const collaboratorOrganization = inheritedCollaboratorOrganizations.get(organizationKey(collaboratorPersonId, row.occurredOn));
+          if (!collaboratorOrganization) throw new ImportJobError(`第 ${row.rowNumber} 行发生日期找不到协作人的唯一有效组织任职及负责人`);
+          eventRow = {
+            ...row,
+            collaboratorPersonId,
+            collaboratorSourceKey: collaboratorOrganization.salespersonName,
+            collaborationRatio: Number(existing.collaboration_ratio),
+            collaboratorOrganization,
+          };
+        }
         let correction = null;
         if (row.correctionRequestId !== undefined) {
           correction = await lockApprovedCorrection(client, row.correctionRequestId, orderId, row.eventType, actorPersonId, now);
@@ -1505,7 +1611,7 @@ export async function confirmImportBatch(database: Database, batchId: string, ac
         let eventId: string;
         if (row.eventType === "legacy_adjustment") {
           counted = Math.round((counted + row.amount) * 100) / 100;
-          eventId = await insertEvent(client, batchId, orderId, row, actorUserId, row.eventType, row.amount, Math.max(0, counted), counted);
+          eventId = await insertEvent(client, batchId, orderId, eventRow, actorUserId, row.eventType, row.amount, Math.max(0, counted), counted);
           if (!latestLegacyProjection || compareLegacyProjectionRows(latestLegacyProjection.row,row)<0) {
             latestLegacyProjection={row,eventId};
           }
@@ -1518,7 +1624,7 @@ export async function confirmImportBatch(database: Database, batchId: string, ac
             const reason = error instanceof PerformanceRuleError ? error.message : "事件链无效";
             throw new ImportJobError(`第 ${row.rowNumber} 行事件链已变化，请重新预检：${reason}`);
           }
-          eventId = await insertEvent(client, batchId, orderId, row, actorUserId, decision.eventType, decision.deltaAmount,
+          eventId = await insertEvent(client, batchId, orderId, eventRow, actorUserId, decision.eventType, decision.deltaAmount,
             decision.next.currentRevenue, decision.next.countedAmount);
           state = decision.next;
         }

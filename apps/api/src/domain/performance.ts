@@ -1,7 +1,7 @@
 export type PerformanceState = {
   currentRevenue: number;
   countedAmount: number;
-  lifecycle: "draft" | "active" | "paused" | "zero";
+  lifecycle: "draft" | "active" | "paused" | "zero" | "receivable_pending";
 };
 
 export type PerformanceCommand =
@@ -26,17 +26,17 @@ function money(value: number): number {
 export function decidePerformanceEvent(state: PerformanceState, command: PerformanceCommand): PerformanceDecision {
   if (command.type === "initial") {
     if (state.lifecycle !== "draft") throw new PerformanceRuleError("只有草稿订单可以首次入账");
-    if (command.amount < 0) throw new PerformanceRuleError("首次录入金额不能为负数");
     const amount = money(command.amount);
-    return { eventType: "initial", deltaAmount: amount, next: { currentRevenue: amount, countedAmount: amount, lifecycle: amount > 0 ? "active" : "zero" } };
+    const lifecycle = amount > 0 ? "active" : amount < 0 ? "receivable_pending" : "zero";
+    return { eventType: "initial", deltaAmount: amount, next: { currentRevenue: amount, countedAmount: amount, lifecycle } };
   }
   if (command.type === "revenue_change") {
-    if (state.lifecycle !== "active" || state.countedAmount <= 0 || state.currentRevenue <= 0) throw new PerformanceRuleError("只有正向计入订单可以修改营业额");
-    if (command.newAmount < 0) throw new PerformanceRuleError("新营业额不能为负数");
+    if (!['active','receivable_pending'].includes(state.lifecycle) || state.countedAmount !== state.currentRevenue || state.currentRevenue === 0) throw new PerformanceRuleError("只有正向计入或应收未收订单可以修改营业额");
     const newAmount = money(command.newAmount);
     const delta = money(newAmount - state.currentRevenue);
     if (delta === 0) throw new PerformanceRuleError("新营业额与当前营业额相同");
-    return { eventType: "revenue_change", deltaAmount: delta, next: { currentRevenue: newAmount, countedAmount: money(state.countedAmount + delta), lifecycle: newAmount > 0 ? "active" : "zero" } };
+    const lifecycle = newAmount > 0 ? "active" : newAmount < 0 ? "receivable_pending" : "zero";
+    return { eventType: "revenue_change", deltaAmount: delta, next: { currentRevenue: newAmount, countedAmount: money(state.countedAmount + delta), lifecycle } };
   }
   if (command.type === "pause") {
     if (state.lifecycle !== "active" || state.countedAmount <= 0) throw new PerformanceRuleError("只有正向计入订单可以暂停");

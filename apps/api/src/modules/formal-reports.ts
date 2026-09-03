@@ -86,11 +86,11 @@ export async function loadFormalReport(
   let scopeSql = "true";
   let scopeValues: unknown[] = [];
   if (goal.level === "personal") {
-    scopeSql = "e.salesperson_person_id=$3";
+    scopeSql = "credit.salesperson_person_id=$3";
     scopeValues = [goal.owner_person_id];
   } else if (goal.level === "group" || goal.level === "department") {
     if (goal.org_unit_id !== null) {
-      scopeSql = goal.level === "group" ? "e.group_unit_id=$3" : "e.department_unit_id=$3";
+      scopeSql = goal.level === "group" ? "credit.group_unit_id=$3" : "credit.department_unit_id=$3";
       scopeValues = [goal.org_unit_id];
     } else {
       return {
@@ -102,11 +102,12 @@ export async function loadFormalReport(
   }
 
   const calculated = await database.query<{ actual_amount: string; gap_amount: string; achievement_rate: string | null }>(
-    `select coalesce(sum(e.delta_amount),0)::numeric(14,2)::text as actual_amount,
-            ($2::numeric-coalesce(sum(e.delta_amount),0))::numeric(14,2)::text as gap_amount,
+    `select coalesce(sum(credit.attributed_amount),0)::numeric(14,2)::text as actual_amount,
+            ($2::numeric-coalesce(sum(credit.attributed_amount),0))::numeric(14,2)::text as gap_amount,
             case when $2::numeric=0 then null
-                 else round(coalesce(sum(e.delta_amount),0)*100/$2::numeric,2)::text end as achievement_rate
+                 else round(coalesce(sum(credit.attributed_amount),0)*100/$2::numeric,2)::text end as achievement_rate
      from performance_events e
+     join performance_event_attributions credit on credit.event_id=e.id
      where e.accounting_month=$1 and ${scopeSql}`,
     [`${goal.period_month}-01`, targetAmount, ...scopeValues],
   );

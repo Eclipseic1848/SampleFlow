@@ -1747,11 +1747,11 @@ test("订单导出复用组合筛选、权限范围与安全审计", async () =>
       assert.equal(response.body.charCodeAt(0), 0xfeff);
       const lines = response.body.split("\r\n");
       assert.equal(lines.length, 52);
-      assert.equal(lines[0], '\ufeff"订单编号","客户","客户单位","业务员","部门","小组","来源区域原文","标准业务区域","到样日期","当前营业额","当前计入金额","状态"');
+      assert.equal(lines[0], '\ufeff"收样月份","日期","订单编号","客户姓名","客户单位","省份","业务员","部门","组别","系统营业额","服务类型","备注","协作人","协作比例","当前计入金额","状态"');
       assert.ok(lines.some((line) => line.includes('"EXPORT-MATCH-0001"')));
       assert.ok(lines.every((line) => !line.includes("EXPORT-OUT-OF-SCOPE")));
       assert.ok(lines.some((line) => line.includes('"\'\t=危险客户"') && line.includes('"\'+危险单位"') && line.includes('"\'\t=江苏原文"')));
-      assert.ok(lines.some((line) => line.includes(',123.45,120.5,"active"')));
+      assert.ok(lines.some((line) => line.includes(',123.45,,"导出回归",,,120.5,"active"')));
 
       async function assertExportPlanHasNoPerRowEventScan() {
         assert.ok(exportQuery);

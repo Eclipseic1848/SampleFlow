@@ -7,6 +7,7 @@ export const STANDARD_BUSINESS_REGIONS = [
   ["CN-HI", "海南省"], ["CN-CQ", "重庆市"], ["CN-SC", "四川省"], ["CN-GZ", "贵州省"],
   ["CN-YN", "云南省"], ["CN-XZ", "西藏自治区"], ["CN-SN", "陕西省"], ["CN-GS", "甘肃省"],
   ["CN-QH", "青海省"], ["CN-NX", "宁夏回族自治区"], ["CN-XJ", "新疆维吾尔自治区"],
+  ["CN-TW", "台湾省"],
   ["EXT-TRADE", "外贸"],
 ] as const;
 

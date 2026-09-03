@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { Database } from "../db.js";
 import { recordOperation } from "../observability.js";
-import { postgresBigintIdSchema } from "../validation.js";
+import { postgresBigintIdSchema, signedMoneySchema } from "../validation.js";
 import { standardBusinessRegionName } from "../domain/business-regions.js";
 import { ImportWorkbookError, parseImportWorkbook, type ImportColumn, type ImportLayout } from "../domain/performance-import-xlsx.js";
 import { confirmDimensionBackfillBatch, confirmImportBatch, ImportJobError, preflightDimensionBackfillRows, preflightImportRows, type ImportEventType } from "../services/import-job.js";
@@ -11,18 +11,16 @@ import { hasAnyRole, PERFORMANCE_EDITOR_ROLES } from "./auth.js";
 const columnNames = [
   "sourceRecordId", "orderNo", "occurredOn", "customerName", "customerUnit", "businessRegionSourceText",
   "salespersonSourceKey", "serviceType", "eventType", "businessSequence", "correctionRequestId", "amount", "reason",
+  "sourceMonth", "sourceDepartment", "sourceGroup", "collaboratorSourceKey", "collaborationRatio",
 ] as const satisfies readonly ImportColumn[];
 
-const requiredColumnNames = columnNames.filter((name) => name !== "sourceRecordId" && name !== "eventType" && name !== "businessSequence" && name !== "correctionRequestId");
+const optionalColumnNames = ["sourceRecordId", "eventType", "businessSequence", "correctionRequestId", "sourceMonth", "sourceDepartment", "sourceGroup", "collaboratorSourceKey", "collaborationRatio"] as const;
+const requiredColumnNames = columnNames.filter((name) => !optionalColumnNames.includes(name as typeof optionalColumnNames[number]));
 const columnMappingSchema = z.object({
   ...Object.fromEntries(requiredColumnNames.map((name) => [name, z.string().min(1).max(100)])),
-  sourceRecordId: z.string().min(1).max(100).optional(),
-  eventType: z.string().min(1).max(100).optional(),
-  businessSequence: z.string().min(1).max(100).optional(),
-  correctionRequestId: z.string().min(1).max(100).optional(),
-} as Record<Exclude<ImportColumn, "sourceRecordId" | "eventType" | "businessSequence" | "correctionRequestId">, z.ZodString> & { sourceRecordId: z.ZodOptional<z.ZodString>; eventType: z.ZodOptional<z.ZodString>; businessSequence: z.ZodOptional<z.ZodString>; correctionRequestId: z.ZodOptional<z.ZodString> });
-const reconciliationAmountSchema = z.number().finite().min(-99_999_999_999.99).max(99_999_999_999.99)
-  .refine((value) => Math.abs(value * 100 - Math.round(value * 100)) < 1e-7, "对账金额最多保留两位小数");
+  ...Object.fromEntries(optionalColumnNames.map((name) => [name, z.string().min(1).max(100).optional()])),
+} as Record<Exclude<ImportColumn, typeof optionalColumnNames[number]>, z.ZodString> & Record<typeof optionalColumnNames[number], z.ZodOptional<z.ZodString>>);
+const reconciliationAmountSchema = signedMoneySchema;
 const expectedReconciliationSchema = z.strictObject({
   rows: z.number().int().nonnegative(),
   orders: z.number().int().nonnegative(),
@@ -48,7 +46,7 @@ const configSchema = z.strictObject({
   ),
   personMapping: z.record(z.string().min(1).max(200), z.string().min(1).max(200)).default({}),
   expectedReconciliation: expectedReconciliationSchema.optional(),
-  fixedEventType: z.literal("legacy_adjustment").optional(),
+  fixedEventType: z.enum(["initial", "legacy_adjustment"]).optional(),
   allowLegacySourceKey: z.boolean().default(false),
 });
 type ConfigInput = z.infer<typeof configSchema>;
@@ -81,18 +79,21 @@ function decodeBase64(value: string): Buffer {
 function configInputError(input: ConfigInput): string | null {
   const mappedHeaders = Object.values(input.columnMapping).filter((header): header is string => Boolean(header));
   const namedExpectedHeaders = input.expectedHeaders.filter((header): header is string => header !== null);
-  if (new Set(mappedHeaders).size !== mappedHeaders.length) return "每个业务字段必须映射到不同的精确表头";
+  const duplicatedMappedHeaders = mappedHeaders.filter((header, index) => mappedHeaders.indexOf(header) !== index);
+  if (duplicatedMappedHeaders.some((header) => header !== input.columnMapping.orderNo || input.columnMapping.sourceRecordId !== header)) {
+    return "除订单编号兼作来源记录标识外，每个业务字段必须映射到不同的精确表头";
+  }
   if (new Set(namedExpectedHeaders).size !== namedExpectedHeaders.length) return "完整表头契约不能包含重复的具名列";
   if (input.requiredColumns.some((column) => !input.columnMapping[column] && !(column === "eventType" && input.fixedEventType))) return "必填字段必须存在对应列映射或固定事件类型";
   if (!input.allowLegacySourceKey && !input.columnMapping.sourceRecordId) return "非历史配置必须映射稳定来源记录标识";
-  if (!input.fixedEventType && !input.columnMapping.eventType) return "配置必须映射事件类型，或将获批历史格式固定为 legacy_adjustment";
-  if (input.fixedEventType && !input.allowLegacySourceKey) return "固定历史事件类型只能用于获批历史配置";
-  if (input.allowLegacySourceKey && !input.fixedEventType) return "历史行号来源键只能用于固定为 legacy_adjustment 的专用历史配置";
-  if (input.fixedEventType && input.columnMapping.eventType) return "固定历史事件类型与事件类型列映射不能同时配置";
-  if (input.fixedEventType && (input.allowedEventTypes.length !== 1 || input.allowedEventTypes[0] !== input.fixedEventType)) return "固定历史配置只能允许 legacy_adjustment";
-  if (!input.fixedEventType && input.allowedEventTypes.includes("legacy_adjustment")) return "普通配置不能允许 legacy_adjustment";
-  if (input.expectedReconciliation && !input.fixedEventType) return "预期迁移对账基准只能用于专用历史配置";
-  if (input.fixedEventType && !input.expectedReconciliation) return "专用历史配置必须固化整体和逐月迁移对账基准";
+  if (!input.fixedEventType && !input.columnMapping.eventType) return "配置必须映射事件类型，或固定为 initial/legacy_adjustment";
+  if (input.fixedEventType === "legacy_adjustment" && !input.allowLegacySourceKey) return "固定历史事件类型只能用于获批历史配置";
+  if (input.allowLegacySourceKey && input.fixedEventType !== "legacy_adjustment") return "历史行号来源键只能用于固定为 legacy_adjustment 的专用历史配置";
+  if (input.fixedEventType && input.columnMapping.eventType) return "固定事件类型与事件类型列映射不能同时配置";
+  if (input.fixedEventType && (input.allowedEventTypes.length !== 1 || input.allowedEventTypes[0] !== input.fixedEventType)) return "允许事件类型必须与固定事件类型完全一致";
+  if (input.fixedEventType !== "legacy_adjustment" && input.allowedEventTypes.includes("legacy_adjustment")) return "普通配置不能允许 legacy_adjustment";
+  if (input.expectedReconciliation && input.fixedEventType !== "legacy_adjustment") return "预期迁移对账基准只能用于专用历史配置";
+  if (input.fixedEventType === "legacy_adjustment" && !input.expectedReconciliation) return "专用历史配置必须固化整体和逐月迁移对账基准";
   if (input.expectedReconciliation) {
     const months = input.expectedReconciliation.monthly;
     if (new Set(months.map((item) => item.month)).size !== months.length) return "逐月迁移对账基准不能包含重复月份";
@@ -193,7 +194,7 @@ export async function registerImports(app: FastifyInstance, database: Database) 
       const result = await client.query(
         `update import_configs set status='approved',approved_by=$2,approved_at=now()
          where id=$1 and status='draft' and created_by is distinct from $2 and business_region_mapping<>'{}'::jsonb
-           and (fixed_event_type is null or expected_reconciliation is not null)
+           and (fixed_event_type is distinct from 'legacy_adjustment' or expected_reconciliation is not null)
          returning id`,
         [params.data.id, request.currentUser.id],
       );
@@ -225,7 +226,7 @@ export async function registerImports(app: FastifyInstance, database: Database) 
       return reply.code(400).send({ message: "上传参数无效" });
     }
     try {
-      const config = await database.query<{ sheet_name: string; expected_headers: unknown[]; column_mapping: ImportLayout["columnMapping"]; person_mapping: Record<string, string>; fixed_event_type:"legacy_adjustment"|null }>(
+      const config = await database.query<{ sheet_name: string; expected_headers: unknown[]; column_mapping: ImportLayout["columnMapping"]; person_mapping: Record<string, string>; fixed_event_type:ImportEventType|null }>(
         "select sheet_name,expected_headers,column_mapping,person_mapping,fixed_event_type from import_configs where id=$1 and status='approved'",
         [parsed.data.configId],
       );
@@ -269,7 +270,7 @@ export async function registerImports(app: FastifyInstance, database: Database) 
       return reply.code(400).send({ message: "上传参数无效" });
     }
     try {
-      const config = await database.query<{ sheet_name:string; expected_headers:unknown[]; column_mapping:ImportLayout["columnMapping"]; person_mapping:Record<string,string>; fixed_event_type:"legacy_adjustment"|null }>(
+      const config = await database.query<{ sheet_name:string; expected_headers:unknown[]; column_mapping:ImportLayout["columnMapping"]; person_mapping:Record<string,string>; fixed_event_type:ImportEventType|null }>(
         "select sheet_name,expected_headers,column_mapping,person_mapping,fixed_event_type from import_configs where id=$1 and status='approved'",
         [parsed.data.configId],
       );

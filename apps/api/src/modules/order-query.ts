@@ -7,7 +7,7 @@ export const orderFilterQuerySchema = z.object({
   search: z.string().trim().max(100).optional(),
   orderNo: z.string().trim().min(1).max(100).optional(),
   month: z.string().regex(/^[1-9]\d{3}-(0[1-9]|1[0-2])$/).optional(),
-  status: z.enum(["draft", "active", "paused", "zero", "historical_review_required"]).optional(),
+  status: z.enum(["draft", "active", "paused", "zero", "receivable_pending", "historical_review_required"]).optional(),
   salesperson: orderTextFilterSchema.optional(),
   department: orderTextFilterSchema.optional(),
   group: orderTextFilterSchema.optional(),
@@ -44,7 +44,11 @@ export function normalizeOrderFilters(input: z.infer<typeof orderFilterQuerySche
 export function latestOrderEventJoinSql(orderAlias: string, eventAlias: string): string {
   return `left join (
     select distinct on (order_id) order_id,salesperson_person_id,department_unit_id,group_unit_id,
-           salesperson_name,department_name,group_name,leader_name,supervisor_name
+           salesperson_name,department_name,group_name,leader_name,supervisor_name,
+           coalesce(max(reason) filter(where event_type='initial') over(partition by order_id),reason) as note,
+           collaborator_person_id,collaborator_department_unit_id,collaborator_group_unit_id,
+           collaborator_name,collaborator_department_name,collaborator_group_name,
+           collaborator_leader_name,collaborator_supervisor_name
     from performance_events order by order_id,occurred_on desc,id desc
   ) ${eventAlias} on ${eventAlias}.order_id=${orderAlias}.id`;
 }
@@ -52,7 +56,7 @@ export function latestOrderEventJoinSql(orderAlias: string, eventAlias: string):
 export function orderFilterSql(orderAlias: string, eventAlias: string, firstParameter: number): string {
   return `($${firstParameter}::text is null or ${orderAlias}.qingflow_order_no ilike $${firstParameter}
       or ${orderAlias}.salesperson_name ilike $${firstParameter} or ${orderAlias}.customer_name ilike $${firstParameter}
-      or ${orderAlias}.customer_unit ilike $${firstParameter})
+      or ${orderAlias}.customer_unit ilike $${firstParameter} or ${orderAlias}.collaborator_name ilike $${firstParameter})
     and ($${firstParameter + 1}::date is null or (${orderAlias}.source_received_on >= $${firstParameter + 1}::date
       and ${orderAlias}.source_received_on < $${firstParameter + 1}::date + interval '1 month'))
     and ($${firstParameter + 2}::text is null or ${orderAlias}.lifecycle_state=$${firstParameter + 2})
