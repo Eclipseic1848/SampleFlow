@@ -174,6 +174,7 @@ test("业绩分析页显示事件快照地区、外贸、客户单位和待补�
   await drilldown.getByRole("button", { name: "查看大额客户月份趋势" }).click();
   await drilldown.getByRole("button", { name: "查看2026年8月订单事件，101 条事件，金额 ¥100,999,999,999,998.99" }).click();
   const eventPageSize=drilldown.getByLabel("订单事件每页条数");
+  await expect(eventPageSize).toBeVisible();
   expect(await eventPageSize.locator("option").allTextContents()).toEqual(["10 条/页","20 条/页","50 条/页","100 条/页"]);
   await eventPageSize.selectOption("100");
   await expect(drilldown.getByText("本页 100 / 共 101 条事件", { exact: true })).toBeVisible();
