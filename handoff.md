@@ -36,6 +36,7 @@
 - `npm.cmd run build --workspace @sampleflow/web`：通过；生产 bundle 包含用户文案，不包含“前端、API 与数据库已连接”。
 - `npm.cmd run test:e2e --workspace @sampleflow/web`：最终完整运行 51/51 通过；覆盖 1280、1024、200% 缩放、WCAG 2.2 A/AA、审批全流程、并发穿透、引导、账号复制、导航、筛选和业务权限。
 - 静态检查确认所有 `orders-table-wrap` 在渲染处直接带 `tabIndex={0}`、`role="region"` 与可访问名称；`git diff --check` 通过，仅有 Windows LF/CRLF 提示。
+- PR #153 首次最终提交 CI [33772924994](https://github.com/Eclipseic1848/SampleFlow/actions/runs/33772924994) 在导入锁定 E2E 暴露同步竞态：产品已进入文件读取忙碌态，但网络拦截计数可能尚未更新。只把立即计数断言改为 Playwright `expect.poll` 等待请求到达，未修改产品逻辑；本地目标用例因 Docker/隔离 PostgreSQL 未运行而在测试初始化前停止，最终结论以 PR #153 当前提交的 GitHub CI 为准。
 - 42 个文件已通过精确清单暂存并提交；交付分支树与保护快照一致，未为提交改写已经正确的功能。当前工作树干净，本地保护分支仍保留提交前快照。
 - 已提交、推送并创建 PR #153；没有运行真实数据、生产服务或业务 UAT，也没有合并、部署或发布。
 

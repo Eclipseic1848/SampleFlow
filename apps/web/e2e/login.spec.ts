@@ -92,7 +92,7 @@ test("销售助理组长可用标准模板预检并确认整批入账", async ({
       await expect(importDialog.getByRole("button",{name:"正在预检…"})).toBeDisabled();
       await expect(importDialog.getByRole("button",{name:"关闭"})).toBeDisabled();
       await page.keyboard.press("Escape");await page.locator(".modal-backdrop").dispatchEvent("mousedown");
-      await expect(importDialog).toBeVisible();expect(preflightRequests).toBe(1);releasePreflight();
+      await expect(importDialog).toBeVisible();await expect.poll(()=>preflightRequests).toBe(1);releasePreflight();
       await expect(page.getByRole("heading",{name:"预检通过，等待确认"})).toBeVisible();
       await page.unroute("**/api/imports/preflight");
       await expect(page.getByRole("heading",{name:"逐月对账"})).toBeVisible();
