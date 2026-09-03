@@ -2,7 +2,7 @@
 
 > 更新时间：2026-09-02（America/Los_Angeles）
 >
-> 核心结论：Sheet3 工程目标由 [Issue #127](https://github.com/Eclipseic1848/SampleFlow/issues/127) / [PR #128](https://github.com/Eclipseic1848/SampleFlow/pull/128) 承载；合并后暴露的分析分页 E2E 时序问题由 [Issue #129](https://github.com/Eclipseic1848/SampleFlow/issues/129) / [PR #130](https://github.com/Eclipseic1848/SampleFlow/pull/130) 收口。代码和本地验收已完成；PR、CI、合并及 Issue 状态必须实时查询，不在本文缓存易失状态。没有导入真实工作簿，没有移动端，也没有公司服务器或外部发布。
+> 核心结论：Sheet3 工程目标由 [Issue #127](https://github.com/Eclipseic1848/SampleFlow/issues/127) / [PR #128](https://github.com/Eclipseic1848/SampleFlow/pull/128) 承载；分析分页 CI 由 [Issue #129](https://github.com/Eclipseic1848/SampleFlow/issues/129) / [PR #130](https://github.com/Eclipseic1848/SampleFlow/pull/130) 收口；月度趋势年份与数值提示及焦点测试稳定性由 [Issue #131](https://github.com/Eclipseic1848/SampleFlow/issues/131)、[Issue #132](https://github.com/Eclipseic1848/SampleFlow/issues/132) / [PR #133](https://github.com/Eclipseic1848/SampleFlow/pull/133) 收口。以上均已合并并关闭，`main` 提交 `f8e4c78` 的 [quality gate 33716468485](https://github.com/Eclipseic1848/SampleFlow/actions/runs/33716468485) 已通过。易失状态仍须实时复核。没有导入真实工作簿，没有移动端，也没有公司服务器或外部发布。
 
 ## 1. 我们在做什么
 
@@ -51,6 +51,7 @@ SampleFlow 是销售业绩、目标、组织、账号和审计管理的桌面 We
 - 订单表显示客户姓名、客户单位、省份、业务员、部门、组别、系统营业额、服务类型、备注、协作人、协作比例、当前计入金额和状态。
 - CSV 导出同步上述字段；订单备注固定取首次入账备注，不再被后续调整原因覆盖。
 - 台湾省代码为 `CN-TW`，进入受控省份和地图数据；外贸独立为 `EXT-TRADE`；前端不展示南海插图。
+- 月度业绩趋势点位在鼠标悬停或键盘聚焦时显示月份和格式化净额；年份选择器只列当前年及授权范围内确有数据的年份，切换不生成假数据。
 - 所有既有统一分页规则保持不变：默认 20 条，可选 10/20/50/100 条并可点击页码。
 
 ### 2.5 决策与文档
@@ -63,14 +64,15 @@ SampleFlow 是销售业绩、目标、组织、账号和审计管理的桌面 We
 
 本地最终验收：
 
-- API 全量测试：164/164 通过。
-- Web Playwright：PR #128 required check 全量通过。本机另一次全量为 49/50，唯一失败的 200% 缩放焦点断言随后连续复跑 3/3 通过。PR 合并后的 `main` run 33712729772 暴露分析事件分页在异步控件出现前读取选项，已在 PR #130 增加可见性等待，两个宽度各连续 3 次、共 6/6 通过。最终远端结论以 PR #130 及其合并后 `main` check 为准。
+- API 全量测试：165/165 通过。
+- Web Playwright：最终全量 50/50 通过；WCAG 2.2 A/AA critical/serious 检查通过。200% 缩放焦点抖动已定位为测试夹具用真实点击关闭延迟出现的新手引导、从而抢走焦点；改为不聚焦的 DOM click 后，两种桌面宽度连续 10/10 通过，随后全量 50/50 通过。
 - TypeScript 类型检查：API、Web 通过。
 - 生产构建：API、Web 通过；Vite 共转换 1940 个模块。
 - 容器契约：11/11 通过。
 - 隔离容器运行门禁：空库首装、真实 025→026 升级、ready/smoke、备份、新库恢复、最小权限和恢复库登录通过；只清理本轮随机隔离资源。
 - `npm audit --omit=dev`：0 vulnerabilities。
 - `docker compose --env-file .env.example config --quiet`：通过。
+- PR #133 quality gate 33716094092 通过；合并后 `main` quality gate 33716468485 通过。
 - Spec 审查发现的 3 项真实缺口（大额两位小数、关账更正负数、原始备注被覆盖）已修复并回归；Standards 审查未发现阻断项。
 - `git diff --check`：通过。
 
@@ -78,7 +80,7 @@ SampleFlow 是销售业绩、目标、组织、账号和审计管理的桌面 We
 
 ## 4. 当前状态与卡点
 
-本轮工程交付：Issue #127 / PR #128；CI 稳定性收口：Issue #129 / PR #130。新会话必须先实时核对：
+本轮工程交付：Issue #127 / PR #128；CI 稳定性收口：Issue #129 / PR #130；趋势可读性及焦点稳定性：Issues #131、#132 / PR #133。新会话必须先实时核对：
 
 ```powershell
 Set-Location -LiteralPath 'F:\new branch\SampleFlow'
@@ -88,8 +90,11 @@ git rev-parse HEAD
 git rev-parse origin/main
 gh pr view 128 --repo Eclipseic1848/SampleFlow --json state,mergeStateStatus,statusCheckRollup,mergedAt,mergeCommit,url
 gh pr view 130 --repo Eclipseic1848/SampleFlow --json state,mergeStateStatus,statusCheckRollup,mergedAt,mergeCommit,url
+gh pr view 133 --repo Eclipseic1848/SampleFlow --json state,mergeStateStatus,statusCheckRollup,mergedAt,mergeCommit,url
 gh issue view 127 --repo Eclipseic1848/SampleFlow --json state,labels,url
 gh issue view 129 --repo Eclipseic1848/SampleFlow --json state,labels,url
+gh issue view 131 --repo Eclipseic1848/SampleFlow --json state,labels,url
+gh issue view 132 --repo Eclipseic1848/SampleFlow --json state,labels,url
 gh issue list --repo Eclipseic1848/SampleFlow --state open --label 'priority:P1'
 gh run list --repo Eclipseic1848/SampleFlow --workflow 'SampleFlow quality gate' --limit 10
 docker compose -f docker-compose.dev.yml ps
@@ -109,12 +114,11 @@ docker compose -f docker-compose.dev.yml ps
 
 ## 5. 下一步计划
 
-### 5.1 当前 CI 收口 PR 尚未合并时
+### 5.1 当前工程基线
 
-1. 先确认 PR #128 已合并、Issue #127 已关闭，再查看 PR #130 required check。
-2. PR #130 required check 全绿且可合并后 squash merge，让 `Closes #129` 自动关闭 Issue。
-3. 合并后确认 `main` quality gate；若失败，继续基于日志修复到绿，不能仅重跑掩盖失败。
-4. 不新建 worktree，不切到额外目录；继续使用当前 checkout。
+1. `origin/main` 当前工程基线为 `f8e4c78`，合并后 quality gate 33716468485 已通过；新会话仍须实时复核。
+2. #127、#129、#131、#132 及对应 PR 已收口；没有待合并的工程 PR。
+3. 下一步只等待真实数据 UAT 与公司服务器两类人工条件。新缺陷继续从最新 `origin/main` 开分支，但不得新建额外 worktree 或项目目录。
 
 ### 5.2 真实数据条件齐全后
 
@@ -139,7 +143,7 @@ docker compose -f docker-compose.dev.yml ps
 | 阶段 | 状态 | 退出条件 |
 | --- | --- | --- |
 | P0 | 已完成 | 权限、组织、账本、目标、认证、导入和可重复验收进入 `main` |
-| P1 工程波次 | Sheet3 为 PR #128；CI 收口为 PR #130 | 两个 PR/Issue 关闭且合并后 `main` quality gate 成功 |
+| P1 工程波次 | 已完成 | PR #128、#130、#133 已合并，对应 Issues 已关闭，`main` quality gate 33716468485 成功 |
 | P1 人工 Gate | 等待 | #63 真实数据 UAT、#64 公司服务器及父项/总验收关闭 |
 | v1.1-alpha | 工程基线可内部评估，未发布 | 不代表生产资格或外部发布 |
 | v1.1-rc | 未达到 | 真实数据 UAT、服务器、备份恢复、安全、业务与运维签字齐全 |
@@ -166,7 +170,7 @@ docker compose -f docker-compose.dev.yml ps
 14. 不要丢弃用户改动或批量清理环境；禁止 `reset --hard`、广泛 clean/checkout/add/stash，只暂存明确文件，只清理已核对的隔离 Docker 资源。
 15. CI 绿色不等于真实数据 UAT、服务器验收或发布；四类证据分别取证、分别授权。
 16. GitHub 写入遇到 TLS/EOF 或结果不确定时先查远端，不能重复创建 Issue、PR 或合并。
-17. E2E 异步页面不能用 `allTextContents()` 立即读取尚未出现的控件；先等待目标可见。200% 缩放焦点也曾有一次时序抖动；先定向重复验证并看 trace，不能删除断言或把失败当通过。
+17. E2E 异步页面不能用 `allTextContents()` 立即读取尚未出现的控件；先等待目标可见。`addLocatorHandler` 内用真实 `click()` 关闭延迟引导会抢焦点；需要保留焦点的夹具使用 DOM click，不能删除断言或把失败重跑当通过。
 18. 不要自动进入 P2、恢复移动端、迁移真实数据、部署服务器或发布版本。
 
 ## 8. 新会话接手顺序
@@ -175,6 +179,6 @@ docker compose -f docker-compose.dev.yml ps
 2. 阅读 `AGENTS.md`、`CONTEXT.md`、`docs/agents/`、ADR-0031 和相关规格。
 3. 执行第 4 节的只读 Git/GitHub/Docker 复核，以实时证据覆盖本文中的易变状态。
 4. 保护当前 checkout，不创建新 worktree。
-5. 若 PR #130 尚未收口，先完成其 CI/合并和合并后 `main` 验证；若已完成且真实数据/服务器条件仍不存在，只报告人工门禁，不伪造进展。
+5. 若真实数据/服务器条件仍不存在，只报告 #12、#15、#63、#64、#65 的人工门禁，不伪造进展，也不自动进入 P2。
 
 接手原则：实时证据优先；工程、真实数据 UAT、服务器验收和外部发布分别取证、分别授权。
