@@ -35,14 +35,19 @@ const dashboardQuerySchema = z.object({
 });
 const analysisProvinceSchema = z.string().refine((value) => value.startsWith("CN-") && standardBusinessRegionName(value) !== undefined);
 const analysisMonthSchema = z.string().regex(/^[1-9]\d{3}-(0[1-9]|1[0-2])$/);
+const analysisYearSchema = z.string().regex(/^[1-9]\d{3}$/);
+const performanceAnalysisQuerySchema = z.strictObject({
+  month: analysisMonthSchema.optional(),
+  year: analysisYearSchema.optional(),
+}).refine((value) => !(value.month && value.year));
 const paginationQueryFields={page:pageNumberSchema.optional(),pageSize:pageSizeSchema.optional()};
 const analysisDrilldownQuerySchema = z.discriminatedUnion("level", [
-  z.strictObject({ level: z.literal("customers"), regionCode: analysisProvinceSchema, month: analysisMonthSchema, cursor: z.string().min(1).max(2048).optional(), snapshot: z.string().min(1).max(2048).optional(), ...paginationQueryFields }),
+  z.strictObject({ level: z.literal("customers"), regionCode: analysisProvinceSchema, month: analysisMonthSchema.optional(), year: analysisYearSchema.optional(), cursor: z.string().min(1).max(2048).optional(), snapshot: z.string().min(1).max(2048).optional(), ...paginationQueryFields }),
   z.strictObject({
     level: z.literal("months"),
     regionCode: analysisProvinceSchema,
     customerUnit: z.string().trim().min(1).max(300),
-    year: z.string().regex(/^[1-9]\d{3}$/),
+    year: analysisYearSchema,
   }),
   z.strictObject({
     level: z.literal("events"),
@@ -53,7 +58,7 @@ const analysisDrilldownQuerySchema = z.discriminatedUnion("level", [
     snapshot: z.string().min(1).max(2048).optional(),
     ...paginationQueryFields,
   }),
-]);
+]).refine((value) => value.level !== "customers" || Boolean(value.month) !== Boolean(value.year));
 const groupAchievementQuerySchema = dashboardQuerySchema.extend({
   groupId: postgresBigintIdSchema,
 });
@@ -1012,9 +1017,12 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
 
   app.get("/api/performance/analysis", async (request, reply) => {
     if (!request.currentUser) return reply.code(401).send({ message: "尚未登录" });
-    const parsed = dashboardQuerySchema.safeParse(request.query);
-    if (!parsed.success) return reply.code(400).send({ code: "MONTH_INVALID", message: "月份格式无效" });
-    const month = parsed.data.month ?? businessDate(clock()).slice(0, 7);
+    const parsed = performanceAnalysisQuerySchema.safeParse(request.query);
+    if (!parsed.success) return reply.code(400).send({ code: "ANALYSIS_PERIOD_INVALID", message: "分析月份或年份格式无效" });
+    const month = parsed.data.month ?? (parsed.data.year ? null : businessDate(clock()).slice(0, 7));
+    const year = parsed.data.year ?? null;
+    const periodStart = month ? `${month}-01` : `${year}-01-01`;
+    const periodInterval = month ? "1 month" : "1 year";
     const client = await db.connect();
     try {
       await client.query("begin transaction isolation level repeatable read read only");
@@ -1024,15 +1032,15 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
         return reply.code(403).send({ message: "当前角色没有业务查看权限" });
       }
       const result = await client.query<PerformanceAnalysisRow>(
-        `with monthly_events as materialized (
-           select id from performance_events where accounting_month=$1::date
+        `with period_events as materialized (
+           select id from performance_events where accounting_month >= $1::date and accounting_month < $1::date + $2::interval
          ), scoped_credits as materialized (
            select credit.event_id,credit.attributed_amount
            from performance_event_attributions credit
-           where ${performanceAttributionScopeSql("credit", 2)}
+           where ${performanceAttributionScopeSql("credit", 3)}
          ), scoped_amounts as materialized (
            select scoped_credits.event_id,sum(scoped_credits.attributed_amount)::numeric(14,2) as delta_amount
-           from scoped_credits join monthly_events on monthly_events.id=scoped_credits.event_id
+           from scoped_credits join period_events on period_events.id=scoped_credits.event_id
            group by scoped_credits.event_id
          ),
          scoped_analysis as materialized (
@@ -1073,7 +1081,7 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
          order by case aggregates.kind when 'ledger' then 1 when 'mapped' then 2 when 'pending' then 3
                   when 'province' then 4 when 'foreign_trade' then 5 else 6 end,
                   aggregates.total_amount desc,aggregates.region_code,aggregates.customer_unit`,
-        [`${month}-01`, ...performanceScopeValues(access)],
+        [periodStart, periodInterval, ...performanceScopeValues(access)],
       );
       await client.query("commit");
       const summary = (kind: PerformanceAnalysisRow["kind"]) => {
@@ -1083,7 +1091,8 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
       const regions = result.rows.filter((row) => row.kind === "province");
       const foreignTrade = result.rows.find((row) => row.kind === "foreign_trade")!;
       return {
-        month,
+        periodType: year ? "year" : "month",
+        ...(year ? { year } : { month }),
         ledger: summary("ledger"),
         mapped: summary("mapped"),
         pending: summary("pending"),
@@ -1149,22 +1158,24 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
       }
       await client.query("begin transaction isolation level repeatable read read only");
       if (parsed.data.level === "customers") {
+        const periodStart = parsed.data.month ? `${parsed.data.month}-01` : `${parsed.data.year}-01-01`;
+        const periodInterval = parsed.data.month ? "1 month" : "1 year";
         const result = await client.query<AnalysisCustomersRow>(
           `with dimension_cutoff as (
-             select coalesce($10::bigint,max(dimension_sequence)) as sequence from performance_event_analysis_dimensions
-           ), monthly_events as materialized (
-             select id from performance_events where accounting_month=$1::date
-           ), scoped_amounts as materialized (${scopedEventAmountsSql(3)}
+             select coalesce($11::bigint,max(dimension_sequence)) as sequence from performance_event_analysis_dimensions
+           ), period_events as materialized (
+             select id from performance_events where accounting_month >= $1::date and accounting_month < $1::date + $2::interval
+           ), scoped_amounts as materialized (${scopedEventAmountsSql(4)}
            ), raw_scoped_analysis as materialized (
              select e.id as event_id,scoped_amounts.delta_amount,dimensions.customer_unit
-             from monthly_events e
+             from period_events e
              join scoped_amounts on scoped_amounts.event_id=e.id
              join performance_event_analysis_dimensions dimensions on dimensions.event_id=e.id
              cross join dimension_cutoff
-             where dimensions.business_region_code=$2
+             where dimensions.business_region_code=$3
                and dimensions.dimension_sequence<=dimension_cutoff.sequence
            ), cutoff as (
-             select coalesce($9::bigint,max(event_id)) as event_id from raw_scoped_analysis
+             select coalesce($10::bigint,max(event_id)) as event_id from raw_scoped_analysis
            ), scoped_analysis as materialized (
              select raw.delta_amount,raw.customer_unit
              from raw_scoped_analysis raw cross join cutoff where raw.event_id<=cutoff.event_id
@@ -1175,9 +1186,9 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
              select count(*)::bigint as event_count,coalesce(sum(delta_amount),0.00) as total_amount from scoped_analysis
            ), page as (
              select customer_unit,event_count,total_amount from customers
-             where ($7::numeric is null or total_amount<$7::numeric or (total_amount=$7::numeric and customer_unit>$8))
+             where ($8::numeric is null or total_amount<$8::numeric or (total_amount=$8::numeric and customer_unit>$9))
              order by total_amount desc,customer_unit
-             limit $11 offset $12
+             limit $12 offset $13
            )
            select summary.event_count::text,summary.total_amount::text,
                   (select count(*)::text from customers) as customer_count,
@@ -1191,7 +1202,7 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
                   filter(where page.customer_unit is not null),'[]'::jsonb) as customers
            from summary cross join cutoff cross join dimension_cutoff left join page on true
            group by summary.event_count,summary.total_amount,cutoff.event_id,dimension_cutoff.sequence`,
-          [`${parsed.data.month}-01`, parsed.data.regionCode, ...performanceScopeValues(access), customerCursor?.totalAmount ?? null, customerCursor?.customerUnit ?? null, customerCursor?.cutoffEventId ?? snapshot?.cutoffEventId ?? null, customerCursor?.cutoffDimensionSequence ?? snapshot?.cutoffDimensionSequence ?? null, numbered?pageSize:ANALYSIS_CUSTOMER_PAGE_SIZE + 1, numbered?(page-1)*pageSize:0],
+          [periodStart, periodInterval, parsed.data.regionCode, ...performanceScopeValues(access), customerCursor?.totalAmount ?? null, customerCursor?.customerUnit ?? null, customerCursor?.cutoffEventId ?? snapshot?.cutoffEventId ?? null, customerCursor?.cutoffDimensionSequence ?? snapshot?.cutoffDimensionSequence ?? null, numbered?pageSize:ANALYSIS_CUSTOMER_PAGE_SIZE + 1, numbered?(page-1)*pageSize:0],
         );
         await client.query("commit");
         const row = result.rows[0]!;
@@ -1202,7 +1213,7 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
           level: "customers",
           regionCode: parsed.data.regionCode,
           regionName: standardBusinessRegionName(parsed.data.regionCode)!,
-          month: parsed.data.month,
+          ...(parsed.data.month ? { month: parsed.data.month } : { year: parsed.data.year }),
           eventCount: Number(row.event_count),
           totalAmount: row.total_amount,
           customerCount: Number(row.customer_count),

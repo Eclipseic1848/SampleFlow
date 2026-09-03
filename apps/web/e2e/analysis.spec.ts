@@ -108,14 +108,30 @@ test("业绩分析页显示事件快照地区、外贸、客户单位和待补�
   await expect(customers.getByRole("row", { name: /江苏省.*大额客户.*101.*¥100,999,999,999,998\.99/ })).toBeVisible();
   await expect(customers.getByRole("row", { name: /外贸.*客户单位乙.*1.*-¥25\.00/ })).toBeVisible();
 
+  await analysis.getByLabel("分析范围").selectOption("year");
+  await expect(analysis.getByLabel("分析年份")).toHaveValue("2026");
+  await analysis.getByRole("button", { name: "查看", exact: true }).click();
+  await expect(analysis.locator(".metric").filter({ hasText: "授权范围总账" }).getByText("¥101,000,000,000,170.99", { exact: true })).toBeVisible();
+  await expect(provinces.getByRole("row", { name: /江苏省.*103.*¥101,000,000,000,105\.99/ })).toBeVisible();
+  expect(Object.fromEntries(new URL(page.url()).searchParams)).toMatchObject({ analysisRange: "year", analysisYear: "2026" });
+  expect(new URL(page.url()).searchParams.has("analysisMonth")).toBe(false);
+  await provinces.getByRole("button", { name: "江苏省" }).click();
+  const yearlyDrilldown=analysis.getByRole("region", { name: "分析穿透" });
+  await expect(yearlyDrilldown.getByRole("row", { name: /客户单位甲.*2.*¥107\.00/ })).toBeVisible();
+  await yearlyDrilldown.getByRole("button", { name: "查看客户单位甲月份趋势" }).click();
+  await expect(yearlyDrilldown.getByText("2026年金额与上级客户行完全对平。", { exact: true })).toBeVisible();
+  await analysis.getByLabel("分析范围").selectOption("month");
+  await analysis.getByLabel("分析月份").fill("2026-08");
+  await expect(provinces.getByRole("row", { name: /江苏省.*102.*¥101,000,000,000,098\.99/ })).toBeVisible();
+
   const map = analysis.getByRole("group", { name: "中国省份业绩地图" });
+  await expect(map.locator('[data-region-code="CN-TW"]')).toBeVisible();
   const mapRegionCodes = await map.locator("[data-region-code]").evaluateAll((elements) => elements.map((element) => element.getAttribute("data-region-code")).sort());
   expect(mapRegionCodes).toEqual([
     "CN-AH", "CN-BJ", "CN-CQ", "CN-FJ", "CN-GD", "CN-GS", "CN-GX", "CN-GZ", "CN-HA", "CN-HB", "CN-HE", "CN-HI",
     "CN-HK", "CN-HL", "CN-HN", "CN-JL", "CN-JS", "CN-JX", "CN-LN", "CN-MO", "CN-NM", "CN-NX", "CN-QH", "CN-SC",
     "CN-SD", "CN-SH", "CN-SN", "CN-SX", "CN-TJ", "CN-TW", "CN-XJ", "CN-XZ", "CN-YN", "CN-ZJ",
   ]);
-  await expect(map.locator('[data-region-code="CN-TW"]')).toBeVisible();
   await expect(map.locator(".analysis-map-boundary")).toHaveCount(0);
   const southernEdge = await map.locator("[data-region-code]").evaluateAll((elements) => Math.max(...elements.map((element) => { const box = (element as SVGGraphicsElement).getBBox(); return box.y + box.height; })));
   expect(southernEdge).toBeLessThanOrEqual(608.01);

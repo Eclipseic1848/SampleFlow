@@ -182,6 +182,18 @@ test("订单台账支持每页条数与可点击页码", async ({ database, page
     const ledger = page.locator("section.orders-card").filter({ has: page.getByRole("heading", { name: "订单台账" }) });
     await expect(ledger.getByText("本页 20 笔订单", { exact: true })).toBeVisible();
     await expect(ledger.getByText("E2E-CURSOR-0101", { exact: true })).toBeVisible();
+    await expect(ledger.getByText("待补齐", { exact: true }).first()).toBeVisible();
+    const scroller=ledger.locator(".order-ledger-scroll");
+    const headers=ledger.getByRole("table", { name: "订单台账" }).getByRole("columnheader");
+    const beforeScroll=await headers.evaluateAll((cells)=>cells.map((cell)=>cell.getBoundingClientRect().x));
+    expect(await headers.nth(0).evaluate((cell)=>getComputedStyle(cell).position)).toBe("sticky");
+    expect(await headers.nth(13).evaluate((cell)=>getComputedStyle(cell).position)).toBe("sticky");
+    await scroller.evaluate((element)=>{element.scrollLeft=element.scrollWidth-element.clientWidth;});
+    await expect.poll(()=>scroller.evaluate((element)=>element.scrollLeft)).toBeGreaterThan(0);
+    const afterScroll=await headers.evaluateAll((cells)=>cells.map((cell)=>cell.getBoundingClientRect().x));
+    for(const index of [0,1,2,13,14,15])expect(Math.abs(afterScroll[index]!-beforeScroll[index]!)).toBeLessThanOrEqual(1);
+    expect(afterScroll[3]!).toBeLessThan(beforeScroll[3]!-100);
+    expect(afterScroll[2]!+(await headers.nth(2).evaluate((cell)=>cell.getBoundingClientRect().width))).toBeLessThanOrEqual(afterScroll[13]!+1);
     const pageSize=ledger.getByLabel("订单每页条数");
     expect(await pageSize.locator("option").allTextContents()).toEqual(["10 条/页","20 条/页","50 条/页","100 条/页"]);
     await pageSize.selectOption("50");

@@ -172,6 +172,23 @@ test("地区与客户分析按事件快照对账且查询次数不随规模增�
         assert.ok(analysisReadCount <= 4, `分析请求数据库读取应不超过 4 次，实际 ${analysisReadCount} 次`);
         const smallReadCount = analysisReadCount;
         const capturedAnalysisQuery = requireCapturedQuery(analysisQuery);
+        const yearly = await app.inject({ method: "GET", url: "/api/performance/analysis?year=2026", headers: { cookie: leaderCookie } });
+        assert.equal(yearly.statusCode, 200, yearly.body);
+        assert.deepEqual(yearly.json().ledger, { eventCount: 6, totalAmount: "162.00" });
+        assert.deepEqual(yearly.json().mapped, { eventCount: 5, totalAmount: "132.00" });
+        assert.deepEqual(yearly.json().pending, { eventCount: 1, totalAmount: "30.00" });
+        assert.deepEqual(yearly.json().provinces, [
+          { regionCode: "CN-JS", regionName: "江苏省", eventCount: 3, totalAmount: "107.00" },
+          { regionCode: "CN-ZJ", regionName: "浙江省", eventCount: 1, totalAmount: "50.00" },
+        ]);
+        const yearlyCustomers = await app.inject({
+          method: "GET",
+          url: "/api/performance/analysis/drilldown?level=customers&regionCode=CN-JS&year=2026",
+          headers: { cookie: leaderCookie },
+        });
+        assert.equal(yearlyCustomers.statusCode, 200, yearlyCustomers.body);
+        assert.equal(yearlyCustomers.json().eventCount, 3);
+        assert.equal(yearlyCustomers.json().totalAmount, "107.00");
         assert.doesNotMatch(capturedAnalysisQuery.statement, /performance_orders/i);
         const smallExplain = await setup.query<{ "QUERY PLAN": Array<{ Plan: Record<string, unknown> }> }>(
           `explain (analyze,format json) ${capturedAnalysisQuery.statement}`,
@@ -565,10 +582,13 @@ test("地区与客户分析按事件快照对账且查询次数不随规模增�
         assert.equal(unauthenticated.statusCode, 401, unauthenticated.body);
         const invalid = await app.inject({ method: "GET", url: "/api/performance/analysis?month=2026-13", headers: { cookie: leaderCookie } });
         assert.equal(invalid.statusCode, 400, invalid.body);
+        const ambiguousPeriod = await app.inject({ method: "GET", url: "/api/performance/analysis?month=2026-08&year=2026", headers: { cookie: leaderCookie } });
+        assert.equal(ambiguousPeriod.statusCode, 400, ambiguousPeriod.body);
         for (const url of [
           "/api/performance/analysis/drilldown?level=unknown&regionCode=CN-JS&month=2026-08",
           "/api/performance/analysis/drilldown?level=customers&regionCode=CN-UNKNOWN&month=2026-08",
           "/api/performance/analysis/drilldown?level=customers&regionCode=CN-JS&month=2026-08&extra=true",
+          "/api/performance/analysis/drilldown?level=customers&regionCode=CN-JS&month=2026-08&year=2026",
           "/api/performance/analysis/drilldown?level=customers&regionCode=CN-JS&month=2026-08&cursor=invalid%25",
           "/api/performance/analysis/drilldown?level=months&regionCode=CN-JS&customerUnit=%20%20&year=2026",
         ]) {

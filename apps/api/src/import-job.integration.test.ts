@@ -532,7 +532,7 @@ test("重新上传原始历史文件时关联既有事件并补齐区域但不�
   });
 });
 
-test("历史分析维度补齐只写快照且预检、重放和冲突保持安全", async () => {
+test("历史分析维度补齐写入事件快照和订单当前投影且预检、重放和冲突保持安全", async () => {
   await withMigratedTestDatabase(async (database) => {
     const context = await fixture(database.url);
     try {
@@ -551,9 +551,9 @@ test("历史分析维度补齐只写快照且预检、重放和冲突保持安�
       const event = await context.pool.query<{ id: string }>(
         `insert into performance_events(order_id,event_type,delta_amount,resulting_current_revenue,resulting_counted_amount,
            accounting_month,occurred_on,reason,salesperson_name,department_name,group_name,source_row_number,salesperson_person_id,order_sequence)
-         values($1,'legacy_adjustment',100,100,100,'2026-03-01','2026-03-05','首次转录','业务员甲','销售一部','一组',2,$2,1)
+         values($1,'legacy_adjustment',100,100,100,'2026-03-01','2026-03-04','历史明细迁移','业务员甲','销售一部','一组',2,null,1)
          returning id::text`,
-        [order.rows[0]!.id, context.salespersonPersonId],
+        [order.rows[0]!.id],
       );
       await context.pool.query(
         `insert into legacy_event_source_evidence(event_id,source_file_sha256,source_sheet,source_row_number,source_key)
@@ -561,7 +561,24 @@ test("历史分析维度补齐只写快照且预检、重放和冲突保持安�
         [event.rows[0]!.id, sourceHash, `legacy:${sourceHash}:分子:2`],
       );
       await context.pool.query("commit");
-      const sourceRow = row({ sheet:"分子", sourceRecordId:undefined, eventType:"legacy_adjustment", customerUnit:"单位甲", businessRegionSourceText:"江苏省" });
+      const sourceRow = row({ sheet:"分子", sourceRecordId:undefined, eventType:"legacy_adjustment", customerUnit:"单位甲", businessRegionSourceText:"江苏省", salespersonSourceKey:"业务员甲", reason:"" });
+
+      const wrongLegacyDate = await preflightDimensionBackfillRows(context.pool, {
+        actorUserId:context.actorUserId, configId, sourceFileName:"合成历史-错误日期.xlsx", sourceBytes,
+        rows:[{ ...sourceRow, occurredOn:"2026-03-06" }],
+      });
+      assert.equal(wrongLegacyDate.status, "blocked");
+      assert.ok(wrongLegacyDate.issues.some((issue) => issue.code === "SOURCE_RECORD_CONFLICT"));
+
+      const unapprovedLegacyOffset = await preflightDimensionBackfillRows(context.pool, {
+        actorUserId:context.actorUserId, configId, sourceFileName:"合成历史-未批准日期偏移.xlsx", sourceBytes, rows:[sourceRow],
+      });
+      assert.equal(unapprovedLegacyOffset.status, "blocked");
+      assert.ok(unapprovedLegacyOffset.issues.some((issue) => issue.code === "SOURCE_RECORD_CONFLICT"));
+      await context.pool.query("begin");
+      await context.pool.query("set local session_replication_role=replica");
+      await context.pool.query("update performance_events set occurred_on='2026-03-05',reason='' where id=$1", [event.rows[0]!.id]);
+      await context.pool.query("commit");
 
       const preflight = await preflightDimensionBackfillRows(context.pool, {
         actorUserId:context.actorUserId, configId, sourceFileName:"合成历史.xlsx", sourceBytes, rows:[sourceRow],
@@ -588,7 +605,9 @@ test("历史分析维度补齐只写快照且预检、重放和冲突保持安�
         `select dimensions.business_region_code,dimensions.business_region_source_text,dimensions.customer_unit,
                 receipt.source_file_sha256,receipt.confirmed_by::text,receipt.result,
                 event.event_type,event.delta_amount::text,event.reason,evidence.source_key,
-                performance_order.customer_unit order_customer_unit,performance_order.service_type order_service_type
+                performance_order.customer_unit order_customer_unit,performance_order.service_type order_service_type,
+                performance_order.business_region_source_text order_region_source_text,
+                performance_order.business_region_code order_region_code
          from performance_event_analysis_dimensions dimensions
          join legacy_event_analysis_dimension_backfills receipt on receipt.event_id=dimensions.event_id
          join performance_events event on event.id=dimensions.event_id
@@ -598,8 +617,9 @@ test("历史分析维度补齐只写快照且预检、重放和冲突保持安�
       assert.deepEqual(written.rows[0], {
         business_region_code:"CN-JS", business_region_source_text:"江苏省", customer_unit:"单位甲",
         source_file_sha256:sourceHash, confirmed_by:context.actorUserId, result:"applied",
-        event_type:"legacy_adjustment", delta_amount:"100.00", reason:"首次转录", source_key:`legacy:${sourceHash}:分子:2`,
-        order_customer_unit:"旧单位", order_service_type:"旧服务",
+        event_type:"legacy_adjustment", delta_amount:"100.00", reason:"", source_key:`legacy:${sourceHash}:分子:2`,
+        order_customer_unit:"单位甲", order_service_type:"旧服务",
+        order_region_source_text:"江苏省", order_region_code:"CN-JS",
       });
       await assert.rejects(
         context.pool.query("update legacy_event_analysis_dimension_backfills set result='applied' where event_id=$1", [event.rows[0]!.id]),

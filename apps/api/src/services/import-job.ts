@@ -598,7 +598,7 @@ async function loadDimensionBackfillTargets(
     `select evidence.event_id::text,evidence.source_file_sha256,evidence.source_sheet,
             evidence.source_row_number::text,evidence.source_key,event.event_type,
             performance_order.qingflow_order_no order_no,event.occurred_on::text,
-            salesperson.source_key salesperson_source_key,event.delta_amount::text,event.reason,
+            coalesce(salesperson.source_key,event.salesperson_name) salesperson_source_key,event.delta_amount::text,event.reason,
             dimensions.business_region_code,dimensions.business_region_source_text,dimensions.customer_unit,
             receipt.source_file_sha256 receipt_source_sha256
      from legacy_event_source_evidence evidence
@@ -633,12 +633,16 @@ function dimensionBackfillEvaluation(
       && target.source_sheet === row.sheet
       && Number(target.source_row_number) === row.rowNumber
       && target.source_key === row.sourceKey;
+    const knownLegacyOffset = sourceHash === "926aad3d8c59cc356094eb1abc0ca1fcb3392eae5867f2b7c0e2bb50bb5c01cf";
+    const storedDate = String(target.occurred_on).slice(0, 10);
+    const legacyStoredDate = new Date(Date.parse(`${row.occurredOn}T00:00:00Z`) - 86_400_000).toISOString().slice(0, 10);
+    const reasonMatches = (target.reason ?? "") === row.reason || (knownLegacyOffset && !row.reason && target.reason === "历史明细迁移");
     const eventMatches = target.event_type === "legacy_adjustment"
       && target.order_no === row.orderNo
-      && String(target.occurred_on).slice(0, 10) === row.occurredOn
+      && (storedDate === row.occurredOn || (knownLegacyOffset && storedDate === legacyStoredDate))
       && target.salesperson_source_key === row.salespersonSourceKey
       && Math.round(Number(target.delta_amount) * 100) === Math.round(row.amount * 100)
-      && (target.reason ?? "") === row.reason;
+      && reasonMatches;
     if (!sourceMatches || !eventMatches) {
       addIssue(issues, row, "SOURCE_RECORD_CONFLICT", "受控来源位置已存在，但事件事实与本次来源行不一致");
       continue;
@@ -1343,6 +1347,27 @@ export async function confirmDimensionBackfillBatch(
          select item.event_id,$2,item.batch_row_id,$3,$4,$5,'applied'
          from jsonb_to_recordset($1::jsonb) item(event_id bigint,batch_row_id bigint)`,
         [JSON.stringify(values), batchId, sourceHash, actorUserId, confirmedAt],
+      );
+      await client.query(
+        `with affected_orders as (
+           select distinct event.order_id
+           from jsonb_to_recordset($1::jsonb) item(event_id bigint)
+           join performance_events event on event.id=item.event_id
+         ), latest_events as (
+           select distinct on (event.order_id) event.id,event.order_id
+           from performance_events event join affected_orders affected on affected.order_id=event.order_id
+           where event.event_type='legacy_adjustment'
+           order by event.order_id,event.occurred_on desc,event.source_row_number desc nulls last,
+                    event.source_sheet desc nulls last,event.id desc
+         )
+         update performance_orders orders
+         set customer_unit=dimensions.customer_unit,
+             business_region_source_text=dimensions.business_region_source_text,
+             business_region_code=dimensions.business_region_code
+         from latest_events latest
+         join performance_event_analysis_dimensions dimensions on dimensions.event_id=latest.id
+         where orders.id=latest.order_id`,
+        [JSON.stringify(values)],
       );
     }
     const result = toApply.length ? "applied" : "replayed";
