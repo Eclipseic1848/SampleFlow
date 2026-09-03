@@ -86,6 +86,7 @@ test("干净隔离数据库可应用全部现有迁移", async () => {
         "024_auth_throttle_cleanup.sql",
         "025_enforce_performance_order_state_amounts.sql",
         "026_sheet3_order_input.sql",
+        "027_repair_legacy_import_dates.sql",
       ]);
       assert.ok(result.rows.every((row) => /^[a-f0-9]{64}$/.test(row.sha256)));
       await assert.rejects(
@@ -396,7 +397,7 @@ test("已有不可变业绩事件的数据库可升级并保持事件不可变",
 
 test("旧历史导入事件升级后保持不变并由独立证据表保存复合来源键", async () => {
   await withTestDatabase(async (database) => {
-    const sourceHash = "926aad3d8c59cc356094eb1abc0ca1fcb3392eae5867f2b7c0e2bb50bb5c01cf";
+    const sourceHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const client = new Client({ connectionString: database.url });
     await client.connect();
     try {
@@ -460,6 +461,183 @@ test("旧历史导入事件升级后保持不变并由独立证据表保存复�
         source_row_number: "2",
         source_key: `legacy:${sourceHash}:分子:2`,
       });
+    } finally {
+      await verify.end();
+    }
+  });
+});
+
+test("权威旧历史日期只在完整基线吻合时留下证据并受控修复", async () => {
+  await withTestDatabase(async (database) => {
+    const sourceHash = "926aad3d8c59cc356094eb1abc0ca1fcb3392eae5867f2b7c0e2bb50bb5c01cf";
+    const repairOnlyMigrations = await mkdtemp(path.join(tmpdir(), "sampleflow-date-repair-"));
+    const client = new Client({ connectionString: database.url });
+    await client.connect();
+    try {
+      await client.query("create table schema_migrations(name text primary key,applied_at timestamptz not null default now())");
+      const previousMigrations = (await readdir(migrationsRoot)).filter((name) => name.endsWith(".sql") && name < "027_").sort();
+      for (const name of previousMigrations) {
+        const sql = await readFile(`${migrationsRoot}${name}`, "utf8");
+        await client.query(sql);
+        await client.query("insert into schema_migrations(name) values($1)", [name]);
+        await writeFile(path.join(repairOnlyMigrations, name), sql, "utf8");
+      }
+      await writeFile(
+        path.join(repairOnlyMigrations, "027_repair_legacy_import_dates.sql"),
+        await readFile(`${migrationsRoot}027_repair_legacy_import_dates.sql`, "utf8"),
+        "utf8",
+      );
+      await client.query(
+        `insert into performance_orders(qingflow_order_no,customer_name,customer_unit,salesperson_name,source_received_on,
+           original_amount,current_revenue,counted_amount,lifecycle_state,posted_at)
+         select 'LEGACY-DATE-'||n,'旧客户','旧单位','旧业务员','2026-01-03',1,1,1,'active',now()
+         from generate_series(1,2850) n`,
+      );
+      await client.query(
+        "insert into legacy_import_runs(source_file,source_sha256,source_rows,imported_orders,imported_events) values('原始数据1.xlsx',$1,4701,2850,4701)",
+        [sourceHash],
+      );
+      await client.query("begin");
+      await client.query("set local session_replication_role=replica");
+      await client.query(
+        `insert into performance_events(order_id,event_type,delta_amount,resulting_current_revenue,resulting_counted_amount,
+           accounting_month,occurred_on,reason,salesperson_name,department_name,group_name,source_row_number,order_sequence)
+         values(1,'legacy_adjustment',14675659.07,14675659.07,14675659.07,'2026-01-01','2026-01-03','历史明细迁移','旧业务员','旧部门','旧小组',2,1)`,
+      );
+      await client.query(
+        "insert into legacy_event_source_evidence(event_id,source_file_sha256,source_sheet,source_row_number,source_key) select id,$1,'分子',2,'legacy:'||$1||':分子:2' from performance_events",
+        [sourceHash],
+      );
+      await client.query("commit");
+      await assert.rejects(
+        execFileAsync(process.execPath, ["--import", "tsx", "src/cli/migrate.ts"], {
+          cwd: apiRoot,
+          env: { ...process.env, DATABASE_URL: database.url, NODE_ENV: "test", TEST_MIGRATIONS_DIR: repairOnlyMigrations },
+          encoding: "utf8",
+        }),
+        /旧历史日期修复基线不一致/,
+      );
+      await client.query("begin");
+      await client.query("set local session_replication_role=replica");
+      await client.query(
+        `insert into performance_events(order_id,event_type,delta_amount,resulting_current_revenue,resulting_counted_amount,
+           accounting_month,occurred_on,reason,salesperson_name,department_name,group_name,source_row_number,order_sequence)
+         select case when n<=2850 then n else n-2850 end,'legacy_adjustment',0,1,1,
+                date_trunc('month',case when n=4701 then date '2026-08-25' else date '2026-01-04' end)::date,
+                case when n=4701 then date '2026-08-25' else date '2026-01-04' end,
+                case when n<=2711 then '历史明细迁移' else '原始备注' end,
+                '旧业务员','旧部门','旧小组',n+1,case when n<=2850 then 1 else 2 end
+         from generate_series(2,4701) n`,
+      );
+      await client.query(
+        `insert into legacy_event_source_evidence(event_id,source_file_sha256,source_sheet,source_row_number,source_key)
+         select id,$1,'分子',source_row_number,'legacy:'||$1||':分子:'||source_row_number
+         from performance_events where id>1`,
+        [sourceHash],
+      );
+      await client.query("commit");
+      await assert.rejects(
+        execFileAsync(process.execPath, ["--import", "tsx", "src/cli/migrate.ts"], {
+          cwd: apiRoot,
+          env: { ...process.env, DATABASE_URL: database.url, NODE_ENV: "test", TEST_MIGRATIONS_DIR: repairOnlyMigrations },
+          encoding: "utf8",
+        }),
+        /旧历史日期修复逐月基线不一致/,
+      );
+      await client.query("begin");
+      await client.query("set local session_replication_role=replica");
+      await client.query(
+        `with numbered as (
+           select id,row_number() over(order by source_row_number)::int n from performance_events
+         ), corrected as (
+           select id,n,
+             case when n=1 then date '2026-01-03'
+                  when n<=635 then date '2026-01-14'
+                  when n<=1090 then date '2026-02-14'
+                  when n<=1650 then date '2026-03-14'
+                  when n<=2170 then date '2026-04-14'
+                  when n<=2644 then date '2026-05-14'
+                  when n<=3275 then date '2026-06-14'
+                  when n<=4053 then date '2026-07-14'
+                  when n=4701 then date '2026-08-25'
+                  else date '2026-08-14' end occurred_on,
+             case n when 1 then 2314819.55 when 636 then 1252546.10 when 1091 then 1346159.95
+                  when 1651 then 1989517.64 when 2171 then 1499121.10 when 2645 then 2234990.59
+                  when 3276 then 2487624.14 when 4054 then 1550880.00 else 0 end amount
+           from numbered
+         )
+         update performance_events event set occurred_on=corrected.occurred_on,
+           accounting_month=date_trunc('month',corrected.occurred_on)::date,
+           delta_amount=corrected.amount,resulting_current_revenue=corrected.amount,resulting_counted_amount=corrected.amount,
+           reason=case when corrected.n<=2711 then '历史明细迁移' else '原始备注' end
+         from corrected where corrected.id=event.id`,
+      );
+      const actor = await client.query<{id:string}>(
+        "insert into users(username,display_name,password_hash,password_salt) values('date-repair-reviewer','日期修复审核人','hash','salt') returning id::text",
+      );
+      const batch = await client.query<{id:string}>(
+        `insert into import_batches(config_id,source_file_name,source_sha256,source_bytes,status,uploaded_by,confirmed_by,
+           row_count,order_count,event_count,total_amount,purpose,confirmed_at,reconciliation_summary)
+         select min(id),'原始数据1.xlsx',$1,''::bytea,'imported',$2,$2,4701,2850,4701,14675659.07,'dimension_backfill',now(),'{}'::jsonb
+         from import_configs returning id::text`,
+        [sourceHash,actor.rows[0]!.id],
+      );
+      await client.query(
+        `insert into import_batch_rows(batch_id,source_sheet,source_row_number,source_key,duplicate_fingerprint,normalized_data)
+         select $1,evidence.source_sheet,evidence.source_row_number,evidence.source_key,evidence.source_key,
+                jsonb_build_object('occurredOn',(event.occurred_on+1)::text,'reason',
+                  case when event.reason='历史明细迁移' then '' else event.reason end)
+         from legacy_event_source_evidence evidence join performance_events event on event.id=evidence.event_id
+         where evidence.source_file_sha256=$2`,
+        [batch.rows[0]!.id,sourceHash],
+      );
+      await client.query(
+        `insert into performance_event_analysis_dimensions(event_id,business_region_code,business_region_source_text,customer_unit)
+         select event_id,'CN-JS','江苏省','旧单位' from legacy_event_source_evidence where source_file_sha256=$1`,
+        [sourceHash],
+      );
+      await client.query(
+        `insert into legacy_event_analysis_dimension_backfills(event_id,batch_id,batch_row_id,source_file_sha256,confirmed_by,result)
+         select evidence.event_id,$1,row.id,$2,$3,'applied'
+         from legacy_event_source_evidence evidence join import_batch_rows row
+           on row.batch_id=$1 and row.source_sheet=evidence.source_sheet and row.source_row_number=evidence.source_row_number
+         where evidence.source_file_sha256=$2`,
+        [batch.rows[0]!.id,sourceHash,actor.rows[0]!.id],
+      );
+      await client.query("commit");
+    } finally {
+      await client.end();
+      await rm(repairOnlyMigrations, { recursive: true, force: true });
+    }
+
+    await execFileAsync(process.execPath, ["--import", "tsx", "src/cli/migrate.ts"], {
+      cwd: apiRoot,
+      env: { ...process.env, DATABASE_URL: database.url, NODE_ENV: "test" },
+      encoding: "utf8",
+    });
+
+    const verify = new Client({ connectionString: database.url });
+    await verify.connect();
+    try {
+      const result = await verify.query<{
+        events: number; eventEvidence: number; orderEvidence: number; firstDate: string; lastDate: string;
+        wrongAccountingMonths: number; blankReasons: number; firstOrderDate: string;
+      }>(
+        `select (select count(*)::int from performance_events) events,
+                (select count(*)::int from legacy_event_date_repair_evidence) "eventEvidence",
+                (select count(*)::int from legacy_order_date_repair_evidence) "orderEvidence",
+                (select min(occurred_on)::text from performance_events) "firstDate",
+                (select max(occurred_on)::text from performance_events) "lastDate",
+                (select count(*)::int from performance_events where accounting_month<>date_trunc('month',occurred_on)::date) "wrongAccountingMonths",
+                (select count(*)::int from performance_events where reason='') "blankReasons",
+                (select min(source_received_on)::text from performance_orders) "firstOrderDate"`,
+      );
+      assert.deepEqual(result.rows[0], {
+        events:4701, eventEvidence:4701, orderEvidence:2850, firstDate:"2026-01-04", lastDate:"2026-08-26",
+        wrongAccountingMonths:0, blankReasons:2711, firstOrderDate:"2026-01-04",
+      });
+      await assert.rejects(verify.query("update performance_events set reason='篡改' where id=1"), /已入账业绩事件不可更新或删除/);
+      await assert.rejects(verify.query("delete from legacy_event_date_repair_evidence where event_id=1"), /导入批次行证据不可更新或删除/);
     } finally {
       await verify.end();
     }
