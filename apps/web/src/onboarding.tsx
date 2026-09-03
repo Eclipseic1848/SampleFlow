@@ -13,18 +13,36 @@ type TourStep = Readonly<{
 
 type Spotlight = Readonly<{ top: number; left: number; width: number; height: number }>;
 
-const STORAGE_VERSION = "v1";
+const STORAGE_VERSION = "v2";
+const STORAGE_PREFIX = "sampleflow:onboarding:";
+const CURRENT_STORAGE_PREFIX = `${STORAGE_PREFIX}${STORAGE_VERSION}:`;
 const memoryFlags = new Set<string>();
+const sessionDismissedFlags = new Set<string>();
+let legacyFlagsCleared = false;
+
+function clearLegacyFlags(): void {
+  if (legacyFlagsCleared) return;
+  legacyFlagsCleared = true;
+  try {
+    for (let index = window.localStorage.length - 1; index >= 0; index -= 1) {
+      const key = window.localStorage.key(index);
+      if (key?.startsWith(STORAGE_PREFIX) && !key.startsWith(CURRENT_STORAGE_PREFIX)) window.localStorage.removeItem(key);
+    }
+  } catch {
+    // 浏览器禁用存储时按未完成引导处理。
+  }
+}
 
 function roleKey(user: User): string {
   return [...user.roles].sort().join(".");
 }
 
 function storageKey(user: User, page: PageId | "all"): string {
-  return `sampleflow:onboarding:${STORAGE_VERSION}:${encodeURIComponent(user.id)}:${roleKey(user)}:${page}`;
+  return `${CURRENT_STORAGE_PREFIX}${encodeURIComponent(user.id)}:${roleKey(user)}:${page}`;
 }
 
 function hasFlag(key: string): boolean {
+  clearLegacyFlags();
   if (memoryFlags.has(key)) return true;
   try {
     return window.localStorage.getItem(key) === "completed";
@@ -34,6 +52,7 @@ function hasFlag(key: string): boolean {
 }
 
 function saveFlag(key: string): void {
+  clearLegacyFlags();
   memoryFlags.add(key);
   try {
     window.localStorage.setItem(key, "completed");
@@ -42,12 +61,16 @@ function saveFlag(key: string): void {
   }
 }
 
+function isDismissedForSession(key:string):boolean{if(sessionDismissedFlags.has(key))return true;try{return window.sessionStorage.getItem(key)==="dismissed";}catch{return false;}}
+function dismissForSession(key:string):void{sessionDismissedFlags.add(key);try{window.sessionStorage.setItem(key,"dismissed");}catch{/* 当前运行期内仍避免重复打扰。 */}}
+function clearSessionDismissal(key:string):void{sessionDismissedFlags.delete(key);try{window.sessionStorage.removeItem(key);}catch{/* 手动重播仍可继续。 */}}
+
 function target(page: PageId, anchor: string): string {
   if (page === "goals" || page === "approvals") return {
     "page-header": ".goals-page > header",
     "page-actions": ".goals-page > header .header-actions",
     "primary-content": ".goals-page > .orders-card",
-    "role-workspace": ".goals-page > .workflow-card",
+    "role-workspace": ".goals-page > .approval-tabs",
   }[anchor] ?? ".goals-page";
   if (page === "analysis") return anchor === "page-header" ? ".analysis-page .analysis-header" : ".analysis-page > .analysis-panel";
   if (page === "organization") return {
@@ -152,7 +175,7 @@ function pageSteps(page: PageId, user: User, includeNavigation: boolean): TourSt
   if (page === "approvals") steps.push(
     { target: target(page, "page-header"), title: "审批中心", description: approvalDescription(user) },
     { target: target(page, "primary-content"), title: "待确认与待审批", description: "操作按钮只会出现在当前人员可处理的目标版本上；冲突后页面会重新读取权威状态。" },
-    { target: target(page, "role-workspace"), title: "修改与联动", description: "修改申请不会直接覆盖生效目标；下级目标变化后，本级负责人必须明确选择是否联动调整。" },
+    { target: target(page, "role-workspace"), title: "修改与联动", description: "通过页签切换目标审批、修改申请与联动选择；修改不会直接覆盖生效目标。" },
   );
 
   if (page === "analysis") steps.push(
@@ -235,11 +258,12 @@ export function Onboarding({ user, page, canOpen, includeNavigation }: { user: U
     setSteps(available);
     setStepIndex(0);
     setOpen(true);
+    clearSessionDismissal(pageFlag);
     return true;
-  }, [canOpen, configuredSteps]);
+  }, [canOpen, configuredSteps, pageFlag]);
 
   useEffect(() => {
-    if (!canOpen || hasFlag(pageFlag) || hasFlag(allFlag) || autoAttempted.current.has(pageFlag)) return;
+    if (!canOpen || hasFlag(pageFlag) || hasFlag(allFlag) || isDismissedForSession(pageFlag) || autoAttempted.current.has(pageFlag)) return;
     const tryStart = () => {
       if (page === "overview" && !document.querySelector('[data-onboarding-page="overview"][data-onboarding-ready="true"]')) return false;
       if (!start()) return false;
@@ -311,11 +335,12 @@ export function Onboarding({ user, page, canOpen, includeNavigation }: { user: U
   const next = useCallback(() => setStepIndex((index) => Math.min(steps.length - 1, index + 1)), [steps.length]);
   const completePage = useCallback(() => { saveFlag(pageFlag); close(); }, [close, pageFlag]);
   const skipAll = useCallback(() => { saveFlag(allFlag); close(); }, [allFlag, close]);
+  const dismiss = useCallback(() => { dismissForSession(pageFlag); close(); }, [close, pageFlag]);
 
   useEffect(() => {
     if (!open) return;
     function keydown(event: KeyboardEvent) {
-      if (event.key === "Escape") { event.preventDefault(); close(); return; }
+      if (event.key === "Escape") { event.preventDefault(); dismiss(); return; }
       if (event.key === "ArrowLeft") { event.preventDefault(); previous(); return; }
       if (event.key === "ArrowRight") { event.preventDefault(); stepIndex === steps.length - 1 ? completePage() : next(); return; }
       if (event.key !== "Tab") return;
@@ -331,7 +356,7 @@ export function Onboarding({ user, page, canOpen, includeNavigation }: { user: U
     }
     document.addEventListener("keydown", keydown);
     return () => document.removeEventListener("keydown", keydown);
-  }, [close, completePage, next, open, previous, stepIndex, steps.length]);
+  }, [completePage, dismiss, next, open, previous, stepIndex, steps.length]);
 
   const position = spotlight ? bubblePosition(spotlight) : null;
   return <>
@@ -351,7 +376,7 @@ export function Onboarding({ user, page, canOpen, includeNavigation }: { user: U
             <button type="button" onClick={previous} disabled={stepIndex === 0}>上一步</button>
             <button type="button" className="primary-action" onClick={stepIndex === steps.length - 1 ? completePage : next}>{stepIndex === steps.length - 1 ? "完成" : "下一步"}</button>
           </div>
-          <small>← → 切换步骤，Esc 关闭</small>
+          <small>← → 切换步骤，Esc 稍后再看（本次会话不再自动提示）</small>
         </section>
       </div>,
       document.body,

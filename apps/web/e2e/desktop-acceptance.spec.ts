@@ -33,6 +33,11 @@ async function login(page: import("@playwright/test").Page, username: string) {
   await page.getByLabel("账号").fill(username);
   await page.getByLabel("密码", { exact: true }).fill("Desktop@123");
   await page.getByRole("button", { name: "进入 SampleFlow" }).click();
+  await expect.poll(async()=>{
+    await page.locator("body").press("Shift");
+    return page.evaluate(()=>Object.keys(window.localStorage).some((key)=>key.startsWith("sampleflow:onboarding:v2:")&&key.endsWith(":all")&&window.localStorage.getItem(key)==="completed"));
+  }).toBe(true);
+  await expect(page.locator(".onboarding-bubble")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "退出登录" })).toBeVisible();
 }
 
@@ -99,23 +104,29 @@ test("桌面关键页面无横向溢出且操作可达", async ({ database, page
   expect(await page.evaluate(() => navigator.language)).toBe("zh-CN");
   expect(await page.evaluate(() => Intl.DateTimeFormat().resolvedOptions().timeZone)).toBe("Asia/Shanghai");
 
+  let failOrganizationDetails=true;
+  await page.route("**/api/performance/sales-achievement/events?*",async(route)=>{if(failOrganizationDetails){failOrganizationDetails=false;await route.fulfill({status:503,contentType:"application/json",body:'{"message":"业绩构成暂时不可用"}'});return;}await route.continue();});
   const performanceDetails = page.getByRole("button", { name: "查看销售组织业绩构成" });
   await expectHorizontallyReachable(page, performanceDetails);
   await performanceDetails.click();
-  await expect(page.getByRole("dialog", { name: "销售组织 · 业绩构成" })).toBeVisible();
+  const organizationDetailsDialog=page.getByRole("dialog", { name: "销售组织 · 业绩构成" });
+  await expect(organizationDetailsDialog.getByRole("alert")).toHaveText("业绩构成暂时不可用");
+  await organizationDetailsDialog.getByRole("button",{name:"重试组织业绩构成"}).click();
+  await expect(organizationDetailsDialog.getByText(/条事件 · 净额/)).toBeVisible();
   await page.getByRole("button", { name: "关闭" }).click();
 
-  await page.getByRole("button", { name: "订单业绩", exact: true }).click();
+  await page.getByRole("link", { name: "订单业绩", exact: true }).click();
   await page.getByLabel("定位订单").fill("DESKTOP-NO-MATCH");
   await page.getByRole("button", { name: "搜索", exact: true }).click();
   await expect(page).toHaveURL(/orderSearch=DESKTOP-NO-MATCH/);
+  await page.locator(".order-filter-disclosure > summary").click();
   await expectHorizontallyReachable(page, page.getByRole("button", { name: "应用筛选" }));
 
-  await page.getByRole("button", { name: "业绩分析", exact: true }).click();
+  await page.getByRole("link", { name: "业绩分析", exact: true }).click();
   await expect(page.getByRole("heading", { name: "地区与客户单位分析" })).toBeVisible();
   await expectHorizontallyReachable(page, page.getByLabel("分析月份"));
 
-  await page.getByRole("button", { name: "账号管理", exact: true }).click();
+  await page.getByRole("link", { name: "账号管理", exact: true }).click();
   await page.getByLabel("搜索账号").fill("e2e_desktop_layout");
   await page.getByRole("button", { name: "搜索账号" }).click();
   await expect(page).toHaveURL(/accountSearch=e2e_desktop_layout/);
@@ -125,6 +136,8 @@ test("桌面关键页面无横向溢出且操作可达", async ({ database, page
   await page.goto("/?page=organization");
   await waitForPageReady(page, "组织架构");
   await expectSearchDecorationsClear(page);
+  expect(await page.locator(".org-grid").evaluate((element)=>getComputedStyle(element).gridTemplateColumns.split(" ").length)).toBe(1);
+  for(const pagination of await page.locator(".org-grid .table-pagination").all()){const rows=await pagination.locator(":scope > .page-size-select, :scope > button, :scope > .page-number-list").evaluateAll((elements)=>elements.map((element)=>Math.round(element.getBoundingClientRect().top)));expect(Math.max(...rows)-Math.min(...rows)).toBeLessThanOrEqual(1);}
 
   const pages = [
     ["overview", "业绩账本总览"],
@@ -140,6 +153,7 @@ test("桌面关键页面无横向溢出且操作可达", async ({ database, page
     await page.goto(`/?page=${pageId}`);
     await waitForPageReady(page, heading);
     await expectHorizontallyReachable(page, page.getByRole("button", { name: "退出登录" }));
+    for(const region of await page.locator(".orders-table-wrap").all()){await expect(region).toHaveAttribute("tabindex","0");await expect(region).toHaveAttribute("role","region");await expect(region).toHaveAttribute("aria-label",/.+/);}
     await expectNoPageOverflow(page);
   }
 
@@ -182,10 +196,10 @@ test("200% 桌面缩放仍保留导航、键盘焦点和无遮挡操作", async 
   await page.goto("/?page=overview");
   await login(page, "e2e_desktop_zoom");
   await expect(page.getByRole("button", { name: "退出登录" })).toBeVisible();
-  const navigation = page.locator(".sidebar nav button");
+  const navigation = page.locator(".sidebar nav a");
   await expect(navigation).toHaveCount(8);
   for (const item of await navigation.all()) await expect(item.locator("span")).toBeVisible();
-  await expect(page.getByRole("button", { name: "业绩总览", exact: true })).toHaveAttribute("aria-current", "page");
+  await expect(page.getByRole("link", { name: "业绩总览", exact: true })).toHaveAttribute("aria-current", "page");
   await expectNoPageOverflow(page);
 
   const skipLink = page.getByRole("link", { name: "跳到主要内容" });
@@ -195,7 +209,7 @@ test("200% 桌面缩放仍保留导航、键盘焦点和无遮挡操作", async 
   await page.keyboard.press("Enter");
   await expect(page.locator("#main-content")).toBeFocused();
 
-  await page.getByRole("button", { name: "账号管理", exact: true }).click();
+  await page.getByRole("link", { name: "账号管理", exact: true }).click();
   const heading = page.getByRole("heading", { name: "账号管理", level: 1 });
   await expect(heading).toBeFocused();
   await waitForPageReady(page, "账号管理");

@@ -70,7 +70,7 @@ const auditActionNames:Record<string,string>={
 const auditDomainNames:Record<string,string>={auth:"账号",organization:"组织",performance:"业绩",import:"导入",goal:"目标",audit:"审计",development:"开发维护"};
 const auditEntityNames:Record<string,string>={user:"账号",org_unit:"组织单元",org_membership:"人员任职",org_responsibility:"负责人职责",performance_order:"业绩订单",performance_event:"业绩事件",goal:"目标",goal_version:"目标版本",goal_change_request:"目标修改申请",goal_linkage_decision:"目标联动待办",import_config:"导入配置",import_batch:"导入批次"};
 const auditFieldNames:Record<string,string>={roles:"角色",personId:"人员",isActive:"是否启用",name:"名称",unitType:"组织类型",parentId:"上级组织",effectiveFrom:"生效日期",effectiveTo:"结束日期",effectiveOn:"办理日期",result:"处理结果",ownerPersonId:"责任人",orgUnitId:"责任组织",parentGoalId:"上级目标",periodMonth:"目标月份",level:"目标层级",amount:"目标金额",previousAmount:"原目标金额",newAmount:"新目标金额",changeReason:"变更原因",status:"状态",statement:"确认声明",confirmedAt:"确认时间",decision:"处理决定",comment:"处理意见",requestId:"请求标识",rowCount:"记录数",fileSha256:"文件校验值",failureCode:"失败原因",filterSummary:"筛选范围",customer:"客户",currentRevenue:"当前营业额",countedAmount:"计入业绩",reason:"原因",sourceSha256:"来源文件校验值",sourceFilename:"来源文件",predecessor:"原负责人",successor:"继任负责人",username:"账号",displayName:"姓名"};
-const auditValueNames:Record<string,string>={succeeded:"成功",completed:"已完成",blocked:"已阻止",approved:"已批准",rejected:"已拒绝",pending:"待处理",department:"部门",group:"小组",personal:"个人",sales_manager:"销售经理总目标",leader:"小组负责人",supervisor:"部门主管"};
+const auditValueNames:Record<string,string>={succeeded:"成功",completed:"已完成",blocked:"已阻止",approved:"已批准",rejected:"已拒绝",pending:"待处理",pending_signature:"待责任人确认",pending_gm:"待总经理审批",pending_hr:"待人事审批",active:"已生效",superseded:"已替代",accepted:"已接受",withdrawn:"已撤回",invalidated:"已失效",department:"部门",group:"小组",personal:"个人",sales_manager:"销售经理总目标",leader:"小组负责人",supervisor:"部门主管"};
 
 export function auditActionName(action:string){return auditActionNames[action]??`${auditDomainNames[action.split(".")[0]??""]??"其他"}业务操作`;}
 export function auditEntityName(entityType:string){return auditEntityNames[entityType]??"业务记录";}
@@ -80,8 +80,14 @@ function auditValueText(value:unknown):string{
   if(typeof value==="string")return roleNames[value]??auditValueNames[value]??value;
   if(typeof value==="number"||typeof value==="bigint")return String(value);
   if(Array.isArray(value))return value.length?value.map(auditValueText).join("、"):"无";
-  if(typeof value==="object")return Object.entries(value as Record<string,unknown>).map(([key,item])=>`${auditFieldNames[key]??"补充信息"}：${auditValueText(item)}`).join("；")||"无";
+  if(typeof value==="object")return Object.entries(value as Record<string,unknown>).map(([key,item])=>`${auditFieldNames[key]??key}：${auditValueText(item)}`).join("；")||"无";
   return String(value);
 }
 export function auditDataText(value:unknown){return value===null||value===undefined?"—":auditValueText(value);}
+export function auditChangeRows(beforeData:unknown,afterData:unknown){
+  const record=(value:unknown):Record<string,unknown>=>value&&typeof value==="object"&&!Array.isArray(value)?value as Record<string,unknown>:value===null||value===undefined?{}:{value};
+  const before=record(beforeData);const after=record(afterData);const keys=[...new Set([...Object.keys(before),...Object.keys(after)])];
+  return keys.map((key)=>({key,label:auditFieldNames[key]??(key==="value"?"值":key),before:auditValueText(before[key]),after:auditValueText(after[key])})).filter((item)=>item.before!==item.after);
+}
+export function auditChangeSummary(beforeData:unknown,afterData:unknown){const rows=auditChangeRows(beforeData,afterData);return rows.length?`${rows.slice(0,2).map((item)=>`${item.label}：${item.after}`).join("；")}${rows.length>2?` 等 ${rows.length} 项`:""}`:"无字段变化";}
 export function goalAuditName(action:string){return auditActionName(action);}

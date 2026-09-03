@@ -83,10 +83,18 @@ test("销售助理组长可用标准模板预检并确认整批入账", async ({
     }finally{await client.end();}
       await page.setViewportSize({width:390,height:844});
       await page.goto("/");await page.getByLabel("账号").fill("e2e_import_leader");await page.getByLabel("密码",{exact:true}).fill("E2ePass@123");await page.getByRole("button",{name:"进入 SampleFlow"}).click();
-      await page.getByRole("button",{name:"订单业绩",exact:true}).click();await page.getByRole("button",{name:"Excel 导入"}).click();
+      await page.getByRole("link",{name:"订单业绩",exact:true}).click();await page.getByRole("button",{name:"Excel 导入"}).click();
       await expect(page.getByRole("link",{name:"下载标准业绩模板"})).toHaveAttribute("href","/SampleFlow标准业绩导入模板.xlsx");
+      let releasePreflight!:()=>void;const heldPreflight=new Promise<void>((resolve)=>{releasePreflight=resolve;});let preflightRequests=0;
+      await page.route("**/api/imports/preflight",async(route)=>{preflightRequests+=1;await heldPreflight;await route.continue();});
       await page.locator('input[type="file"]').setInputFiles(importTemplate);await page.getByRole("button",{name:"运行只读预检"}).click();
+      const importDialog=page.getByRole("dialog",{name:"Excel 批量导入"});
+      await expect(importDialog.getByRole("button",{name:"正在预检…"})).toBeDisabled();
+      await expect(importDialog.getByRole("button",{name:"关闭"})).toBeDisabled();
+      await page.keyboard.press("Escape");await page.locator(".modal-backdrop").dispatchEvent("mousedown");
+      await expect(importDialog).toBeVisible();expect(preflightRequests).toBe(1);releasePreflight();
       await expect(page.getByRole("heading",{name:"预检通过，等待确认"})).toBeVisible();
+      await page.unroute("**/api/imports/preflight");
       await expect(page.getByRole("heading",{name:"逐月对账"})).toBeVisible();
       await expect(page.getByRole("row",{name:/2026-03.*1.*100\.00/})).toBeVisible();
       await page.getByRole("button",{name:"确认整批入账"}).click();
@@ -131,7 +139,7 @@ test("销售助理组长可在桌面端预检并确认合成历史分析维度�
         [standard.rows[0]!.sheet_name,JSON.stringify(standard.rows[0]!.expected_headers),JSON.stringify(columnMapping),JSON.stringify({[source.businessRegionSourceText]:"EXT-TRADE"})],
       );
       await page.setViewportSize({width:1280,height:900});await page.goto("/");await page.getByLabel("账号").fill("e2e_backfill_leader");await page.getByLabel("密码",{exact:true}).fill("E2ePass@123");await page.getByRole("button",{name:"进入 SampleFlow"}).click();
-      await page.getByRole("button",{name:"订单业绩",exact:true}).click();await page.getByRole("button",{name:"Excel 导入"}).click();
+      await page.getByRole("link",{name:"订单业绩",exact:true}).click();await page.getByRole("button",{name:"Excel 导入"}).click();
       await page.getByLabel("历史分析维度补齐").check();await expect(page.getByText("上传原始受控工作簿",{exact:false})).toBeVisible();
       await page.locator('input[type="file"]').setInputFiles(importTemplate);await page.getByRole("button",{name:"运行只读预检"}).click();
       await expect(page.getByRole("heading",{name:"预检通过，等待确认"})).toBeVisible();await expect(page.getByRole("heading",{name:"来源对账"})).toBeVisible();
@@ -178,23 +186,34 @@ test("订单台账支持每页条数与可点击页码", async ({ database, page
     await page.getByLabel("账号").fill("e2e_cursor_assistant");
     await page.getByLabel("密码", { exact: true }).fill("Cursor@123");
     await page.getByRole("button", { name: "进入 SampleFlow" }).click();
-    await page.getByRole("button", { name: "订单业绩", exact: true }).click();
+    await page.getByRole("link", { name: "订单业绩", exact: true }).click();
     const ledger = page.locator("section.orders-card").filter({ has: page.getByRole("heading", { name: "订单台账" }) });
-    await expect(ledger.getByText("本页 20 笔订单", { exact: true })).toBeVisible();
+    await expect(ledger.getByText("本页 10 笔订单", { exact: true })).toBeVisible();
     await expect(ledger.getByText("E2E-CURSOR-0101", { exact: true })).toBeVisible();
     await expect(ledger.getByText("待补齐", { exact: true }).first()).toBeVisible();
+    const amountStatus=ledger.locator(".order-amount-status").first();
+    const systemAmountBox=await amountStatus.locator("small").boundingBox();
+    const statusBox=await amountStatus.locator(".status").boundingBox();
+    expect(systemAmountBox).not.toBeNull();
+    expect(statusBox).not.toBeNull();
+    expect(statusBox!.y-(systemAmountBox!.y+systemAmountBox!.height)).toBeGreaterThanOrEqual(6);
     const scroller=ledger.locator(".order-ledger-scroll");
     const headers=ledger.getByRole("table", { name: "订单台账" }).getByRole("columnheader");
+    await expect(headers).toHaveCount(5);
     const beforeScroll=await headers.evaluateAll((cells)=>cells.map((cell)=>cell.getBoundingClientRect().x));
     expect(await headers.nth(0).evaluate((cell)=>getComputedStyle(cell).position)).toBe("sticky");
-    expect(await headers.nth(13).evaluate((cell)=>getComputedStyle(cell).position)).toBe("sticky");
-    await scroller.evaluate((element)=>{element.scrollLeft=element.scrollWidth-element.clientWidth;});
-    await expect.poll(()=>scroller.evaluate((element)=>element.scrollLeft)).toBeGreaterThan(0);
-    const afterScroll=await headers.evaluateAll((cells)=>cells.map((cell)=>cell.getBoundingClientRect().x));
-    for(const index of [0,1,2,13,14,15])expect(Math.abs(afterScroll[index]!-beforeScroll[index]!)).toBeLessThanOrEqual(1);
-    expect(afterScroll[3]!).toBeLessThan(beforeScroll[3]!-100);
-    expect(afterScroll[2]!+(await headers.nth(2).evaluate((cell)=>cell.getBoundingClientRect().width))).toBeLessThanOrEqual(afterScroll[13]!+1);
+    expect(await headers.nth(4).evaluate((cell)=>getComputedStyle(cell).position)).toBe("sticky");
+    const hasHorizontalOverflow=await scroller.evaluate((element)=>element.scrollWidth>element.clientWidth+1);
+    if(hasHorizontalOverflow){
+      await scroller.evaluate((element)=>{element.scrollLeft=element.scrollWidth-element.clientWidth;});
+      await expect.poll(()=>scroller.evaluate((element)=>element.scrollLeft)).toBeGreaterThan(0);
+      const afterScroll=await headers.evaluateAll((cells)=>cells.map((cell)=>cell.getBoundingClientRect().x));
+      for(const index of [0,4])expect(Math.abs(afterScroll[index]!-beforeScroll[index]!)).toBeLessThanOrEqual(1);
+      expect(afterScroll[1]!).toBeLessThan(beforeScroll[1]!-10);
+      expect(afterScroll[0]!+(await headers.nth(0).evaluate((cell)=>cell.getBoundingClientRect().width))).toBeLessThanOrEqual(afterScroll[4]!+1);
+    }
     const pageSize=ledger.getByLabel("订单每页条数");
+    await expect(pageSize).toHaveValue("10");
     expect(await pageSize.locator("option").allTextContents()).toEqual(["10 条/页","20 条/页","50 条/页","100 条/页"]);
     await pageSize.selectOption("50");
     await expect(ledger.getByText("本页 50 笔订单", { exact: true })).toBeVisible();
@@ -227,6 +246,14 @@ test("订单台账支持每页条数与可点击页码", async ({ database, page
     await page.getByLabel("定位订单").fill("E2E游标单位0042");
     await expect(ledger.getByText("E2E-CURSOR-0042", { exact: true })).toBeVisible();
     await expect(ledger.getByText("本页 1 笔订单", { exact: true })).toBeVisible();
+    await ledger.getByRole("button", { name: "查看 / 调整" }).click();
+    const orderDialog=page.getByRole("dialog", { name: "E2E-CURSOR-0042" });
+    await expect(orderDialog.getByRole("heading", { name: "订单资料" })).toBeVisible();
+    await expect(orderDialog).toContainText("E2E游标单位0042");
+    await expect(orderDialog).toContainText("服务类型");
+    await expect(orderDialog).toContainText("协作分配");
+    await expect(orderDialog).toContainText("备注");
+    await orderDialog.getByRole("button", { name: "关闭" }).click();
   } finally {
     await setup.end();
   }
@@ -296,9 +323,10 @@ test("订单组合筛选由 URL 恢复并区分空集、失败和无权限", asy
     await page.getByLabel("账号").fill("e2e_filter_assistant");
     await page.getByLabel("密码", { exact: true }).fill("Filter@123");
     await page.getByRole("button", { name: "进入 SampleFlow" }).click();
-    await page.getByRole("button", { name: "订单业绩", exact: true }).click();
+    await page.getByRole("link", { name: "订单业绩", exact: true }).click();
     const ledger = page.locator("section.orders-card").filter({ has: page.getByRole("heading", { name: "订单台账" }) });
     await ledger.getByLabel("订单每页条数").selectOption("50");
+    await ledger.locator("summary").filter({ hasText: "筛选条件" }).click();
 
     await page.getByLabel("订单月份").fill(matching.month);
     await page.getByRole("button", { name: "应用筛选" }).click();
@@ -307,6 +335,7 @@ test("订单组合筛选由 URL 恢复并区分空集、失败和无权限", asy
     await expect(page).toHaveURL(/orderSearch=%E7%94%B2%E4%B9%99/);
     await page.goBack();
     await expect(orderSearch).toHaveValue("");
+    await ledger.locator("summary").filter({ hasText: "筛选条件" }).click();
     await page.getByLabel("订单月份").fill(matching.month);
     await page.getByLabel("部门筛选").fill(matching.department);
     await orderSearch.fill("E2E-FILTER-");
@@ -552,10 +581,10 @@ test("系统管理员在账号管理页查看只读角色权限说明", async ({
       await page.getByRole("button", { name: "进入 SampleFlow" }).click();
 
       expect((await accountsResponse).status()).toBe(200);
-      await expect(page.getByRole("button", { name: "账号管理" })).toHaveAttribute("aria-current", "page");
-      await expect(page.getByRole("button", { name: "业绩总览" })).toHaveCount(0);
-      await expect(page.getByRole("button", { name: "订单业绩" })).toHaveCount(0);
-      await expect(page.getByRole("button", { name: "目标管理" })).toHaveCount(0);
+      await expect(page.getByRole("link", { name: "账号管理" })).toHaveAttribute("aria-current", "page");
+      await expect(page.getByRole("link", { name: "业绩总览" })).toHaveCount(0);
+      await expect(page.getByRole("link", { name: "订单业绩" })).toHaveCount(0);
+      await expect(page.getByRole("link", { name: "目标管理" })).toHaveCount(0);
       await expect(page.getByRole("heading", { name: "角色权限说明" })).toBeVisible();
       await expect(page.getByText("多角色账号取各角色权限并集；系统管理员角色本身不增加业务权限")).toBeVisible();
 
@@ -605,7 +634,7 @@ test("目标未生效时页面不提供正式报表，生效后才可查看", as
       await page.getByLabel("账号").fill("e2e_salesperson_report");
       await page.getByLabel("密码", { exact: true }).fill("Report@123");
       await page.getByRole("button", { name: "进入 SampleFlow" }).click();
-      await page.getByRole("button", { name: "目标管理" }).click();
+      await page.getByRole("link", { name: "目标管理" }).click();
 
       const pendingRow = page.getByRole("row").filter({ hasText: "2026-09" });
       await expect(pendingRow).toContainText("待人事审批");
@@ -648,10 +677,10 @@ test("销售经理可从选择器创建顶层目标并完成总经理到人事�
     const logout=async()=>{await page.getByRole("button",{name:"退出登录"}).click();await expect(page.getByRole("heading",{name:"登录系统"})).toBeVisible();};
       let delayedGoalOptions=false;
       await page.route("**/api/goals/options?*",async(route)=>{if(!delayedGoalOptions&&route.request().url().includes("periodMonth=2026-11")&&route.request().url().includes("level=sales_manager")){delayedGoalOptions=true;await new Promise((resolve)=>setTimeout(resolve,6000));}await route.continue();});
-      await page.goto("/");await login("e2e_goal_manager");await expect(page.getByRole("button",{name:"目标管理"})).toBeVisible();
+      await page.goto("/");await login("e2e_goal_manager");await expect(page.getByRole("link",{name:"目标管理"})).toBeVisible();
       const illegalRoot=await page.evaluate(async({ownerPersonId})=>{const csrf=document.cookie.split("; ").find((item)=>item.startsWith("sampleflow_csrf="))?.split("=")[1]??"";const response=await fetch("/api/goals",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":decodeURIComponent(csrf)},body:JSON.stringify({periodMonth:"2026-11",level:"sales_manager",ownerPersonId:Number(ownerPersonId),orgUnitId:null,parentGoalId:999999,amount:1000,changeReason:"非法顶层父目标"})});return{status:response.status,body:await response.text()};},{ownerPersonId:managerPersonId});
       expect(illegalRoot.status).toBe(400);expect(illegalRoot.body).not.toMatch(/constraint|foreign key/i);
-      await page.getByRole("button",{name:"目标管理"}).click();
+      await page.getByRole("link",{name:"目标管理"}).click();
       await page.getByRole("button",{name:"下达目标"}).click();
       await expect(page.getByLabel("目标层级")).toHaveValue("sales_manager");
       const goalOptionsResponse=page.waitForResponse((response)=>response.url().includes("/api/goals/options?")&&response.url().includes("periodMonth=2026-11")&&response.url().includes("level=sales_manager")&&response.status()===200);
@@ -676,7 +705,7 @@ test("销售经理可从选择器创建顶层目标并完成总经理到人事�
       await expect(topRow).toContainText("待总经理审批");
 
       let delayedHistory=false;await page.route("**/api/goals/*/history",async(route)=>{if(!delayedHistory){delayedHistory=true;await new Promise((resolve)=>setTimeout(resolve,500));}await route.continue();});
-      await logout();await login("e2e_goal_gm");await page.getByRole("button",{name:"审批中心"}).click();
+      await logout();await login("e2e_goal_gm");await page.getByRole("link",{name:"审批中心"}).click();
       const gmRow=page.getByRole("row").filter({hasText:"2026-11"});await gmRow.getByRole("button",{name:"批准"}).click();
       const gmDialog=page.getByRole("dialog");
       await expect(gmDialog.getByRole("button",{name:"确认批准"})).toBeDisabled();
@@ -692,14 +721,14 @@ test("销售经理可从选择器创建顶层目标并完成总经理到人事�
       await expect(page.getByText("状态已变化，已重新读取权威状态。")).toBeVisible();
       await expect(gmRow).toHaveCount(0);
 
-      await logout();await login("e2e_goal_hr");await page.getByRole("button",{name:"审批中心"}).click();
+      await logout();await login("e2e_goal_hr");await page.getByRole("link",{name:"审批中心"}).click();
       const hrRow=page.getByRole("row").filter({hasText:"2026-11"});await hrRow.getByRole("button",{name:"批准"}).click();
       await expect(page.getByRole("dialog").getByRole("heading",{name:"审批依据"})).toBeVisible();
       await expect(page.getByRole("dialog")).toContainText("并发总经理批准");
       await page.getByLabel("审批意见").fill("人事终审同意");await page.getByRole("button",{name:"确认批准"}).click();
       await expect(hrRow).toHaveCount(0);
 
-      await logout();await login("e2e_goal_manager");await page.getByRole("button",{name:"目标管理"}).click();
+      await logout();await login("e2e_goal_manager");await page.getByRole("link",{name:"目标管理"}).click();
       const activeTopGoal=page.getByRole("row").filter({hasText:"2026-11"}).filter({hasText:"已生效"});
       await expect(activeTopGoal).toBeVisible();
       await activeTopGoal.getByRole("button",{name:"版本与记录"}).click();
@@ -744,12 +773,14 @@ test("目标修改申请在审批中心完成填金额、重新确认、终审�
     const login=async(username:string)=>{await page.getByLabel("账号").fill(username);await page.getByLabel("密码",{exact:true}).fill("Goal@123");await page.getByRole("button",{name:"进入 SampleFlow"}).click();};
     const logout=async()=>{await page.getByRole("button",{name:"退出登录"}).click();await expect(page.getByRole("heading",{name:"登录系统"})).toBeVisible();};
       await page.goto("/");
-      await login("e2e_change_salesperson");await page.getByRole("button",{name:"目标管理"}).click();
+      await login("e2e_change_salesperson");await page.getByRole("link",{name:"目标管理"}).click();
       const personalRow=page.getByRole("row").filter({hasText:"E2E 变更业务员"});await personalRow.getByRole("button",{name:"申请修改"}).click();
       await page.getByLabel("修改原因").fill("客户结构发生变化");await page.getByLabel("建议金额（可选）").fill("450");await page.getByRole("button",{name:"提交修改申请"}).click();
       await expect(page.getByText("修改申请已提交。")).toBeVisible();
 
-      await logout();await login("e2e_change_leader");await page.getByRole("button",{name:"审批中心"}).click();
+      await logout();await login("e2e_change_leader");await page.getByRole("link",{name:"审批中心"}).click();
+      const changeTab=page.getByRole("button",{name:/^目标修改申请/});await expect(changeTab).toHaveAttribute("aria-current","page");await expect(page).toHaveURL(/approvalTab=changes/);
+      await page.reload();await expect(page.getByRole("button",{name:/^目标修改申请/})).toHaveAttribute("aria-current","page");
       const requestRow=page.getByRole("row").filter({hasText:"E2E 变更业务员"}).filter({hasText:"客户结构发生变化"});await requestRow.getByRole("button",{name:"接受并填金额"}).click();
       const concurrentRequestDecision=await page.evaluate(async()=>{const workflows=await fetch("/api/goal-workflows").then((response)=>response.json()) as {changeRequests:Array<{id:string;reason:string}>;linkageDecisions:unknown[]};const request=workflows.changeRequests.find((item)=>item.reason==="客户结构发生变化")!;const csrf=document.cookie.split("; ").find((item)=>item.startsWith("sampleflow_csrf="))?.split("=")[1]??"";const response=await fetch(`/api/goal-change-requests/${request.id}/accept`,{method:"POST",headers:{"content-type":"application/json","x-csrf-token":decodeURIComponent(csrf)},body:JSON.stringify({newAmount:450,comment:"并发接受修改"})});return{status:response.status,staleWorkflows:workflows};});
       expect(concurrentRequestDecision.status).toBe(200);
@@ -757,23 +788,23 @@ test("目标修改申请在审批中心完成填金额、重新确认、终审�
       await page.getByLabel("新目标金额").fill("450");await page.getByLabel("处理意见").fill("同意按客户结构调整");await page.getByRole("button",{name:"接受并创建新版本"}).click();
       await expect(page.getByText(/状态已变化.*列表刷新失败/)).toBeVisible();
       await expect(requestRow).toHaveCount(0);
-      await page.getByRole("button",{name:"目标管理"}).click();await page.getByRole("button",{name:"审批中心"}).click();
+      await page.getByRole("link",{name:"目标管理"}).click();await page.getByRole("link",{name:"审批中心"}).click();
       await expect(page.getByRole("row").filter({hasText:"客户结构发生变化"})).toHaveCount(0);
 
       let releaseStaleLoad!:()=>void;let markStaleLoadStarted!:()=>void;let workflowLoadCount=0;
       const staleLoadGate=new Promise<void>((resolve)=>{releaseStaleLoad=resolve;});const staleLoadStarted=new Promise<void>((resolve)=>{markStaleLoadStarted=resolve;});
       await page.route("**/api/goal-workflows",async(route)=>{workflowLoadCount+=1;if(workflowLoadCount===1){markStaleLoadStarted();await staleLoadGate;await route.fulfill({status:200,contentType:"application/json",body:JSON.stringify(concurrentRequestDecision.staleWorkflows)});return;}await route.continue();});
-      await page.getByRole("button",{name:"目标管理"}).click();await page.getByRole("button",{name:"审批中心"}).click();await staleLoadStarted;
-      await page.getByRole("button",{name:"目标管理"}).click();const currentWorkflowResponse=page.waitForResponse((response)=>response.url().endsWith("/api/goal-workflows")&&response.status()===200);await page.getByRole("button",{name:"审批中心"}).click();await currentWorkflowResponse;
+      await page.getByRole("link",{name:"目标管理"}).click();await page.getByRole("link",{name:"审批中心"}).click();await staleLoadStarted;
+      await page.getByRole("link",{name:"目标管理"}).click();const currentWorkflowResponse=page.waitForResponse((response)=>response.url().endsWith("/api/goal-workflows")&&response.status()===200);await page.getByRole("link",{name:"审批中心"}).click();await currentWorkflowResponse;
       const staleWorkflowResponse=page.waitForResponse((response)=>response.url().endsWith("/api/goal-workflows")&&response.status()===200);releaseStaleLoad();await (await staleWorkflowResponse).finished();
       await page.evaluate(()=>new Promise<void>((resolve)=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve()))));
       await expect(page.getByRole("row").filter({hasText:"客户结构发生变化"})).toHaveCount(0);
 
-      await logout();await login("e2e_change_salesperson");await page.getByRole("button",{name:"目标管理"}).click();
+      await logout();await login("e2e_change_salesperson");await page.getByRole("link",{name:"目标管理"}).click();
       const pendingRow=page.getByRole("row").filter({hasText:"E2E 变更业务员"});await expect(pendingRow).toContainText("¥450.00");await pendingRow.getByRole("button",{name:"确认目标"}).click();
       await page.getByRole("button",{name:"确认目标"}).click();
 
-      await logout();await login("e2e_change_hr");await page.getByRole("button",{name:"审批中心"}).click();
+      await logout();await login("e2e_change_hr");await page.getByRole("link",{name:"审批中心"}).click();await page.getByRole("button",{name:/^待确认与待审批目标/}).click();
       const approvalRow=page.getByRole("row").filter({hasText:"E2E 变更业务员"}).filter({hasText:"待人事审批"});await approvalRow.getByRole("button",{name:"批准"}).click();
       const approvalDialog=page.getByRole("dialog");
       await expect(approvalDialog.getByRole("heading",{name:"审批依据"})).toBeVisible();
@@ -786,31 +817,32 @@ test("目标修改申请在审批中心完成填金额、重新确认、终审�
       await expect(approvalDialog).toContainText("并发接受修改");
       await page.getByLabel("审批意见").fill("人事确认变更链完整");await page.getByRole("button",{name:"确认批准"}).click();
 
-      await logout();await login("e2e_change_leader");await page.getByRole("button",{name:"审批中心"}).click();
+      await logout();await login("e2e_change_leader");await page.getByRole("link",{name:"审批中心"}).click();await page.getByRole("button",{name:/^目标联动选择/}).click();
       const linkageRow=page.getByRole("row").filter({hasText:"E2E 变更业务员"}).filter({hasText:"¥450.00"});await linkageRow.getByRole("button",{name:"选择是否调整"}).click();
       await page.getByLabel("处理方式").selectOption("keep_parent");await page.getByLabel("联动原因").fill("小组目标维持六百元");await page.getByRole("button",{name:"确认联动选择"}).click();
       const linkageCard=page.locator("section.workflow-card").filter({has:page.getByRole("heading",{name:"目标联动选择"})});
       await expect(linkageCard.getByRole("row").filter({hasText:"E2E 变更业务员"})).toHaveCount(0);
 
-      await logout();await login("e2e_change_salesperson");await page.getByRole("button",{name:"目标管理"}).click();
+      await logout();await login("e2e_change_salesperson");await page.getByRole("link",{name:"目标管理"}).click();
       const activePersonal=page.getByRole("row").filter({hasText:"E2E 变更业务员"});await activePersonal.getByRole("button",{name:"申请修改"}).click();
       await page.getByLabel("修改原因").fill("再次调整并联动上级");await page.getByLabel("建议金额（可选）").fill("475");await page.getByRole("button",{name:"提交修改申请"}).click();
 
-      await logout();await login("e2e_change_leader");await page.getByRole("button",{name:"审批中心"}).click();
+      await logout();await login("e2e_change_leader");await page.getByRole("link",{name:"审批中心"}).click();await page.getByRole("button",{name:/^目标修改申请/}).click();
       const secondRequest=page.getByRole("row").filter({hasText:"再次调整并联动上级"});await secondRequest.getByRole("button",{name:"接受并填金额"}).click();
       await page.getByLabel("新目标金额").fill("475");await page.getByLabel("处理意见").fill("接受第二次调整");await page.getByRole("button",{name:"接受并创建新版本"}).click();
 
-      await logout();await login("e2e_change_salesperson");await page.getByRole("button",{name:"目标管理"}).click();
+      await logout();await login("e2e_change_salesperson");await page.getByRole("link",{name:"目标管理"}).click();
       const secondPending=page.getByRole("row").filter({hasText:"E2E 变更业务员"});await secondPending.getByRole("button",{name:"确认目标"}).click();
       await page.getByRole("button",{name:"确认目标"}).click();
 
-      await logout();await login("e2e_change_hr");await page.getByRole("button",{name:"审批中心"}).click();
+      await logout();await login("e2e_change_hr");await page.getByRole("link",{name:"审批中心"}).click();await page.getByRole("button",{name:/^待确认与待审批目标/}).click();
       const secondApproval=page.getByRole("row").filter({hasText:"E2E 变更业务员"}).filter({hasText:"待人事审批"});await secondApproval.getByRole("button",{name:"批准"}).click();
       await page.getByLabel("审批意见").fill("人事批准第二次调整");await page.getByRole("button",{name:"确认批准"}).click();
 
-      await logout();await login("e2e_change_leader");await page.getByRole("button",{name:"审批中心"}).click();
+      await logout();await login("e2e_change_leader");await page.getByRole("link",{name:"审批中心"}).click();await page.getByRole("button",{name:/^目标联动选择/}).click();
       const secondLinkage=page.getByRole("row").filter({hasText:"E2E 变更业务员"}).filter({hasText:"¥475.00"});await secondLinkage.getByRole("button",{name:"选择是否调整"}).click();
       await page.getByLabel("处理方式").selectOption("adjust_parent");await page.getByLabel("联动原因").fill("需要同步调整小组目标");await page.getByRole("button",{name:"确认联动选择"}).click();
+      await page.getByRole("button",{name:/^目标修改申请/}).click();
       const changeCard=page.locator("section.workflow-card").filter({has:page.getByRole("heading",{name:"目标修改申请"})});
       await expect(changeCard.getByRole("row").filter({hasText:"E2E 变更组长"}).filter({hasText:"需要同步调整小组目标"})).toContainText("待处理");
 });
@@ -828,7 +860,7 @@ test("系统管理员通过页面办理组织异动并保留前后有效期", as
       await page.getByLabel("账号").fill("e2e_org_admin");
       await page.getByLabel("密码",{exact:true}).fill("OrgAdmin@123");
       await page.getByRole("button",{name:"进入 SampleFlow"}).click();
-      await page.getByRole("button",{name:"组织架构"}).click();
+      await page.getByRole("link",{name:"组织架构"}).click();
 
       for(const departmentName of ["E2E 原部门","E2E 新部门"]){
         await page.getByRole("button",{name:"新增组织"}).click();
@@ -932,7 +964,7 @@ test("系统管理员通过页面办理组织异动并保留前后有效期", as
       await page.getByLabel("账号",{exact:true}).fill("e2e_org_assistant");
       await page.getByLabel("密码",{exact:true}).fill("OrgAssistant@123");
       await page.getByRole("button",{name:"进入 SampleFlow"}).click();
-      await page.getByRole("button",{name:"订单业绩",exact:true}).click();
+      await page.getByRole("link",{name:"订单业绩",exact:true}).click();
       await page.getByRole("button",{name:"录入新订单"}).click();
       const createOrderDialog=page.getByRole("dialog",{name:"录入订单业绩"});
       await page.getByLabel("订单编号").fill("ORG-TRANSFER-E2E-100");
@@ -1017,7 +1049,7 @@ test("订单搜索与不可变事件链在浏览器和数据库中保持一致",
       await page.getByLabel("账号").fill("e2e_ledger_assistant");
       await page.getByLabel("密码", { exact: true }).fill("Ledger@123");
       await page.getByRole("button", { name: "进入 SampleFlow" }).click();
-      await page.getByRole("button", { name: "订单业绩", exact:true }).click();
+      await page.getByRole("link", { name: "订单业绩", exact:true }).click();
 
       await page.getByRole("button", { name: "录入新订单" }).click();
       const createOrderDialog=page.getByRole("dialog",{name:"录入订单业绩"});
@@ -1105,8 +1137,14 @@ test("订单搜索与不可变事件链在浏览器和数据库中保持一致",
       await page.getByLabel("账号").fill("e2e_accounting_leader");
       await page.getByLabel("密码", { exact: true }).fill("Ledger@123");
       await page.getByRole("button",{name:"进入 SampleFlow"}).click();
-      await page.getByRole("button",{name:"订单业绩",exact:true}).click();
+      await page.getByRole("link",{name:"订单业绩",exact:true}).click();
       await expect(page.getByRole("heading",{name:"记账治理工作台"})).toBeVisible();
+      await page.getByRole("heading",{name:"记账治理工作台"}).click();
+      await expect(page.getByLabel("记账期间每页条数")).toHaveValue("10");
+      await expect(page.getByLabel("更正申请每页条数")).toHaveValue("10");
+      await expect(page.getByLabel("历史核对每页条数")).toHaveValue("10");
+      expect(await page.getByLabel("记账期间每页条数").locator("option").allTextContents()).toEqual(["10 条/页","20 条/页","50 条/页","100 条/页"]);
+      await page.getByText("组长核对确认",{exact:true}).click();
       await page.getByLabel("定位订单").fill("当前列表无结果");
       await page.getByRole("button",{name:"搜索",exact:true}).click();
       await expect(page.getByText("没有符合当前组合条件的订单。",{exact:true})).toBeVisible();
@@ -1119,7 +1157,9 @@ test("订单搜索与不可变事件链在浏览器和数据库中保持一致",
       await page.getByLabel("账号").fill("e2e_accounting_hr");
       await page.getByLabel("密码", { exact: true }).fill("Ledger@123");
       await page.getByRole("button",{name:"进入 SampleFlow"}).click();
-      await page.getByRole("button",{name:"订单业绩",exact:true}).click();
+      await page.getByRole("link",{name:"订单业绩",exact:true}).click();
+      await page.getByRole("heading",{name:"记账治理工作台"}).click();
+      await page.getByText("人事关账",{exact:true}).click();
       await page.getByLabel("记账月份").fill("2026-07");
       await page.getByLabel("关账说明").fill("七月浏览器关账");
       let closeRequests=0;
@@ -1147,9 +1187,12 @@ test("订单搜索与不可变事件链在浏览器和数据库中保持一致",
       await page.getByLabel("账号").fill("e2e_accounting_leader");
       await page.getByLabel("密码", { exact: true }).fill("Ledger@123");
       await page.getByRole("button",{name:"进入 SampleFlow"}).click();
-      await page.getByRole("button",{name:"订单业绩",exact:true}).click();
-      await page.getByLabel("记账月份").fill("2026-07");
-      const correctionForm=page.getByRole("heading",{name:"申请关闭月更正"}).locator("..");
+      await page.getByRole("link",{name:"订单业绩",exact:true}).click();
+      await page.getByRole("heading",{name:"记账治理工作台"}).click();
+      const correctionTask=page.locator("details.governance-task").filter({hasText:"申请关闭月更正"});
+      await correctionTask.getByText("申请关闭月更正",{exact:true}).click();
+      const correctionForm=correctionTask.locator("form");
+      await correctionForm.getByLabel("更正月份").fill("2026-07");
       await correctionForm.getByLabel("精确订单编号").fill("不存在的订单");
       await correctionForm.getByRole("button",{name:"查询订单"}).click();
       await expect(correctionForm.getByText("未找到可访问的精确订单。",{exact:true})).toBeVisible();
@@ -1175,7 +1218,8 @@ test("订单搜索与不可变事件链在浏览器和数据库中保持一致",
       await page.getByLabel("账号").fill("e2e_accounting_hr");
       await page.getByLabel("密码", { exact: true }).fill("Ledger@123");
       await page.getByRole("button",{name:"进入 SampleFlow"}).click();
-      await page.getByRole("button",{name:"订单业绩",exact:true}).click();
+      await page.getByRole("link",{name:"订单业绩",exact:true}).click();
+      await page.getByRole("heading",{name:"记账治理工作台"}).click();
       await page.getByLabel("审批意见").fill("同意浏览器更正");
       await page.getByRole("button",{name:"批准",exact:true}).click();
       confirmation=page.getByRole("dialog",{name:"确认批准更正"});
@@ -1188,7 +1232,8 @@ test("订单搜索与不可变事件链在浏览器和数据库中保持一致",
       await page.getByLabel("账号").fill("e2e_accounting_leader");
       await page.getByLabel("密码", { exact: true }).fill("Ledger@123");
       await page.getByRole("button",{name:"进入 SampleFlow"}).click();
-      await page.getByRole("button",{name:"订单业绩",exact:true}).click();
+      await page.getByRole("link",{name:"订单业绩",exact:true}).click();
+      await page.getByRole("heading",{name:"记账治理工作台"}).click();
       await page.getByRole("button",{name:"执行更正"}).click();
       const executionDialog=page.getByRole("dialog",{name:/执行更正 · CHAIN-E2E-110/});
       await expect(executionDialog).toContainText("将追加不可变更正事件");

@@ -6,7 +6,7 @@ export const PAGE_SIZES=[10,20,50,100] as const;
 export type PageSize=(typeof PAGE_SIZES)[number];
 
 export function parsePageNumber(value:string|null):number{const parsed=Number(value);return Number.isInteger(parsed)&&parsed>0&&parsed<=1_000_000?parsed:1;}
-export function parsePageSize(value:string|null):PageSize{const parsed=Number(value);return PAGE_SIZES.includes(parsed as PageSize)?parsed as PageSize:20;}
+export function parsePageSize(value:string|null):PageSize{const parsed=Number(value);return PAGE_SIZES.includes(parsed as PageSize)?parsed as PageSize:10;}
 
 function pageNumbers(page:number,pageCount:number):Array<number|string>{
   const visible=[...new Set([1,page-1,page,page+1,pageCount].filter((value)=>value>=1&&value<=pageCount))].sort((a,b)=>a-b);
@@ -19,7 +19,7 @@ export function Pagination({label,page,pageSize,totalItems,onPageChange,onPageSi
 }
 
 export function usePagination<T>(items:readonly T[],resetKey?:unknown){
-  const[page,setPage]=useState(1);const[pageSize,setPageSize]=useState<PageSize>(20);const pageCount=Math.max(1,Math.ceil(items.length/pageSize));const currentPage=Math.min(page,pageCount);
+  const[page,setPage]=useState(1);const[pageSize,setPageSize]=useState<PageSize>(10);const pageCount=Math.max(1,Math.ceil(items.length/pageSize));const currentPage=Math.min(page,pageCount);
   useEffect(()=>setPage(1),[resetKey]);
   useEffect(()=>setPage((value)=>Math.min(value,pageCount)),[pageCount]);
   return{items:items.slice((currentPage-1)*pageSize,currentPage*pageSize),page:currentPage,pageSize,totalItems:items.length,onPageChange:setPage,onPageSizeChange:(value:PageSize)=>{setPageSize(value);setPage(1);}};
@@ -29,6 +29,8 @@ export function PaginatedCollection<T>({items,label,resetKey,children}:{items:re
   const pagination=usePagination(items,resetKey);
   return <>{children(pagination.items)}<Pagination label={label} page={pagination.page} pageSize={pagination.pageSize} totalItems={pagination.totalItems} onPageChange={pagination.onPageChange} onPageSizeChange={pagination.onPageSizeChange}/></>;
 }
+
+export function confirmDiscard(dirty:boolean){return !dirty||window.confirm("当前内容尚未保存，确定放弃吗？");}
 
 export function Field({ label, value, onChange, type="text", required=true, min, max }: { label: string; value: string; onChange: (value: string) => void; type?: string; required?: boolean; min?: string; max?: string }) { const errorId=useId();const[error,setError]=useState("");return <label className="field"><span>{label}</span><input required={required} value={value} type={type} min={type === "number" ? min??"0" : undefined} max={type === "number" ? max??"99999999999.99" : undefined} step={type === "number" ? "0.01" : undefined} aria-invalid={error?true:undefined} aria-describedby={error?errorId:undefined} onInvalid={(event)=>setError(event.currentTarget.validity.valueMissing?`请输入${label}。`:`${label}格式无效。`)} onChange={(event) => {setError("");onChange(event.target.value);}}/>{error?<small id={errorId} className="form-error field-error">{error}</small>:null}</label>; }
 export function Modal({ title, note, onClose, preventClose=false, children }: { title: string; note: string; onClose: () => void; preventClose?: boolean; children: ReactNode }) { const titleId=useId();const noteId=useId();const dialogRef=useRef<HTMLElement>(null);const closeRef=useRef(onClose);const requestClose=()=>{if(!preventClose)onClose();};closeRef.current=requestClose;useEffect(()=>{const prior=document.activeElement instanceof HTMLElement?document.activeElement:null;const root=document.getElementById("root");const priorOverflow=document.body.style.overflow;root?.setAttribute("inert","");root?.setAttribute("aria-hidden","true");document.body.style.overflow="hidden";const dialog=dialogRef.current;dialog?.focus();function keydown(event:KeyboardEvent){if(event.key==="Escape"){event.preventDefault();closeRef.current();return;}if(event.key!=="Tab"||!dialog)return;const controls=[...dialog.querySelectorAll<HTMLElement>('button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[href],[tabindex]:not([tabindex="-1"])')].filter((item)=>!item.hasAttribute("hidden"));if(!controls.length){event.preventDefault();dialog.focus();return;}const first=controls[0]!;const last=controls.at(-1)!;if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus();}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus();}}document.addEventListener("keydown",keydown);return()=>{document.removeEventListener("keydown",keydown);root?.removeAttribute("inert");root?.removeAttribute("aria-hidden");document.body.style.overflow=priorOverflow;prior?.focus();};},[]);return createPortal(<div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) requestClose(); }}><section ref={dialogRef} tabIndex={-1} className="modal" role="dialog" aria-modal="true" aria-labelledby={titleId} aria-describedby={noteId}><header><div><h2 id={titleId}>{title}</h2><p id={noteId}>{note}</p></div><button type="button" onClick={requestClose} disabled={preventClose} aria-label="关闭">×</button></header>{children}</section></div>,document.body); }

@@ -72,7 +72,7 @@ export async function registerAudits(app: FastifyInstance, db: Database) {
     const { cursor: encodedCursor, snapshot:encodedSnapshot, page:requestedPage, pageSize:requestedPageSize, ...filters } = parsed.data;
     const numbered=requestedPage!==undefined||requestedPageSize!==undefined;
     if((numbered&&encodedCursor)||(!numbered&&encodedSnapshot))return reply.code(400).send({message:"页码快照只能与页码一起使用，且不能与游标混用"});
-    const page=requestedPage??1;const pageSize=requestedPageSize??20;
+    const page=requestedPage??1;const pageSize=requestedPageSize??10;
     const cursor = encodedCursor ? decodeAuditCursor(encodedCursor) : null;
     if (encodedCursor && (!cursor || cursor.userId !== request.currentUser.id || JSON.stringify(cursor.filters) !== JSON.stringify(filters))) {
       return reply.code(400).send({ message: "审计分页游标无效或已不适用于当前查询" });

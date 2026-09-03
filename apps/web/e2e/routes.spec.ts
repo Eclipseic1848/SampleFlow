@@ -48,7 +48,9 @@ test("八个主要页面使用稳定 URL、标题并支持刷新和浏览器历�
   ] as const;
 
   for (const route of routes) {
-    if (route.id !== "overview") await page.getByRole("button", { name: route.nav }).click();
+    const navigation=page.getByRole("link", { name: route.nav });
+    await expect(navigation).toHaveAttribute("href",new RegExp(`[?&]page=${route.id}(?:&|#|$)`));
+    if (route.id !== "overview") await navigation.click();
     await expect(page).toHaveURL(new RegExp(`[?&]page=${route.id}(?:&|$)`));
     await expect(page.getByRole("heading", { name: route.heading, exact: true })).toBeVisible();
     await expect(page).toHaveTitle(route.title);
@@ -61,13 +63,13 @@ test("八个主要页面使用稳定 URL、标题并支持刷新和浏览器历�
   await expect(page.getByRole("heading", { name: "审计查询", exact: true })).toBeVisible();
   await page.reload();
   await expect(page.getByRole("heading", { name: "审计查询", exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "账号管理" }).click();
+  await page.getByRole("link", { name: "账号管理" }).click();
   await page.getByLabel("搜索账号").fill("e2e_routes");
   await page.getByRole("button", { name: "搜索账号" }).click();
   await expect(page).toHaveURL(/accountSearch=e2e_routes/);
-  await page.getByRole("button", { name: "账号管理" }).click();
+  await page.getByRole("link", { name: "账号管理" }).click();
   await expect(page).toHaveURL(/accountSearch=e2e_routes/);
-  await page.getByRole("button", { name: "审计查询" }).click();
+  await page.getByRole("link", { name: "审计查询" }).click();
   await page.goBack();
   await expect(page.getByLabel("搜索账号")).toHaveValue("e2e_routes");
 
@@ -141,7 +143,7 @@ test("退出失败保留会话，受保护请求只在 401 时回到登录", asy
   });
   await page.getByRole("button", { name: "导出当前授权范围匹配订单" }).click();
   await expect(page.getByRole("heading", { name: "登录系统", exact: true })).toBeVisible();
-  await expect(page).toHaveURL(/\?page=orders&orderSearch=keep&orderPage=1&orderPageSize=20$/);
+  await expect(page).toHaveURL(/\?page=orders&orderSearch=keep&orderPage=1&orderPageSize=10$/);
 });
 
 test("目标创建原样提交超出 JavaScript 安全整数范围的标识", async ({ database, page }) => {
@@ -226,14 +228,14 @@ test("目标、组织、账号与审计查询区分失败和真实空集", async
   await page.route("**/api/audits*",async(route)=>route.fulfill({status:failures.audits?503:200,contentType:"application/json",body:failures.audits?'{"message":"审计服务不可用"}':'{"audits":[],"nextCursor":null}'}));
   await page.goto("/");await login(page,"e2e_truthful_states");
 
-  await page.getByRole("button",{name:"目标管理"}).click();
+  await page.getByRole("link",{name:"目标管理"}).click();
   await expect(page.getByRole("alert")).toHaveText("目标服务不可用");
   await expect(page.getByText("0 条记录",{exact:true})).toHaveCount(0);
   await expect(page.getByText(/暂无目标/)).toHaveCount(0);
   failures.goals=false;await page.getByRole("button",{name:"重试目标"}).click();
   await expect(page.getByText(/暂无目标/)).toBeVisible();
 
-  await page.getByRole("button",{name:"组织架构"}).click();
+  await page.getByRole("link",{name:"组织架构"}).click();
   await expect(page.getByRole("alert")).toHaveText("组织服务不可用");
   await expect(page.getByText("0 个组织单元",{exact:true})).toHaveCount(0);
   await expect(page.getByText("暂无当前有效任职",{exact:true})).toHaveCount(0);
@@ -241,7 +243,7 @@ test("目标、组织、账号与审计查询区分失败和真实空集", async
   await expect(page.getByText("暂无组织单元",{exact:true})).toBeVisible();
   await expect(page.getByText("暂无当前有效任职",{exact:true})).toBeVisible();
 
-  await page.getByRole("button",{name:"账号管理"}).click();
+  await page.getByRole("link",{name:"账号管理"}).click();
   await expect(page.getByRole("alert")).toHaveText("账号服务不可用");
   await expect(page.getByText(/本页 0 个账号/)).toHaveCount(0);
   await expect(page.getByText("暂无角色权限定义",{exact:true})).toHaveCount(0);
@@ -249,7 +251,7 @@ test("目标、组织、账号与审计查询区分失败和真实空集", async
   await expect(page.getByText("暂无账号数据。",{exact:true})).toBeVisible();
   await expect(page.getByText("暂无角色权限定义",{exact:true})).toBeVisible();
 
-  await page.getByRole("button",{name:"审计查询"}).click();
+  await page.getByRole("link",{name:"审计查询"}).click();
   await expect(page.getByRole("alert")).toHaveText("审计服务不可用");
   await expect(page.getByText("本页 0 条记录",{exact:true})).toHaveCount(0);
   failures.audits=false;await page.getByRole("button",{name:"重试查询"}).click();

@@ -18,7 +18,7 @@ async function expectVisibleControlsNamed(page: import("@playwright/test").Page)
   }
 }
 
-test("账号弹窗约束键盘焦点，并在写入失败后保留输入安全重试", async ({ database, page }) => {
+test("账号弹窗约束键盘焦点，并在写入失败后保留输入安全重试", async ({ context, database, page }) => {
   await seedTestUser(database.url, {
     username: "e2e_access_admin",
     displayName: "E2E 无障碍管理员",
@@ -31,6 +31,7 @@ test("账号弹窗约束键盘焦点，并在写入失败后保留输入安全�
   await setup.query("insert into people(display_name,identity_source,source_key) values('E2E 精确标识人员','e2e','precise-id-person')");
   await setup.end();
   await page.goto("/?page=accounts");
+  await context.grantPermissions(["clipboard-read","clipboard-write"]);
   await login(page, "e2e_access_admin");
 
   const trigger = page.getByRole("button", { name: "创建账号" });
@@ -41,6 +42,12 @@ test("账号弹窗约束键盘焦点，并在写入失败后保留输入安全�
   const close = dialog.getByRole("button", { name: "关闭" });
   const submit = dialog.getByRole("button", { name: "创建账号" });
   await expect(dialog).toBeFocused();
+  let invalidCreateRequests=0;
+  page.on("request",(request)=>{if(request.method()==="POST"&&request.url().endsWith("/api/admin/users"))invalidCreateRequests+=1;});
+  await submit.click();
+  await expect(dialog.getByText("请输入登录账号。",{exact:true})).toBeVisible();
+  await expect(dialog.getByLabel("登录账号")).toBeFocused();
+  expect(invalidCreateRequests).toBe(0);
   await submit.focus();
   await page.keyboard.press("Tab");
   await expect(close).toBeFocused();
@@ -49,6 +56,19 @@ test("账号弹窗约束键盘焦点，并在写入失败后保留输入安全�
   await page.keyboard.press("Escape");
   await expect(dialog).toBeHidden();
   await expect(trigger).toBeFocused();
+
+  await trigger.click();
+  const dirtyDialog=page.getByRole("dialog",{name:"创建系统账号"});
+  await dirtyDialog.getByLabel("登录账号").fill("e2e_unsaved_draft");
+  let discardMessage="";
+  page.once("dialog",async(prompt)=>{discardMessage=prompt.message();await prompt.dismiss();});
+  await page.keyboard.press("Escape");
+  expect(discardMessage).toBe("当前内容尚未保存，确定放弃吗？");
+  await expect(dirtyDialog).toBeVisible();
+  await expect(dirtyDialog.getByLabel("登录账号")).toHaveValue("e2e_unsaved_draft");
+  page.once("dialog",async(prompt)=>{await prompt.accept();});
+  await dirtyDialog.getByRole("button",{name:"取消"}).click();
+  await expect(dirtyDialog).toBeHidden();
 
   let createMode: "known-failure" | "pass" | "uncertain" = "known-failure";
   let createBody:Record<string,unknown>|null=null;
@@ -94,6 +114,10 @@ test("账号弹窗约束键盘焦点，并在写入失败后保留输入安全�
   await expect(retryDialog.getByLabel("账号显示姓名")).toHaveValue("E2E 重试保留输入");
   await retryDialog.getByRole("button", { name: "创建账号" }).click();
   await expect(retryDialog.getByText("请立即安全保存临时密码，关闭后无法再次查看。", { exact: true })).toBeVisible();
+  const createdPassword=await retryDialog.locator(".temporary-password-result strong").textContent();
+  await retryDialog.getByRole("button",{name:"复制临时密码"}).click();
+  await expect(retryDialog.getByRole("status")).toHaveText("临时密码已复制，请保存到安全位置。");
+  expect(await page.evaluate(()=>navigator.clipboard.readText())).toBe(createdPassword);
   await retryDialog.getByRole("button", { name: "我已安全保存" }).click();
 
   createMode = "uncertain";
@@ -108,7 +132,10 @@ test("账号弹窗约束键盘焦点，并在写入失败后保留输入安全�
   await expect(uncertainRow).toBeVisible();
   await uncertainRow.getByRole("button", { name: "重置密码" }).click();
   await page.getByRole("dialog", { name: "确认重置密码" }).getByRole("button", { name: "确认重置密码" }).click();
-  await expect(page.getByRole("dialog", { name: "临时密码已生成" })).toBeVisible();
+  const resetDialog=page.getByRole("dialog", { name: "临时密码已生成" });
+  await expect(resetDialog).toBeVisible();
+  await resetDialog.getByRole("button",{name:"复制临时密码"}).click();
+  await expect(resetDialog.getByRole("status")).toHaveText("临时密码已复制，请保存到安全位置。");
 });
 
 test("图表和关键状态具有不依赖颜色的文本等价信息", async ({ database, page }) => {
@@ -202,7 +229,7 @@ test("八个主要页面的可见控件和图表均有可访问名称", async ({
   await page.goto("/?page=accounts");
   await login(page, "e2e_access_all");
   for (const name of ["账号管理", "业绩总览", "目标管理", "订单业绩", "业绩分析", "组织架构", "审批中心", "审计查询"]) {
-    await page.getByRole("button", { name, exact: true }).click();
+    await page.getByRole("link", { name, exact: true }).click();
     await expectVisibleControlsNamed(page);
   }
 });

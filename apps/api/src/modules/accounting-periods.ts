@@ -4,7 +4,7 @@ import { z } from "zod";
 import type { Database } from "../db.js";
 import { standardBusinessRegionName } from "../domain/business-regions.js";
 import { businessDate } from "../domain/business-time.js";
-import { nonnegativeMoneySchema, postgresBigintIdSchema } from "../validation.js";
+import { pageNumberSchema, pageSizeSchema, postgresBigintIdSchema, signedMoneySchema } from "../validation.js";
 import { hasAnyRole, type CurrentUser } from "./auth.js";
 import { recordEventAnalysisDimensions } from "./event-analysis-dimensions.js";
 import { OrganizationResolutionError, resolveOrganization } from "./organization.js";
@@ -23,14 +23,17 @@ const correctionSchema = z.strictObject({
   analysisDimensionEvidence: z.string().trim().min(1).max(1000),
 });
 const idSchema = z.object({ id: postgresBigintIdSchema });
-const correctionListSchema = z.object({
+const listPaginationSchema = z.object({
+  page: pageNumberSchema.default(1),
+  pageSize: pageSizeSchema.default(10),
+});
+const correctionListSchema = listPaginationSchema.extend({
   status: z.enum(["pending", "approved", "rejected", "consumed", "revoked"]).optional(),
-  limit: z.coerce.number().int().min(1).max(100).default(30),
 });
 const reviewSchema = z.strictObject({
   orderId: postgresBigintIdSchema,
-  lifecycleState: z.enum(["active", "paused", "zero"]),
-  currentRevenue: nonnegativeMoneySchema,
+  lifecycleState: z.enum(["active", "paused", "zero", "receivable_pending"]),
+  currentRevenue: signedMoneySchema,
   conclusion: z.string().trim().min(1).max(500),
   evidence: z.string().trim().min(1).max(1000),
   reason: z.string().trim().min(1).max(500),
@@ -38,13 +41,15 @@ const reviewSchema = z.strictObject({
   if (value.lifecycleState === "zero" && value.currentRevenue !== 0) {
     context.addIssue({ code: "custom", message: "零金额状态的当前营业额必须为零", path: ["currentRevenue"] });
   }
-  if (value.lifecycleState !== "zero" && value.currentRevenue <= 0) {
+  if (["active", "paused"].includes(value.lifecycleState) && value.currentRevenue <= 0) {
     context.addIssue({ code: "custom", message: "活动或暂停状态的当前营业额必须大于零", path: ["currentRevenue"] });
   }
+  if (value.lifecycleState === "receivable_pending" && value.currentRevenue >= 0) {
+    context.addIssue({ code: "custom", message: "应收未收状态的当前营业额必须小于零", path: ["currentRevenue"] });
+  }
 });
-const reviewListSchema = z.object({
+const reviewListSchema = listPaginationSchema.extend({
   status: z.enum(["pending", "approved", "rejected"]).optional(),
-  limit: z.coerce.number().int().min(1).max(100).default(30),
 });
 
 export class AccountingPeriodError extends Error {}
@@ -153,19 +158,20 @@ export async function registerAccountingPeriods(app: FastifyInstance, db: Databa
   app.get("/api/accounting-periods", async (request, reply) => {
     const denied = requireRole(request.currentUser, ["sales_assistant_leader", "hr"], "仅销售助理组长或人事可查看记账期间");
     if (denied) return reply.code(denied.statusCode).send({ message: denied.message });
-    const parsed = z.object({ limit: z.coerce.number().int().min(1).max(36).default(18) }).safeParse(request.query);
+    const parsed = listPaginationSchema.safeParse(request.query);
     if (!parsed.success) return reply.code(400).send({ message: "查询条件无效" });
-    const result = await db.query(
+    const { page, pageSize } = parsed.data;
+    const [result, count] = await Promise.all([db.query(
       `select period.period_month::text as "periodMonth",period.status,period.version,
               period.needs_reclose as "needsReclose",period.verification_confirmed_at as "verifiedAt",
               verifier.display_name as "verifiedBy",period.closed_at as "closedAt",closer.display_name as "closedBy"
        from accounting_periods period
        left join people verifier on verifier.id=period.verification_confirmed_by_person_id
        left join people closer on closer.id=period.closed_by_person_id
-       order by period.period_month desc limit $1`,
-      [parsed.data.limit],
-    );
-    return { periods: result.rows };
+       order by period.period_month desc limit $1 offset $2`,
+      [pageSize, (page - 1) * pageSize],
+    ), db.query<{ total_count:string }>("select count(*)::text as total_count from accounting_periods")]);
+    return { periods: result.rows, page, pageSize, totalCount: Number(count.rows[0]!.total_count) };
   });
 
   app.get("/api/accounting-corrections", async (request, reply) => {
@@ -173,7 +179,8 @@ export async function registerAccountingPeriods(app: FastifyInstance, db: Databa
     if (denied) return reply.code(denied.statusCode).send({ message: denied.message });
     const parsed = correctionListSchema.safeParse(request.query);
     if (!parsed.success) return reply.code(400).send({ message: "查询条件无效" });
-    const result = await db.query(
+    const { page, pageSize } = parsed.data;
+    const [result, count] = await Promise.all([db.query(
       `select request_row.id::text,request_row.period_month::text as "periodMonth",request_row.order_id::text as "orderId",
               orders.qingflow_order_no as "orderNo",request_row.event_type as "eventType",
               request_row.occurred_on::text as "occurredOn",request_row.reason,request_row.status,
@@ -188,10 +195,15 @@ export async function registerAccountingPeriods(app: FastifyInstance, db: Databa
        join people requester on requester.id=request_row.requested_by_person_id
        left join people reviewer on reviewer.id=request_row.reviewed_by_person_id
        where ($1::text is null or request_row.status=$1)
-       order by request_row.requested_at desc limit $2`,
-      [parsed.data.status ?? null, parsed.data.limit],
-    );
-    return { corrections: result.rows };
+       order by request_row.requested_at desc limit $2 offset $3`,
+      [parsed.data.status ?? null, pageSize, (page - 1) * pageSize],
+    ), db.query<{ total_count:string; pending_count:string }>(
+      `select count(*)::text as total_count,
+              count(*) filter(where status in ('pending','approved'))::text as pending_count
+       from accounting_correction_requests where ($1::text is null or status=$1)`,
+      [parsed.data.status ?? null],
+    )]);
+    return { corrections: result.rows, page, pageSize, totalCount: Number(count.rows[0]!.total_count), pendingCount: Number(count.rows[0]!.pending_count) };
   });
 
   app.post("/api/accounting-periods/:month/confirm-close", async (request, reply) => {
@@ -404,7 +416,8 @@ export async function registerAccountingPeriods(app: FastifyInstance, db: Databa
     if (denied) return reply.code(denied.statusCode).send({ message: denied.message });
     const parsed = reviewListSchema.safeParse(request.query);
     if (!parsed.success) return reply.code(400).send({ message: "查询条件无效" });
-    const result = await db.query(
+    const { page, pageSize } = parsed.data;
+    const [result, count] = await Promise.all([db.query(
       `select review.id::text,review.order_id::text as "orderId",orders.qingflow_order_no as "orderNo",
               review.proposed_lifecycle_state as "lifecycleState",review.proposed_current_revenue::text as "currentRevenue",
               review.conclusion,review.evidence,review.reason,review.status,review.requested_at as "requestedAt",
@@ -414,10 +427,14 @@ export async function registerAccountingPeriods(app: FastifyInstance, db: Databa
        join people requester on requester.id=review.requested_by_person_id
        left join people reviewer on reviewer.id=review.reviewed_by_person_id
        where ($1::text is null or review.status=$1)
-       order by review.requested_at desc limit $2`,
-      [parsed.data.status ?? null, parsed.data.limit],
-    );
-    return { reviews: result.rows };
+       order by review.requested_at desc limit $2 offset $3`,
+      [parsed.data.status ?? null, pageSize, (page - 1) * pageSize],
+    ), db.query<{ total_count:string; pending_count:string }>(
+      `select count(*)::text as total_count,count(*) filter(where status='pending')::text as pending_count
+       from historical_order_reviews where ($1::text is null or status=$1)`,
+      [parsed.data.status ?? null],
+    )]);
+    return { reviews: result.rows, page, pageSize, totalCount: Number(count.rows[0]!.total_count), pendingCount: Number(count.rows[0]!.pending_count) };
   });
 
   app.post("/api/historical-order-reviews", async (request, reply) => {
@@ -466,7 +483,7 @@ export async function registerAccountingPeriods(app: FastifyInstance, db: Databa
     try {
       await client.query("begin");
       const review = await client.query<{
-        id: string; order_id: string; proposed_lifecycle_state: "active" | "paused" | "zero";
+        id: string; order_id: string; proposed_lifecycle_state: "active" | "paused" | "zero" | "receivable_pending";
         proposed_current_revenue: string; reason: string; requested_by_user_id: string;
         requested_by_person_id: string; status: string;
       }>(
@@ -481,9 +498,9 @@ export async function registerAccountingPeriods(app: FastifyInstance, db: Databa
         await client.query("rollback");
         return reply.code(409).send({ message: "核对人与审批人必须是不同人员" });
       }
-      const order = await client.query<{ salesperson_person_id: string; counted_amount: string; lifecycle_state: string; customer_unit:string; business_region_source_text:string|null; business_region_code:string|null }>(
-        `select salesperson_person_id::text,counted_amount::text,lifecycle_state,customer_unit,
-                business_region_source_text,business_region_code
+      const order = await client.query<{ salesperson_person_id: string; collaborator_person_id:string|null; collaboration_ratio:string|null; counted_amount: string; lifecycle_state: string; customer_unit:string; business_region_source_text:string|null; business_region_code:string|null }>(
+        `select salesperson_person_id::text,collaborator_person_id::text,collaboration_ratio::text,counted_amount::text,lifecycle_state,customer_unit,
+                 business_region_source_text,business_region_code
          from performance_orders where id=$1 for update`, [row.order_id],
       );
       if (order.rows[0]?.lifecycle_state !== "historical_review_required") {
@@ -496,22 +513,35 @@ export async function registerAccountingPeriods(app: FastifyInstance, db: Databa
       }
       await assertAccountingPeriodOpen(client, accountingMonth(occurredOn));
       const organization = await resolveOrganization(client, order.rows[0]!.salesperson_person_id, occurredOn);
+      const collaboratorOrganization = order.rows[0]!.collaborator_person_id
+        ? await resolveOrganization(client, order.rows[0]!.collaborator_person_id, occurredOn)
+        : null;
       const currentRevenue = Number(row.proposed_current_revenue);
-      const countedAmount = row.proposed_lifecycle_state === "active" ? currentRevenue : 0;
+      const countedAmount = ["active", "receivable_pending"].includes(row.proposed_lifecycle_state) ? currentRevenue : 0;
       const deltaAmount = countedAmount - Number(order.rows[0]!.counted_amount);
       const inserted = await client.query<{ id: string }>(
         `insert into performance_events
           (order_id,event_type,delta_amount,resulting_current_revenue,resulting_counted_amount,
            accounting_month,occurred_on,reason,salesperson_name,department_name,group_name,
-           leader_name,supervisor_name,created_by,salesperson_person_id,department_unit_id,
-           group_unit_id,leader_person_id,supervisor_person_id,occurred_at)
-         values($1,'historical_review_resolution',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+            leader_name,supervisor_name,created_by,salesperson_person_id,department_unit_id,
+            group_unit_id,leader_person_id,supervisor_person_id,
+            collaborator_person_id,collaborator_name,collaboration_ratio,collaborator_department_unit_id,collaborator_department_name,
+            collaborator_group_unit_id,collaborator_group_name,collaborator_leader_person_id,collaborator_leader_name,
+            collaborator_supervisor_person_id,collaborator_supervisor_name,occurred_at)
+          values($1,'historical_review_resolution',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
+                 $19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30)
          returning id::text`,
         [row.order_id, deltaAmount, currentRevenue, countedAmount, accountingMonth(occurredOn), occurredOn,
          `历史核对结论：${row.reason}`.slice(0, 500), organization.salespersonName, organization.departmentName,
-         organization.groupName, organization.leaderName, organization.supervisorName, row.requested_by_user_id,
-         organization.personId, organization.departmentId, organization.groupId, organization.leaderPersonId,
-         organization.supervisorPersonId, now],
+          organization.groupName, organization.leaderName, organization.supervisorName, row.requested_by_user_id,
+          organization.personId, organization.departmentId, organization.groupId, organization.leaderPersonId,
+          organization.supervisorPersonId,
+          collaboratorOrganization?.personId ?? null, collaboratorOrganization?.salespersonName ?? null,
+          order.rows[0]!.collaboration_ratio ? Number(order.rows[0]!.collaboration_ratio) : null,
+          collaboratorOrganization?.departmentId ?? null, collaboratorOrganization?.departmentName ?? null,
+          collaboratorOrganization?.groupId ?? null, collaboratorOrganization?.groupName ?? null,
+          collaboratorOrganization?.leaderPersonId ?? null, collaboratorOrganization?.leaderName ?? null,
+          collaboratorOrganization?.supervisorPersonId ?? null, collaboratorOrganization?.supervisorName ?? null, now],
       );
       await recordEventAnalysisDimensions(client,inserted.rows[0]!.id,{
         businessRegionCode:order.rows[0]!.business_region_code,

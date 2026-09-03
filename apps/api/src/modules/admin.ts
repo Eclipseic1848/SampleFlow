@@ -33,7 +33,7 @@ export async function registerAdmin(app:FastifyInstance,db:Database){
     const parsed=accountListQuerySchema.safeParse(request.query);if(!parsed.success)return reply.code(400).send({message:"账号查询条件无效"});
     const numbered=parsed.data.page!==undefined||parsed.data.pageSize!==undefined;
     if(numbered&&parsed.data.cursor)return reply.code(400).send({message:"页码与游标不能同时使用"});
-    const page=parsed.data.page??1;const pageSize=parsed.data.pageSize??20;
+    const page=parsed.data.page??1;const pageSize=parsed.data.pageSize??10;
     const cursor=parsed.data.cursor?decodeAccountCursor(parsed.data.cursor):null;
     if(parsed.data.cursor&&(!cursor||cursor.userId!==request.currentUser!.id||cursor.search!==parsed.data.search))return reply.code(400).send({message:"账号分页游标无效或已不适用于当前查询"});
     const client=await db.connect();

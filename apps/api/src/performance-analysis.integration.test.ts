@@ -220,7 +220,7 @@ test("地区与客户分析按事件快照对账且查询次数不随规模增�
         const smallCustomersQuery = requireCapturedQuery(analysisQuery);
         const numberedCustomers = await app.inject({
           method: "GET",
-          url: "/api/performance/analysis/drilldown?level=customers&regionCode=CN-JS&month=2026-08&page=1&pageSize=10",
+          url: "/api/performance/analysis/drilldown?level=customers&regionCode=CN-JS&month=2026-08&page=1",
           headers: { cookie: leaderCookie },
         });
         assert.equal(numberedCustomers.statusCode, 200, numberedCustomers.body);
@@ -295,7 +295,7 @@ test("地区与客户分析按事件快照对账且查询次数不随规模增�
         const smallEventsQuery = requireCapturedQuery(analysisQuery);
         const numberedEvents = await app.inject({
           method: "GET",
-          url: "/api/performance/analysis/drilldown?level=events&regionCode=CN-JS&customerUnit=%E5%AE%A2%E6%88%B7%E5%8D%95%E4%BD%8D%E7%94%B2&month=2026-08&page=1&pageSize=10",
+          url: "/api/performance/analysis/drilldown?level=events&regionCode=CN-JS&customerUnit=%E5%AE%A2%E6%88%B7%E5%8D%95%E4%BD%8D%E7%94%B2&month=2026-08&page=1",
           headers: { cookie: leaderCookie },
         });
         assert.equal(numberedEvents.statusCode, 200, numberedEvents.body);
