@@ -181,7 +181,7 @@ test("总览失败后显示错误并可重试成功", async ({ database, page })
     roleName: "销售助理",
   });
   let fail=true;let allNegative=false;
-  await page.route("**/api/performance/dashboard",async(route)=>{if(fail){await route.fulfill({status:503,contentType:"application/json",body:'{"message":"总览暂不可用"}'});return;}const response=await route.fetch();const body=await response.json();await route.fulfill({response,json:{...body,month:"2026-09",monthly:allNegative?[{month:"2026-01",total:"-100"},{month:"2026-02",total:"-50"}]:[{month:"2026-01",total:"-100"},{month:"2026-02",total:"50"}],groups:[{id:"negative",name:"负向组",total:"-100"},{id:"positive",name:"正向组",total:"50"}]}});});
+  await page.route("**/api/performance/dashboard",async(route)=>{if(fail){await route.fulfill({status:503,contentType:"application/json",body:'{"message":"总览暂不可用"}'});return;}const response=await route.fetch();const body=await response.json();await route.fulfill({response,json:{...body,month:"2026-09",monthly:allNegative?[{month:"2026-01",total:"-100"},{month:"2026-02",total:"-50"}]:[{month:"2025-01",total:"25"},{month:"2026-01",total:"-100"},{month:"2026-02",total:"50"}],groups:[{id:"negative",name:"负向组",total:"-100"},{id:"positive",name:"正向组",total:"50"}]}});});
   await page.goto("/");
   await login(page,"e2e_overview_retry");
   await expect(page.getByRole("alert")).toHaveText("总览加载失败");
@@ -196,6 +196,14 @@ test("总览失败后显示错误并可重试成功", async ({ database, page })
   const points=chart.locator("circle");
   expect(Number(await points.nth(0).getAttribute("cy"))).toBeGreaterThan(zeroY);
   expect(Number(await points.nth(1).getAttribute("cy"))).toBeLessThan(zeroY);
+  await points.nth(1).hover();
+  await expect(page.getByRole("tooltip")).toHaveText("2月 ¥50.00");
+  await expect(page.getByLabel("趋势年份")).toHaveValue("2026");
+  await page.getByLabel("趋势年份").selectOption("2025");
+  const historicalChart=page.getByRole("img",{name:"2025年1月至12月业绩折线图"});
+  await historicalChart.locator("circle").nth(0).focus();
+  await expect(page.getByRole("tooltip")).toHaveText("1月 ¥25.00");
+  await expect(historicalChart.locator("desc")).toContainText("1月 ¥25.00");
   await expect(page.locator(".rank-row").nth(0)).toContainText("负向组");
   await expect(page.locator(".rank-row").nth(0).locator("i")).toHaveClass(/negative/);
   allNegative=true;
