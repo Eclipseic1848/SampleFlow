@@ -87,6 +87,7 @@ test("干净隔离数据库可应用全部现有迁移", async () => {
         "025_enforce_performance_order_state_amounts.sql",
         "026_sheet3_order_input.sql",
         "027_repair_legacy_import_dates.sql",
+        "028_allow_receivable_historical_reviews.sql",
       ]);
       assert.ok(result.rows.every((row) => /^[a-f0-9]{64}$/.test(row.sha256)));
       await assert.rejects(

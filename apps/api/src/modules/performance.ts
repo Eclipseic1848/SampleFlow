@@ -1132,7 +1132,7 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
     const numbered=parsed.data.level!=="months"&&(parsed.data.page!==undefined||parsed.data.pageSize!==undefined);
     if(parsed.data.level!=="months"&&((numbered&&parsed.data.cursor)||(!numbered&&parsed.data.snapshot)))return reply.code(400).send({code:"ANALYSIS_PAGINATION_INVALID",message:"页码快照只能与页码一起使用，且不能与游标混用"});
     const page=parsed.data.level==="months"?1:parsed.data.page??1;
-    const pageSize=parsed.data.level==="months"?20:parsed.data.pageSize??20;
+    const pageSize=parsed.data.level==="months"?20:parsed.data.pageSize??10;
     const queryDigest = analysisQueryDigest({ ...parsed.data, cursor: undefined, snapshot:undefined, page:undefined, pageSize:undefined });
     const customerCursor = parsed.data.level === "customers" && parsed.data.cursor
       ? decodeAnalysisCursor(parsed.data.cursor, analysisCustomerCursorSchema)
@@ -1506,7 +1506,7 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
     if (!query.success) return reply.code(400).send({ message: "查询条件无效" });
     const numbered=query.data.page!==undefined||query.data.pageSize!==undefined;
     if((numbered&&query.data.cursor)||(!numbered&&query.data.snapshot))return reply.code(400).send({code:"ORDER_PAGINATION_INVALID",message:"页码快照只能与页码一起使用，且不能与游标混用"});
-    const page=query.data.page??1;const pageSize=query.data.pageSize??20;
+    const page=query.data.page??1;const pageSize=query.data.pageSize??10;
     const filters = normalizeOrderFilters(query.data);
     const cursor = query.data.cursor ? decodeOrderCursor(query.data.cursor) : null;
     if (query.data.cursor && (!cursor || cursor.filterDigest !== orderFilterDigest(filters) || cursor.userId !== request.currentUser.id)) {

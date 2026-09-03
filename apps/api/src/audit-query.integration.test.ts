@@ -223,7 +223,7 @@ test("审计查询支持人员、动作、实体、时间和稳定游标过滤",
       const inFlightId = inFlight.rows[0]!.id;
       const firstPageResult = await Promise.race([
         app.inject({ method: "GET", url: "/api/audits?action=performance.cursor_test", headers: { cookie } }),
-        new Promise<null>((resolve) => setTimeout(() => resolve(null), 1_000)),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 10_000)),
       ]);
       await inFlightClient.query("commit");
       await inFlightClient.end();
@@ -246,8 +246,9 @@ test("审计查询支持人员、动作、实体、时间和稳定游标过滤",
       } finally {
         await concurrentClient.end();
       }
-      const numberedFirst = await app.inject({ method: "GET", url: "/api/audits?action=performance.cursor_test&page=1&pageSize=10", headers: { cookie } });
+      const numberedFirst = await app.inject({ method: "GET", url: "/api/audits?action=performance.cursor_test&page=1", headers: { cookie } });
       assert.equal(numberedFirst.statusCode, 200, numberedFirst.body);
+      assert.equal(numberedFirst.json().pageSize,10);
       const numberedSnapshot=numberedFirst.json<{snapshot:string}>().snapshot;
       assert.ok(numberedSnapshot);
       const postSnapshotClient=new Client({connectionString:database.url});

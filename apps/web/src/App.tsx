@@ -74,6 +74,7 @@ function Login({ onLogin }: { onLogin: (user: User) => void }) {
   useEffect(()=>{document.title="登录 — SampleFlow";},[]);
   const [submitting, setSubmitting] = useState(false);
   const [readiness, setReadiness] = useState<"checking" | "ready" | "unavailable">("checking");
+  const readinessText=import.meta.env.DEV?{checking:"正在检查 API 与数据库",ready:"前端、API 与数据库已连接",unavailable:"API 或数据库暂不可用"}:{checking:"正在连接系统",ready:"系统服务正常",unavailable:"系统暂不可用，请稍后重试"};
   useEffect(() => {
     let active = true;
     let controller: AbortController | null = null;
@@ -93,7 +94,7 @@ function Login({ onLogin }: { onLogin: (user: User) => void }) {
     return () => { active = false; controller?.abort(); window.clearInterval(timer); };
   }, []);
   async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); setSubmitting(true); setMessage("");
+    event.preventDefault(); if (submitting || !event.currentTarget.reportValidity()) return; setSubmitting(true); setMessage("");
     try {
       const formData = new FormData(event.currentTarget);
       const submittedUsername = String(formData.get("username") ?? "");
@@ -109,6 +110,6 @@ function Login({ onLogin }: { onLogin: (user: User) => void }) {
   }
   return <main className="login-shell">
     <section className="brand-panel"><img className="brand-logo" src="/brand-logo.png" alt="瑞源生物 Pronetbio"/><div className="brand-copy"><p className="product-name">SampleFlow</p><h1>每一笔业绩，都有清晰的来路与责任。</h1><p className="brand-summary">面向销售到样业务的目标、订单、组织归属与审批系统。历史不重写，调整有事件，结果可追溯。</p></div><div className="principles"><div><Activity size={20} /><span>实时业绩事件</span></div><div><ShieldCheck size={20} /><span>角色权限分离</span></div><div><Database size={20} /><span>集中数据与审计</span></div></div></section>
-    <section className="login-panel"><div className="login-card"><div className="login-heading"><p>销售到样业绩管理</p><h2>登录系统</h2><span>{import.meta.env.DEV ? "开发环境已预填销售助理演示账号" : "请使用管理员分配的账号登录"}</span></div><form noValidate onSubmit={submit}><label htmlFor="username">账号</label><input id="username" name="username" value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" /><PasswordInput id="password" name="password" label="密码" value={password} onChange={setPassword} autoComplete="current-password"/><button type="submit" disabled={submitting}>{submitting ? "正在登录…" : "进入 SampleFlow"}<ChevronRight size={18} /></button>{message ? <p className="form-error" role="alert">{message}</p> : null}</form><div className={`readiness readiness-${readiness}`} role="status" aria-live="polite"><span />{{checking:"正在检查 API 与数据库",ready:"前端、API 与数据库已连接",unavailable:"API 或数据库暂不可用"}[readiness]}</div></div></section>
+    <section className="login-panel"><div className="login-card"><div className="login-heading"><p>销售到样业绩管理</p><h2>登录系统</h2><span>{import.meta.env.DEV ? "开发环境已预填销售助理演示账号" : "请使用管理员分配的账号登录"}</span></div><form noValidate onSubmit={submit}><label htmlFor="username">账号</label><input id="username" name="username" required value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" /><PasswordInput id="password" name="password" label="密码" value={password} onChange={setPassword} autoComplete="current-password"/><button type="submit" disabled={submitting}>{submitting ? "正在登录…" : "进入 SampleFlow"}<ChevronRight size={18} /></button>{message ? <p className="form-error" role="alert">{message}</p> : null}</form><div className={`readiness readiness-${readiness}`} role="status" aria-live="polite"><span />{readinessText[readiness]}</div></div></section>
   </main>;
 }

@@ -367,6 +367,55 @@ test("更正申请被拒绝、撤销或批准超过二十四小时后均不能�
   });
 });
 
+test("记账治理列表默认每页十条且后续页可访问",async()=>{
+  await withMigratedTestDatabase(async(database)=>{
+    const scenario=await seedLedgerScenario(database.url);
+    const client=new Client({connectionString:database.url});await client.connect();
+    try{
+      const requester=await client.query<{user_id:string}>("select user_id::text from people where id=$1",[scenario.assistantLeaderPersonId]);
+      const order=await client.query<{id:string}>(
+        `insert into performance_orders
+          (qingflow_order_no,customer_name,customer_unit,salesperson_person_id,salesperson_name,source_received_on,
+           original_amount,current_revenue,counted_amount,lifecycle_state,posted_at)
+         values('GOVERNANCE-PAGE','分页客户','分页单位',$1,'账本业务员','2025-01-01',1,1,1,'active',now()) returning id::text`,
+        [scenario.memberPersonId],
+      );
+      await client.query("insert into accounting_periods(period_month) select month::date from generate_series('2025-01-01'::date,'2025-12-01'::date,'1 month') month");
+      await client.query(
+        `insert into accounting_correction_requests
+          (period_month,order_id,event_type,occurred_on,reason,business_region_code,business_region_source_text,
+           customer_unit,analysis_dimension_evidence,requested_by_user_id,requested_by_person_id,requested_at,status)
+         select '2025-01-01',$1,'revenue_change','2025-01-15','分页更正 '||value,'CN-AH','安徽分页凭证',
+                '分页单位','分页证据',$2,$3,now()-value*interval '1 minute','rejected'
+         from generate_series(1,12) as series(value)`,
+        [order.rows[0]!.id,requester.rows[0]!.user_id,scenario.assistantLeaderPersonId],
+      );
+      await client.query(
+        `insert into historical_order_reviews
+          (order_id,proposed_lifecycle_state,proposed_current_revenue,conclusion,evidence,reason,
+           requested_by_user_id,requested_by_person_id,requested_at,status)
+         select $1,'active',1,'分页核对 '||value,'分页证据','分页原因',$2,$3,now()-value*interval '1 minute','rejected'
+         from generate_series(1,12) as series(value)`,
+        [order.rows[0]!.id,requester.rows[0]!.user_id,scenario.assistantLeaderPersonId],
+      );
+    }finally{await client.end();}
+
+    await withTestApi(database.url,async(app)=>{
+      const headers=await writeHeaders(app,"ledger_assistant_leader");
+      for(const [path,key] of [["/api/accounting-periods","periods"],["/api/accounting-corrections","corrections"],["/api/historical-order-reviews","reviews"]] as const){
+        const first=await app.inject({method:"GET",url:path,headers:{cookie:headers.cookie}});
+        assert.equal(first.statusCode,200,first.body);
+        assert.equal(first.json().page,1);assert.equal(first.json().pageSize,10);assert.equal(first.json().totalCount,12);assert.equal(first.json()[key].length,10);
+        const second=await app.inject({method:"GET",url:`${path}?page=2&pageSize=10`,headers:{cookie:headers.cookie}});
+        assert.equal(second.statusCode,200,second.body);
+        assert.equal(second.json().page,2);assert.equal(second.json()[key].length,2);
+        const invalid=await app.inject({method:"GET",url:`${path}?pageSize=15`,headers:{cookie:headers.cookie}});
+        assert.equal(invalid.statusCode,400,invalid.body);
+      }
+    });
+  });
+});
+
 test("历史待核订单保留原始事件语义并经组长核对和人事批准后解锁",async()=>{
   await withMigratedTestDatabase(async(database)=>{
     const scenario=await seedLedgerScenario(database.url);
@@ -450,5 +499,67 @@ test("历史待核订单保留原始事件语义并经组长核对和人事批�
         assert.equal(evidence.rows[0]!.snapshot_count,"1");
       }finally{await verify.end();}
     },{clock:()=>now});
+  });
+});
+
+test("协作历史订单可核对为负数应收未收且保留双方归属",async()=>{
+  await withMigratedTestDatabase(async(database)=>{
+    const scenario=await seedLedgerScenario(database.url);
+    const client=new Client({connectionString:database.url});await client.connect();
+    let orderId="";
+    try{
+      const order=await client.query<{id:string}>(
+        `insert into performance_orders
+          (qingflow_order_no,customer_name,customer_unit,business_region_source_text,business_region_code,
+           salesperson_person_id,salesperson_name,collaborator_person_id,collaborator_name,collaboration_ratio,
+           source_received_on,original_amount,current_revenue,counted_amount,lifecycle_state,posted_at)
+         values('LEGACY-RECEIVABLE-COLLAB','历史协作客户','协作单位','安徽原文','CN-AH',
+                $1,'账本业务员',$2,'账本协作人',0.25,'2026-08-01',-50,-50,-50,'historical_review_required',now())
+         returning id::text`,[scenario.memberPersonId,scenario.collaboratorPersonId],
+      );
+      orderId=order.rows[0]!.id;
+      await client.query(
+        `insert into performance_events
+          (order_id,event_type,delta_amount,resulting_current_revenue,resulting_counted_amount,accounting_month,occurred_on,
+           reason,salesperson_name,department_name,group_name,leader_name,supervisor_name,source_row_number,
+           salesperson_person_id,department_unit_id,group_unit_id,leader_person_id,supervisor_person_id,order_sequence)
+         values($1,'legacy_adjustment',-50,-50,-50,'2026-08-01','2026-08-01','原始负向行',
+                '账本业务员','账本部门','账本小组','账本组长','账本主管',91001,$2,$3,$4,$5,$6,1)`,
+        [orderId,scenario.memberPersonId,scenario.departmentId,scenario.groupId,scenario.leaderPersonId,scenario.supervisorPersonId],
+      );
+    }finally{await client.end();}
+
+    await withTestApi(database.url,async(app)=>{
+      const leader=await writeHeaders(app,"ledger_assistant_leader");
+      const hr=await writeHeaders(app,"ledger_hr");
+      const requested=await app.inject({
+        method:"POST",url:"/api/historical-order-reviews",headers:leader,
+        payload:{orderId,lifecycleState:"receivable_pending",currentRevenue:-80,conclusion:"核对为应收未收",evidence:"原始订单及应收凭证",reason:"确认仍有八十元未收"},
+      });
+      assert.equal(requested.statusCode,201,requested.body);
+      const reviewId=requested.json().id as string;
+      const approved=await app.inject({method:"POST",url:`/api/historical-order-reviews/${reviewId}/approve`,headers:hr,payload:{note:"证据完整，同意解析"}});
+      assert.equal(approved.statusCode,200,approved.body);
+
+      const after=await app.inject({method:"GET",url:`/api/performance/orders/${orderId}/events`,headers:{cookie:leader.cookie}});
+      assert.equal(after.statusCode,200,after.body);
+      assert.equal(after.json().lifecycleState,"receivable_pending");
+      assert.deepEqual(after.json().allowedActions,["revenue_change"]);
+      const resolution=after.json().events.at(-1);
+      assert.equal(resolution.deltaAmount,"-30.00");
+      assert.equal(resolution.collaboratorName,"账本协作人");
+      assert.equal(resolution.collaborationRatio,"0.250000");
+
+      const verify=new Client({connectionString:database.url});await verify.connect();
+      try{
+        const order=await verify.query<{current_revenue:string;counted_amount:string;lifecycle_state:string}>("select current_revenue::text,counted_amount::text,lifecycle_state from performance_orders where id=$1",[orderId]);
+        assert.deepEqual(order.rows[0],{current_revenue:"-80.00",counted_amount:"-80.00",lifecycle_state:"receivable_pending"});
+        const attributions=await verify.query<{attribution_role:string;amount:string}>(
+          `select attribution_role,attributed_amount::text as amount from performance_event_attributions attribution
+           join historical_order_reviews review on review.resolution_event_id=attribution.event_id where review.id=$1 order by attribution_role`,[reviewId],
+        );
+        assert.deepEqual(attributions.rows,[{attribution_role:"collaborator",amount:"-7.50"},{attribution_role:"primary",amount:"-22.50"}]);
+      }finally{await verify.end();}
+    },{clock:()=>new Date("2026-09-12T02:00:00.000Z")});
   });
 });

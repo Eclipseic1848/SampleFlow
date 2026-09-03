@@ -40,7 +40,7 @@ test("空金额不会变成零元，并保留各业务动作的零值边界", as
       nextCursor: null,
     }),
   }));
-  await page.getByRole("button", { name: "订单业绩", exact: true }).click();
+  await page.getByRole("link", { name: "订单业绩", exact: true }).click();
 
   await page.route("**/api/performance/people*", (route) => route.fulfill({
     status: 200,

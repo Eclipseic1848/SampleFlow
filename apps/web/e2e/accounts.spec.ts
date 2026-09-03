@@ -39,8 +39,9 @@ test("系统管理员搜索分页账号并审计固定角色组合变更", async
     await page.getByLabel("密码", { exact: true }).fill("Accounts@123");
     await page.getByRole("button", { name: "进入 SampleFlow" }).click();
     await expect(page.getByRole("heading", { name: "账号管理" })).toBeVisible();
-    await expect(page.getByText("本页 20 个账号", { exact: true })).toBeVisible();
+    await expect(page.getByText("本页 10 个账号", { exact: true })).toBeVisible();
     const pageSize=page.getByLabel("账号每页条数");
+    await expect(pageSize).toHaveValue("10");
     expect(await pageSize.locator("option").allTextContents()).toEqual(["10 条/页","20 条/页","50 条/页","100 条/页"]);
     await pageSize.selectOption("50");
     await expect(page.getByText("本页 50 个账号", { exact: true })).toBeVisible();

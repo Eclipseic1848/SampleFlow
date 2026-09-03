@@ -36,7 +36,7 @@ test("多角色账号可选择全部合法目标下达层级", async ({ database
   await page.getByLabel("账号").fill("e2e_multi_role_goals");
   await page.getByLabel("密码", { exact: true }).fill("Goals@123");
   await page.getByRole("button", { name: "进入 SampleFlow" }).click();
-  await page.getByRole("button", { name: "目标管理", exact: true }).click();
+  await page.getByRole("link", { name: "目标管理", exact: true }).click();
   await page.getByRole("button", { name: "下达目标" }).click();
 
   await expect(page.getByLabel("目标层级").locator("option")).toHaveText([

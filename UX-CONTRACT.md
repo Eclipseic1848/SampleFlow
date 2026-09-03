@@ -58,7 +58,7 @@
 - Exploratory lists: 省份、总览指标等有限集合也复用统一分页控件，不另建局部分页交互。
 - URL state: 页面、已提交筛选、页码、每页条数和服务端不透明快照令牌写入查询参数；History API 必须支持刷新及前进/后退恢复。
 - Stable snapshot: 订单、审计和分析穿透的首次页码查询返回绑定用户、筛选和 cutoff 的快照；后续翻页复用，筛选、每页条数或主动刷新时清空并重新创建。旧游标 API 仅保留兼容。
-- Page size: 默认 20 条，可选 10／20／50／100 条；显示精确总数、总页数、当前页、上一页／下一页和可点击页码。
+- Page size: 默认 10 条，可选 10／20／50／100 条；显示精确总数、总页数、当前页、上一页／下一页和可点击页码。
 - Empty/no-results/error/loading treatment: 分别说明“暂无数据”“没有匹配结果”“加载失败可刷新”；后台刷新保留既有结果。
 - Back/scroll restoration: 筛选、分页和快照由 URL 恢复；页面保留自然文档滚动。
 - Selection scope: 当前不提供批量选择。
@@ -84,9 +84,10 @@
 - Route document title policy: 八个主要页面使用稳定 URL，并采用“页面 — SampleFlow”。
 - Route error / 403 page behavior: API 403 显示明确权限边界，不把无权限伪装为空数据。
 - Breadcrumb/tab/route-state policy: 当前侧栏驱动稳定 URL；筛选、分页和穿透状态按页面合同写入查询参数。
+- Analysis drilldown overlay: 省份列表和地图以同一共享 `Modal` 打开省份客户明细；“查看月份”和订单事件在该弹窗内继续钻取，不嵌套第二个弹窗；关闭恢复原省份触发点，刷新及前进/后退仍由 URL 恢复。
 - Sidebar/drawer/bottom-sheet transformation: 当前产品只验收桌面 Web；不把移动端抽屉或底部操作区作为发布门禁。
-- Responsive table strategy: 保留原生表格和横向滚动，不静默丢列。
-- Truncation/full-value access: 关键订单号、原因和事件值允许换行或进入详情查看。
+- Responsive table strategy: 保留原生表格和横向滚动；订单台账只在主表展示高频字段，完整订单资料由同一行的“查看 / 调整”详情持续可达。
+- Truncation/full-value access: 关键订单号、原因和事件值允许换行或进入详情查看；从订单台账收纳的服务类型、备注、协作分配和责任快照必须在详情中完整呈现。
 - Focus restoration and sticky-obstruction policy: 模态关闭回到触发点；焦点不得被侧栏或模态标题遮挡。
 
 ## Overlays and feedback

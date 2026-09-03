@@ -1259,7 +1259,7 @@ test("账号管理使用稳定搜索分页并审计固定角色组合变更", as
         );
         await setup.query("insert into user_roles(user_id,role_code,assigned_by) values($1,'salesperson',$2)", [late.rows[0]!.id, scenario.users.admin]);
 
-        const numbered = await app.inject({ method: "GET", url: `/api/admin/users?search=${search}&page=2&pageSize=10`, headers: adminHeaders });
+        const numbered = await app.inject({ method: "GET", url: `/api/admin/users?search=${search}&page=2`, headers: adminHeaders });
         assert.equal(numbered.statusCode, 200, numbered.body);
         assert.equal(numbered.json().page, 2);
         assert.equal(numbered.json().pageSize, 10);
@@ -1451,7 +1451,7 @@ test("订单台账用固定快照稳定遍历并保持有界查询次数", async
       assert.equal(first.body.previousCursor, null);
       assert.ok(first.body.nextCursor);
 
-      const numbered = await app.inject({ method: "GET", url: "/api/performance/orders?search=CURSOR-FIX-&page=2&pageSize=10", headers: { cookie: leaderCookie } });
+      const numbered = await app.inject({ method: "GET", url: "/api/performance/orders?search=CURSOR-FIX-&page=2", headers: { cookie: leaderCookie } });
       assert.equal(numbered.statusCode, 200, numbered.body);
       assert.equal(numbered.json().page, 2);
       assert.equal(numbered.json().pageSize, 10);
