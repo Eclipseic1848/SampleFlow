@@ -13,7 +13,7 @@ type TourStep = Readonly<{
 
 type Spotlight = Readonly<{ top: number; left: number; width: number; height: number }>;
 
-const STORAGE_VERSION = "v2";
+const STORAGE_VERSION = "v3";
 const STORAGE_PREFIX = "sampleflow:onboarding:";
 const CURRENT_STORAGE_PREFIX = `${STORAGE_PREFIX}${STORAGE_VERSION}:`;
 const memoryFlags = new Set<string>();

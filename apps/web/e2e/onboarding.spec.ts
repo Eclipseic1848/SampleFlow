@@ -68,7 +68,9 @@ test("首次自动播放，完成后不再打扰且可以手动重播", async ({
 
   const legacyKeys = [
     `sampleflow:onboarding:v1:${userId}:sales_assistant:orders`,
+    `sampleflow:onboarding:v2:${userId}:sales_assistant:orders`,
     `sampleflow:onboarding:v1:${secondUserId}:sales_assistant:all`,
+    `sampleflow:onboarding:v2:${secondUserId}:sales_assistant:all`,
   ];
   await page.addInitScript((keys) => keys.forEach((key) => localStorage.setItem(key, "completed")), legacyKeys);
   await page.goto("/?page=orders");
@@ -76,14 +78,14 @@ test("首次自动播放，完成后不再打扰且可以手动重播", async ({
 
   const dialog = page.locator(".onboarding-bubble");
   await expect(dialog.getByRole("heading", { name: "订单业绩" })).toBeVisible();
-  expect(await page.evaluate((keys) => keys.map((key) => localStorage.getItem(key)), legacyKeys)).toEqual([null, null]);
+  expect(await page.evaluate((keys) => keys.map((key) => localStorage.getItem(key)), legacyKeys)).toEqual([null, null, null, null]);
   await page.keyboard.press("ArrowRight");
   await expect(dialog.getByRole("heading", { name: "录入与导入" })).toBeVisible();
   await page.keyboard.press("ArrowLeft");
   await expect(dialog.getByRole("heading", { name: "订单业绩" })).toBeVisible();
   await completeTour(page);
 
-  const pageKey = `sampleflow:onboarding:v2:${userId}:sales_assistant:orders`;
+  const pageKey = `sampleflow:onboarding:v3:${userId}:sales_assistant:orders`;
   expect(await page.evaluate((key) => localStorage.getItem(key), pageKey)).toBe("completed");
   await page.reload();
   await expect(dialog).toBeHidden();
@@ -99,7 +101,7 @@ test("首次自动播放，完成后不再打扰且可以手动重播", async ({
   await page.goBack();
   await expect(page.getByRole("heading", { name: "订单业绩", exact: true })).toBeVisible();
   await expect(dialog).toBeHidden();
-  const analysisKey = `sampleflow:onboarding:v2:${userId}:sales_assistant:analysis`;
+  const analysisKey = `sampleflow:onboarding:v3:${userId}:sales_assistant:analysis`;
   expect(await page.evaluate((key) => localStorage.getItem(key), analysisKey)).toBeNull();
 
   await page.getByRole("button", { name: "退出登录" }).click();
@@ -221,7 +223,7 @@ test("支持焦点约束、键盘退出、跳过全部和无障碍", async ({ da
   await expect(dialog).toBeHidden();
   const replayOrders = page.getByRole("button", { name: "重播当前页面新手引导" });
   await expect(replayOrders).toBeFocused();
-  const pageKey = `sampleflow:onboarding:v2:${userId}:sales_assistant:orders`;
+  const pageKey = `sampleflow:onboarding:v3:${userId}:sales_assistant:orders`;
   expect(await page.evaluate((key) => localStorage.getItem(key), pageKey)).toBeNull();
   expect(await page.evaluate((key) => sessionStorage.getItem(key), pageKey)).toBe("dismissed");
 
@@ -230,7 +232,7 @@ test("支持焦点约束、键盘退出、跳过全部和无障碍", async ({ da
   await page.getByRole("button", { name: "重播当前页面新手引导" }).click();
   expect(await page.evaluate((key) => sessionStorage.getItem(key), pageKey)).toBeNull();
   await dialog.getByRole("button", { name: "跳过全部引导" }).click();
-  const allKey = `sampleflow:onboarding:v2:${userId}:sales_assistant:all`;
+  const allKey = `sampleflow:onboarding:v3:${userId}:sales_assistant:all`;
   expect(await page.evaluate((key) => localStorage.getItem(key), allKey)).toBe("completed");
   await page.getByRole("link", { name: "业绩分析", exact: true }).click();
   await expect(dialog).toBeHidden();
