@@ -934,12 +934,12 @@ test("系统管理员通过页面办理组织异动并保留前后有效期", as
 
       await page.getByRole("button",{name:"新增任职"}).click();
       let assignmentDialog=page.getByRole("dialog");
-      await assignmentDialog.getByRole("combobox").nth(0).selectOption({label:"E2E 异动业务员（e2e_org_member）"});
+      await assignmentDialog.getByRole("combobox",{name:"任职人员",exact:true}).selectOption({label:"E2E 异动业务员（e2e_org_member）"});
       await page.getByLabel("生效日期").fill("2026-07-01");
-      await assignmentDialog.getByRole("combobox").nth(1).selectOption({label:"E2E 原部门"});
-      await assignmentDialog.getByRole("combobox").nth(2).selectOption({label:"E2E 原小组"});
-      await assignmentDialog.getByRole("combobox").nth(3).selectOption({label:"E2E 异动组长（e2e_org_leader）"});
-      await assignmentDialog.getByRole("combobox").nth(4).selectOption({label:"E2E 异动主管（e2e_org_supervisor）"});
+      await assignmentDialog.getByRole("combobox",{name:"部门",exact:true}).selectOption({label:"E2E 原部门"});
+      await assignmentDialog.getByRole("combobox",{name:"小组",exact:true}).selectOption({label:"E2E 原小组"});
+      await assignmentDialog.getByRole("combobox",{name:"小组负责人",exact:true}).selectOption({label:"E2E 异动组长（e2e_org_leader）"});
+      await assignmentDialog.getByRole("combobox",{name:"部门主管",exact:true}).selectOption({label:"E2E 异动主管（e2e_org_supervisor）"});
       const assignmentRequest=page.waitForRequest((request)=>request.url().endsWith("/api/admin/organization/assignments")&&request.method()==="POST");
       await page.getByRole("button",{name:"保存任职"}).click();
       const assignmentBody=(await assignmentRequest).postDataJSON() as Record<string,unknown>;
@@ -948,12 +948,12 @@ test("系统管理员通过页面办理组织异动并保留前后有效期", as
       await expect(page.getByRole("button",{name:"办理组织异动"})).toBeVisible({timeout:1_000});
       await page.getByRole("button",{name:"办理组织异动"}).click();
       assignmentDialog=page.getByRole("dialog");
-      await assignmentDialog.getByRole("combobox").nth(0).selectOption({label:"E2E 异动业务员（e2e_org_member）"});
+      await assignmentDialog.getByRole("combobox",{name:"任职人员",exact:true}).selectOption({label:"E2E 异动业务员（e2e_org_member）"});
       await page.getByLabel("生效日期").fill("2026-08-01");
-      await assignmentDialog.getByRole("combobox").nth(1).selectOption({label:"E2E 新部门"});
-      await assignmentDialog.getByRole("combobox").nth(2).selectOption({label:"E2E 新小组"});
-      await assignmentDialog.getByRole("combobox").nth(3).selectOption({label:"E2E 异动组长（e2e_org_leader）"});
-      await assignmentDialog.getByRole("combobox").nth(4).selectOption({label:"E2E 异动主管（e2e_org_supervisor）"});
+      await assignmentDialog.getByRole("combobox",{name:"部门",exact:true}).selectOption({label:"E2E 新部门"});
+      await assignmentDialog.getByRole("combobox",{name:"小组",exact:true}).selectOption({label:"E2E 新小组"});
+      await assignmentDialog.getByRole("combobox",{name:"小组负责人",exact:true}).selectOption({label:"E2E 异动组长（e2e_org_leader）"});
+      await assignmentDialog.getByRole("combobox",{name:"部门主管",exact:true}).selectOption({label:"E2E 异动主管（e2e_org_supervisor）"});
       await page.getByRole("button",{name:"确认异动"}).click();
 
       const oldAssignment=page.locator(".compact-list > div").filter({hasText:"E2E 异动业务员"}).filter({hasText:"E2E 原部门 / E2E 原小组"});
@@ -1024,9 +1024,9 @@ test("系统管理员通过页面办理组织异动并保留前后有效期", as
       await page.getByRole("link",{name:"订单业绩",exact:true}).click();
       await page.getByRole("button",{name:"录入新订单"}).click();
       const createOrderDialog=page.getByRole("dialog",{name:"录入订单业绩"});
-      await page.getByLabel("订单编号").fill("ORG-TRANSFER-E2E-100");
+      await createOrderDialog.getByLabel("订单编号").fill("ORG-TRANSFER-E2E-100");
       await page.getByLabel("日期",{exact:true}).fill("2026-07-15");
-      await page.getByLabel("客户姓名").fill("组织异动客户");
+      await createOrderDialog.getByLabel("客户姓名").fill("组织异动客户");
       await page.getByLabel("客户单位",{exact:true}).fill("组织异动测试单位");
       await createOrderDialog.getByLabel("省份").selectOption("EXT-TRADE");
       await createOrderDialog.getByLabel("业务员",{exact:true}).selectOption({label:"E2E 异动业务员"});
@@ -1110,8 +1110,8 @@ test("订单搜索与不可变事件链在浏览器和数据库中保持一致",
 
       await page.getByRole("button", { name: "录入新订单" }).click();
       const createOrderDialog=page.getByRole("dialog",{name:"录入订单业绩"});
-      await page.getByLabel("订单编号").fill("CHAIN-E2E-110");
-      await page.getByLabel("客户姓名").fill("事件链客户");
+      await createOrderDialog.getByLabel("订单编号").fill("CHAIN-E2E-110");
+      await createOrderDialog.getByLabel("客户姓名").fill("事件链客户");
       await page.getByLabel("客户单位",{exact:true}).fill("事件链测试单位");
       await createOrderDialog.getByLabel("省份").selectOption("EXT-TRADE");
       await createOrderDialog.getByLabel("业务员",{exact:true}).selectOption({label:"E2E 账本业务员"});
