@@ -10,11 +10,30 @@
 - 数据库使用互不相同的管理员、迁移、应用和只读备份账号。管理员账号不提供给 API。
 - API 日志不记录请求体、查询参数、业务对象或秘密；`/internal/metrics` 只允许受控内部网络采集。
 
+## Windows 本机公网试用入口
+
+当前已有环境使用 `node scripts/acceptance.mjs start|stop|check|open`，并同时加载 `docker-compose.yml` 与 `docker-compose.acceptance.yml`。不要在现有库重复执行 `init`，也不要省略验收覆盖文件重建 Web。
+
+桌面 `SampleFlow启动公网验收.cmd` 是一键启动／恢复入口：未运行时启动 Docker Desktop，等待本机 Linux 引擎，复用既有数据卷与验收镜像启动四个服务；不构建、不拉新镜像、不迁移、不导入、不改密码。需要已有 Node 24、Docker Desktop、cloudflared、项目依赖及 Playwright Chromium；缺失时停止并提示，不以空库代替恢复。更换程序版本或首次部署仍由维护人员按独立流程处理。
+
+启动器使用回环端口 `18081` 做进程互斥；电脑重启后锁自动释放。它核对隧道 PID、可执行文件、目标端口及创建时间，再查询 cloudflared 动态回环 metrics 的 `/ready`，不以“进程存在”代表连接正常。健康隧道复用网址，失效隧道安全回收并重建。新 URL 会更新精确 `APP_ORIGINS`，重建 API／入口／Web，数据库不重建；入口会话需要重新验证，业务数据和密码保留。
+
+本机保护检查与真实 Chromium 公网入口、系统登录页、API readiness、业务未登录 401 和入口退出检查通过后，才把最新地址写到 `.sampleflow/acceptance/url.txt`。隧道在后台独立运行，可以关闭启动窗口；不会安装开机任务、更改电源、系统代理、DNS 或防火墙。cloudflared 使用 `auto` 协议与自带轮转日志（`tunnel-logs/cloudflared.log`，1MB／最多 5 个轮转文件；另保留上一启动日志）。网络故障时不关闭 TLS 或放宽权限。
+
+Quick Tunnel 重建后地址会变化，不保证旧链接继续有效或客户所有网络可达。负责人必须把本次检查通过的链接发给客户，并请客户在实际办公网／手机网络验收；长期固定地址另行配置域名与 Named Tunnel 或公司服务器。[Cloudflare Quick Tunnel 限制](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/trycloudflare/)
+
+入口通过独立 Node 标准库服务与 Nginx `auth_request` 验证 8 小时会话，不使用会与业务 401 冲突的 HTTP Basic Auth。入口仅挂载盐化密码摘要与允许来源，使用内部网络、只读文件系统、非 root 用户，不连接数据库、不发布端口；静态页面和 API 同受保护，业务 401/403 原样返回，入口故障时拒绝放行。
+
+`configure-entry` 只从本机私密文件重新生成配置；随后须使用完整 Compose 参数重建 `acceptance-gate web` 才生效。入口服务重启会清除入口会话，不清空业务数据。共享电脑先退出系统，再到 `/_entry/logout` 撤销本浏览器入口会话。完整操作见桌面指南和 `handoff.md` 的“当前运行环境与操作入口”。
+
+最小回归：`node --test scripts/acceptance-startup.test.mjs scripts/acceptance-gate.test.mjs scripts/container-contract.test.mjs`；已有验收镜像时再运行 `node --test scripts/acceptance-gate-runtime.test.mjs`，使用临时容器和模拟 API，不连接真实库。启动测试模拟 Docker 未就绪、就绪和超时，不停止宿主 Docker。原生表单页使用 `Referrer-Policy: same-origin` 保留严格来源校验；业务页面响应头不变。[Origin 与表单来源说明](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Origin)
+
 ## 部署前准备
 
 要求 Docker Engine、Compose v2、足够磁盘空间和一个不与现有网络冲突的专用 `/24` 网段。复制 `.env.example` 为 `.env`，至少替换以下值：
 
 - `APP_ORIGINS`：正式 Web Origin。
+- `WEB_BIND_ADDRESS`：无外部入口层时为 `0.0.0.0`；由同机反向代理或 Tunnel 转发时应设为 `127.0.0.1`。
 - `SAMPLEFLOW_PROXY_SUBNET`：只承载本项目 Web 反向代理的网段，禁止 `0.0.0.0/0`。
 - `POSTGRES_PASSWORD`、`DB_MIGRATION_PASSWORD`、`DB_APP_PASSWORD`、`DB_BACKUP_PASSWORD`：四个不同的随机秘密。
 - `POSTGRES_*`、`DB_MIGRATION_*`、`DB_APP_*`、`DB_BACKUP_*`：经批准的不同账号。

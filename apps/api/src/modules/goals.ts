@@ -3,6 +3,7 @@ import type { PoolClient } from "pg";
 import { z } from "zod";
 import type { Database } from "../db.js";
 import { recordOperation } from "../observability.js";
+import { isAcceptanceOperator } from "../acceptance.js";
 import { nonnegativeMoneySchema, postgresBigintIdSchema } from "../validation.js";
 import { hasAnyRole, type CurrentUser } from "./auth.js";
 import { canReadGoals, pendingGoalSql, pendingGoalValues, resolveGoalAccess } from "./authorization.js";
@@ -50,7 +51,7 @@ const optionsSchema = z.object({
 });
 
 const editorRoles: Record<GoalLevel, readonly string[]> = {
-  sales_manager: ["sales_manager"],
+  sales_manager: ["sales_manager", "general_manager"],
   department: ["sales_manager"],
   group: ["sales_supervisor"],
   personal: ["sales_leader"],
@@ -78,6 +79,7 @@ type GoalContext = {
 };
 
 type PendingVersion = {
+  gm_issued: boolean;
   id: string;
   goal_id: string;
   version_no: string;
@@ -141,7 +143,7 @@ async function audit(
   await client.query(
     `insert into audit_logs(actor_user_id,action,entity_type,entity_id,before_data,after_data,ip_address)
      values($1,$2,$3,$4,$5,$6,$7)`,
-    [user.id, action, entityType, entityId, beforeData ? JSON.stringify(beforeData) : null, afterData ? JSON.stringify(afterData) : null, ipAddress],
+    [user.id, action, entityType, entityId, beforeData ? JSON.stringify(beforeData) : null, isAcceptanceOperator(user) ? JSON.stringify({acceptanceOverride:true,actualActorUserId:user.id,result:afterData}) : afterData ? JSON.stringify(afterData) : null, ipAddress],
   );
 }
 
@@ -225,7 +227,7 @@ async function assertCreationHierarchy(
   const orgUnitId = input.orgUnitId ?? null;
   if (input.level === "sales_manager") {
     if (parentId !== null || orgUnitId !== null) throw new GoalError(400, "GOAL_ROOT_SCOPE_INVALID", "销售经理总目标不能设置上级目标或组织范围");
-    if (String(input.ownerPersonId) !== user.personId) throw new GoalError(403, "GOAL_ROOT_OWNER_INVALID", "销售经理只能录入并签收自己的总目标");
+    if (!isAcceptanceOperator(user) && !hasAnyRole(user, ["general_manager"]) && String(input.ownerPersonId) !== user.personId) throw new GoalError(403, "GOAL_ROOT_OWNER_INVALID", "销售经理只能录入自己的总目标；总经理可向销售经理下达目标");
   } else if (parentId === null) {
     throw new GoalError(400, "GOAL_PARENT_REQUIRED", "该层级目标必须选择同月直属上级目标");
   }
@@ -236,10 +238,10 @@ async function assertCreationHierarchy(
     if (!parent) throw new GoalError(404, "GOAL_PARENT_NOT_FOUND", "上级目标不存在");
     if (parent.level !== parentLevels[input.level]) throw new GoalError(409, "GOAL_PARENT_LEVEL_INVALID", "上级目标层级不匹配");
     if (parent.period_month !== businessDate(input.periodMonth)) throw new GoalError(409, "GOAL_PARENT_MONTH_INVALID", "上级目标必须与当前目标属于同一月份");
-    if (parent.owner_person_id !== user.personId) throw new GoalError(403, "GOAL_PARENT_OWNER_REQUIRED", "仅直属上级目标责任人可下达该目标");
+    if (!isAcceptanceOperator(user) && parent.owner_person_id !== user.personId) throw new GoalError(403, "GOAL_PARENT_OWNER_REQUIRED", "仅直属上级目标责任人可下达该目标");
     const active = await client.query("select 1 from goal_versions where goal_id=$1 and status='active'", [parent.id]);
     if (!active.rowCount) throw new GoalError(409, "GOAL_PARENT_NOT_ACTIVE", "直属上级目标生效后才能下达子目标");
-    if (String(input.ownerPersonId) === user.personId) throw new GoalError(409, "GOAL_DUTY_SEPARATION", "目标下达人和责任人必须是不同人员");
+    if (!isAcceptanceOperator(user) && String(input.ownerPersonId) === user.personId) throw new GoalError(409, "GOAL_DUTY_SEPARATION", "目标下达人和责任人必须是不同人员");
   }
 
   const owner = await assertOwnerIsEligible(client, input.level, input.ownerPersonId, orgUnitId, parent, businessDate(input.periodMonth));
@@ -248,7 +250,7 @@ async function assertCreationHierarchy(
 
 async function decisionVersion(client: PoolClient, goalId: string, versionId: string): Promise<PendingVersion | undefined> {
   const result = await client.query<PendingVersion>(
-    `select v.id::text,v.goal_id::text,v.version_no::text,v.status,g.goal_level as level,
+    `select v.id::text,v.goal_id::text,v.version_no::text,v.status,v.gm_issued,g.goal_level as level,
             g.owner_person_id::text,g.parent_goal_id::text,v.created_by_person_id::text,v.signed_by_person_id::text
      from goal_versions v join goals g on g.id=v.goal_id
      where g.id=$1 and v.id=$2
@@ -262,11 +264,12 @@ async function createPendingGoalVersion(
   client: PoolClient,
   input: { goalId: string; amount: number; user: CurrentUser; ipAddress: string; reason: string; sourceChangeRequestId?: string },
 ) {
-  const result = await client.query<{ id: string; version_no: string }>(
-    `insert into goal_versions(goal_id,version_no,amount,status,created_by,created_by_person_id,change_reason)
-     select $1,coalesce(max(version_no),0)+1,$2,'pending_signature',$3,$4,$5
-     from goal_versions where goal_id=$1 returning id::text,version_no::text`,
-    [input.goalId, input.amount, input.user.id, input.user.personId, input.reason],
+  const result = await client.query<{ id: string; version_no: string; gm_issued: boolean }>(
+    `insert into goal_versions(goal_id,version_no,amount,status,created_by,created_by_person_id,change_reason,gm_issued)
+     select $1,coalesce(max(version_no),0)+1,$2,'pending_signature',$3,$4,$5,
+            $6::boolean and exists(select 1 from goals where id=$1 and goal_level='sales_manager' and owner_person_id<>$4)
+     from goal_versions where goal_id=$1 returning id::text,version_no::text,gm_issued`,
+    [input.goalId, input.amount, input.user.id, input.user.personId, input.reason, hasAnyRole(input.user, ["general_manager"])],
   );
   await invalidatePendingChangeRequests(client,input.goalId,input.user,input.ipAddress,input.sourceChangeRequestId,"目标已产生其他候选版本");
   return result.rows[0]!;
@@ -312,7 +315,8 @@ export async function registerGoals(app: FastifyInstance, db: Database) {
         `select g.id::text,to_char(g.period_month,'YYYY-MM') as "periodMonth",g.goal_level as level,
                 p.display_name as "ownerName",u.username as "ownerUsername",g.owner_person_id::text as "ownerPersonId",
                 g.org_unit_id::text as "orgUnitId",unit.name as "orgUnitName",g.parent_goal_id::text as "parentGoalId",
-                v.id::text as "versionId",v.version_no::text as "versionNo",v.amount::text,v.status,
+                v.id::text as "versionId",v.version_no::text as "versionNo",v.amount::text,v.status,v.gm_issued as "gmIssued",
+                (v.status in ('pending_gm','pending_hr') and ${pendingGoalSql("g", "v", 4)}) as "canDecide",
                 active.amount::text as "effectiveAmount",
                 v.signature_text as "signatureText",v.signed_at as "signedAt",v.change_reason as "changeReason",
                 allocation.amount::text as "allocatedAmount",
@@ -363,18 +367,20 @@ export async function registerGoals(app: FastifyInstance, db: Database) {
                 version.amount::text
          from goals g join people p on p.id=g.owner_person_id left join org_units unit on unit.id=g.org_unit_id
          join goal_versions version on version.goal_id=g.id and version.status='active'
-         where g.period_month=$1::date and g.goal_level=$2 and g.owner_person_id=$3
+         where g.period_month=$1::date and g.goal_level=$2 and (g.owner_person_id=$3 or $4::boolean)
          order by p.display_name,g.id`,
-        [businessDate(parsed.data.periodMonth), expectedParent, request.currentUser.personId],
+        [businessDate(parsed.data.periodMonth), expectedParent, request.currentUser.personId, isAcceptanceOperator(request.currentUser)],
       ) : { rows: [] };
 
       let owners: unknown[] = [];
       if (parsed.data.level === "sales_manager") {
         const result = await db.query(
           `select p.id::text as "personId",p.display_name as name,null::text as "orgUnitId",null::text as "orgUnitName"
-           from people p join users u on u.id=p.user_id and u.is_active
-           where p.id=$1`,
-          [request.currentUser.personId],
+           from people p join users u on u.id=p.user_id and u.is_active and u.deleted_at is null
+           join user_roles role on role.user_id=u.id and role.role_code='sales_manager'
+           where p.is_active and (p.id=$1 or $2::boolean)
+           order by p.display_name,p.id`,
+          [request.currentUser.personId, hasAnyRole(request.currentUser, ["general_manager"])],
         );
         owners = result.rows;
       } else if (parsed.data.parentGoalId) {
@@ -382,8 +388,8 @@ export async function registerGoals(app: FastifyInstance, db: Database) {
           `select g.id::text,to_char(g.period_month,'YYYY-MM-DD') as period_month,g.goal_level as level,
                   g.owner_person_id::text,g.owner_user_id::text,g.org_unit_id::text,g.parent_goal_id::text
            from goals g join goal_versions version on version.goal_id=g.id and version.status='active'
-           where g.id=$1 and g.period_month=$2::date and g.goal_level=$3 and g.owner_person_id=$4`,
-          [parsed.data.parentGoalId, businessDate(parsed.data.periodMonth), expectedParent, request.currentUser.personId],
+           where g.id=$1 and g.period_month=$2::date and g.goal_level=$3 and (g.owner_person_id=$4 or $5::boolean)`,
+          [parsed.data.parentGoalId, businessDate(parsed.data.periodMonth), expectedParent, request.currentUser.personId, isAcceptanceOperator(request.currentUser)],
         );
         if (!parent.rows[0]) throw new GoalError(404, "GOAL_PARENT_NOT_FOUND", "未找到可下达的直属上级目标");
         if (parsed.data.level === "department") {
@@ -459,10 +465,10 @@ export async function registerGoals(app: FastifyInstance, db: Database) {
       }
       const goalId = goal.rows[0]!.id;
       const unresolved = await client.query("select 1 from goal_versions where goal_id=$1 and status in ('pending_signature','pending_gm','pending_hr','active')", [goalId]);
-      if (unresolved.rowCount) throw new GoalError(409, "GOAL_VERSION_EXISTS", "该目标已有待处理或已生效版本，修改请走目标变更申请");
+      if (unresolved.rowCount) throw new GoalError(409, "GOAL_VERSION_EXISTS", parsed.data.level === "sales_manager" ? "该月该销售经理已有待处理或已生效总目标，不能重复下达。请先查看已有版本与记录。" : "该目标已有待处理或已生效版本，修改请走目标变更申请");
       const version = await createPendingGoalVersion(client, { goalId, amount: parsed.data.amount, user: request.currentUser, ipAddress:request.ip, reason: parsed.data.changeReason });
       await audit(client, request.currentUser, request.ip, "goal.version_created", "goal_version", version.id, undefined, {
-        goalId, versionNo: version.version_no, ...parsed.data,
+        goalId, versionNo: version.version_no, gmIssued: version.gm_issued, ...parsed.data,
       });
       await client.query("commit");
       return reply.code(201).send({ id: goalId, versionId: version.id });
@@ -483,7 +489,7 @@ export async function registerGoals(app: FastifyInstance, db: Database) {
     try {
       await client.query("begin");
       const result = await client.query<PendingVersion & { signed_by: string | null; signed_at: string | null; signature_text: string | null; amount: string }>(
-        `select v.id::text,v.goal_id::text,v.version_no::text,v.status,v.amount::text,
+        `select v.id::text,v.goal_id::text,v.version_no::text,v.status,v.amount::text,v.gm_issued,
                 v.signed_by::text,v.signed_by_person_id::text,v.signed_at::text,v.signature_text,
                 g.goal_level as level,g.owner_person_id::text,g.parent_goal_id::text,v.created_by_person_id::text
          from goal_versions v join goals g on g.id=v.goal_id where v.id=$1 for update of v`,
@@ -491,8 +497,8 @@ export async function registerGoals(app: FastifyInstance, db: Database) {
       );
       const version = result.rows[0];
       if (!version) throw new GoalError(404, "GOAL_VERSION_NOT_FOUND", "目标版本不存在");
-      if (version.owner_person_id !== request.currentUser.personId) throw new GoalError(403, "GOAL_CONFIRM_FORBIDDEN", "仅目标责任人可确认该版本");
-      if (version.level !== "sales_manager" && version.created_by_person_id === request.currentUser.personId) {
+      if (!isAcceptanceOperator(request.currentUser) && version.owner_person_id !== request.currentUser.personId) throw new GoalError(403, "GOAL_CONFIRM_FORBIDDEN", "仅目标责任人可确认该版本");
+      if (!isAcceptanceOperator(request.currentUser) && version.level !== "sales_manager" && version.created_by_person_id === request.currentUser.personId) {
         throw new GoalError(409, "GOAL_DUTY_SEPARATION", "目标下达人和责任人确认者必须是不同人员");
       }
       if (version.signed_by_person_id !== null || version.signed_by !== null || version.signed_at !== null) {
@@ -503,11 +509,11 @@ export async function registerGoals(app: FastifyInstance, db: Database) {
         return reply.send({ ok: true, changed: false, versionId: version.id, confirmedAt: version.signed_at });
       }
       if (version.status !== "pending_signature") throw new GoalError(409, "GOAL_NOT_PENDING_CONFIRMATION", "目标版本当前不待责任人确认");
-      const nextStatus = version.level === "sales_manager" ? "pending_gm" : "pending_hr";
+      const nextStatus = version.level === "sales_manager" && !version.gm_issued ? "pending_gm" : "pending_hr";
       const confirmed = await client.query<{ signed_at: string }>(
         `update goal_versions set signed_by=$2,signed_by_person_id=$3,signed_at=now(),signature_text=$4,status=$5
          where id=$1 returning signed_at::text`,
-        [version.id, request.currentUser.id, request.currentUser.personId, GOAL_CONFIRMATION_STATEMENT, nextStatus],
+        [version.id, request.currentUser.id, request.currentUser.personId, isAcceptanceOperator(request.currentUser) ? `验收专用账号代操作：目标责任人 ${version.owner_person_id}；实际操作账号 ${request.currentUser.id}。` : GOAL_CONFIRMATION_STATEMENT, nextStatus],
       );
       const confirmedAt = confirmed.rows[0]!.signed_at;
       await audit(client, request.currentUser, request.ip, "goal.version_confirmed", "goal_version", version.id, { status: version.status }, {
@@ -517,7 +523,7 @@ export async function registerGoals(app: FastifyInstance, db: Database) {
         amount: version.amount,
         accountId: request.currentUser.id,
         personId: request.currentUser.personId,
-        statement: GOAL_CONFIRMATION_STATEMENT,
+        statement: isAcceptanceOperator(request.currentUser) ? "验收代操作，不代表责任人本人确认" : GOAL_CONFIRMATION_STATEMENT,
         confirmedAt,
         result: "confirmed",
       });
@@ -545,19 +551,19 @@ export async function registerGoals(app: FastifyInstance, db: Database) {
       await client.query("begin");
       const version = await decisionVersion(client, params.data.id, parsed.data.expectedVersionId);
       if (!version || !["pending_gm", "pending_hr"].includes(version.status)) throw new GoalError(409, "GOAL_VERSION_CHANGED", "目标版本已变化，请重新核对后处理");
-      const isGm = version.status === "pending_gm" && version.level === "sales_manager" && hasAnyRole(request.currentUser, ["general_manager"]);
+      const isGm = version.status === "pending_gm" && version.level === "sales_manager" && !version.gm_issued && hasAnyRole(request.currentUser, ["general_manager"]);
       const isHr = version.status === "pending_hr" && hasAnyRole(request.currentUser, ["hr"]);
       if (!isGm && !isHr) throw new GoalError(403, "GOAL_APPROVAL_FORBIDDEN", "当前角色无权处理此审批节点");
-      if ([version.created_by_person_id, version.signed_by_person_id].includes(request.currentUser.personId)) {
+      if (!isAcceptanceOperator(request.currentUser) && [version.created_by_person_id, version.signed_by_person_id].includes(request.currentUser.personId)) {
         throw new GoalError(409, "GOAL_DUTY_SEPARATION", "目标录入人或确认者不能审批同一版本");
       }
-      if (isHr && version.level === "sales_manager") {
+      if (isHr && version.level === "sales_manager" && !version.gm_issued) {
         const gm = await client.query<{ decided_by_person_id: string }>(
           "select decided_by_person_id::text from goal_approvals where goal_version_id=$1 and approval_stage='general_manager' and decision='approved'",
           [version.id],
         );
         if (!gm.rows[0]) throw new GoalError(409, "GOAL_GM_APPROVAL_REQUIRED", "销售经理总目标必须先经总经理批准");
-        if (gm.rows[0].decided_by_person_id === request.currentUser.personId) throw new GoalError(409, "GOAL_DUTY_SEPARATION", "总经理审批人与人事终审人必须是不同人员");
+        if (!isAcceptanceOperator(request.currentUser) && gm.rows[0].decided_by_person_id === request.currentUser.personId) throw new GoalError(409, "GOAL_DUTY_SEPARATION", "总经理审批人与人事终审人必须是不同人员");
       }
       const stage = isGm ? "general_manager" : "hr";
       await client.query(
@@ -624,7 +630,7 @@ export async function registerGoals(app: FastifyInstance, db: Database) {
       const goal = await loadGoal(client, params.data.id, true);
       if (!goal) throw new GoalError(404, "GOAL_NOT_FOUND", "目标不存在");
       if (goal.level === "sales_manager") throw new GoalError(409, "GOAL_ROOT_CHANGE_UNSUPPORTED", "销售经理总目标不使用下级变更申请流程");
-      if (goal.owner_person_id !== request.currentUser.personId) throw new GoalError(403, "GOAL_CHANGE_FORBIDDEN", "仅目标责任人可提出修改申请");
+      if (!isAcceptanceOperator(request.currentUser) && goal.owner_person_id !== request.currentUser.personId) throw new GoalError(403, "GOAL_CHANGE_FORBIDDEN", "仅目标责任人可提出修改申请");
       const existing = await client.query<{ id: string }>(
         "select id::text from goal_change_requests where goal_id=$1 and status in ('pending','accepted') order by created_at desc limit 1",
         [goal.id],
@@ -688,11 +694,11 @@ export async function registerGoals(app: FastifyInstance, db: Database) {
       }
 
       if (operation === "withdraw") {
-        if (row.requested_by_person_id !== request.currentUser.personId) throw new GoalError(403, "GOAL_CHANGE_WITHDRAW_FORBIDDEN", "仅申请人可撤回待处理申请");
+        if (!isAcceptanceOperator(request.currentUser) && row.requested_by_person_id !== request.currentUser.personId) throw new GoalError(403, "GOAL_CHANGE_WITHDRAW_FORBIDDEN", "仅申请人可撤回待处理申请");
         await client.query("update goal_change_requests set status='withdrawn',withdrawn_at=now() where id=$1", [row.id]);
         await audit(client, request.currentUser, request.ip, "goal.change_withdrawn", "goal_change_request", row.id, { status: "pending" }, { status: "withdrawn" });
       } else {
-        if (row.parent_owner_person_id !== request.currentUser.personId) throw new GoalError(403, "GOAL_CHANGE_HANDLE_FORBIDDEN", "仅直属目标下达人可处理该申请");
+        if (!isAcceptanceOperator(request.currentUser) && row.parent_owner_person_id !== request.currentUser.personId) throw new GoalError(403, "GOAL_CHANGE_HANDLE_FORBIDDEN", "仅直属目标下达人可处理该申请");
         if (operation === "reject") {
           const body = rejected!.data;
           await client.query(
@@ -735,17 +741,17 @@ export async function registerGoals(app: FastifyInstance, db: Database) {
                 case when created_version.id is null then null
                      else (created_version.amount-base_version.amount)::text end as "amountDifference",
                 requester.display_name as "requestedByName",handler.display_name as "handledByName",
-                (parent.owner_person_id=$1) as "canHandle",
-                (request_row.requested_by_person_id=$1) as "canWithdraw"
+                (parent.owner_person_id=$1 or $2::boolean) as "canHandle",
+                (request_row.requested_by_person_id=$1 or $2::boolean) as "canWithdraw"
          from goal_change_requests request_row join goals goal on goal.id=request_row.goal_id
          join people owner on owner.id=goal.owner_person_id join people requester on requester.id=request_row.requested_by_person_id
          left join people handler on handler.id=request_row.handled_by_person_id left join goals parent on parent.id=goal.parent_goal_id
          left join goal_versions base_version on base_version.id=request_row.requested_against_version_id
          left join goal_versions created_version on created_version.id=request_row.created_version_id
          where request_row.status='pending'
-           and (request_row.requested_by_person_id=$1 or parent.owner_person_id=$1)
+           and (request_row.requested_by_person_id=$1 or parent.owner_person_id=$1 or $2::boolean)
          order by request_row.created_at desc,request_row.id desc`,
-        [request.currentUser.personId],
+        [request.currentUser.personId, isAcceptanceOperator(request.currentUser)],
       );
       const linkageDecisions = await db.query(
         `select linkage.id::text,linkage.parent_goal_id::text as "parentGoalId",
@@ -759,9 +765,9 @@ export async function registerGoals(app: FastifyInstance, db: Database) {
          join goals child_goal on child_goal.id=child_version.goal_id join people child_owner on child_owner.id=child_goal.owner_person_id
          join goals parent on parent.id=linkage.parent_goal_id
          join goal_versions parent_version on parent_version.goal_id=parent.id and parent_version.status='active'
-         where linkage.status='pending' and parent.owner_person_id=$1
+         where linkage.status='pending' and (parent.owner_person_id=$1 or $2::boolean)
          order by linkage.id desc`,
-        [request.currentUser.personId],
+        [request.currentUser.personId, isAcceptanceOperator(request.currentUser)],
       );
       return { changeRequests: changeRequests.rows, linkageDecisions: linkageDecisions.rows };
     } catch (error) { return unexpectedGoalError(request, reply, error); }
@@ -790,7 +796,7 @@ export async function registerGoals(app: FastifyInstance, db: Database) {
       const row = result.rows[0];
       if (!row) throw new GoalError(404, "GOAL_LINKAGE_NOT_FOUND", "目标联动待办不存在");
       if (row.status !== "pending") throw new GoalError(409, "GOAL_LINKAGE_STATE_CONFLICT", "目标联动待办已处理");
-      if (row.parent_owner_person_id !== request.currentUser.personId) throw new GoalError(403, "GOAL_LINKAGE_FORBIDDEN", "仅本级目标责任人可作出联动选择");
+      if (!isAcceptanceOperator(request.currentUser) && row.parent_owner_person_id !== request.currentUser.personId) throw new GoalError(403, "GOAL_LINKAGE_FORBIDDEN", "仅本级目标责任人可作出联动选择");
       let generatedId: string | null = null;
       let createdVersionId: string | null = null;
       if (parsed.data.decision === "adjust_parent") {
@@ -852,7 +858,7 @@ export async function registerGoals(app: FastifyInstance, db: Database) {
                      else (version.amount-version."previousAmount")::text end as "amountDifference",
                 creator.display_name as "createdByName",signer.display_name as "signedByName",
                 version.signature_text as "signatureText",version.signed_at as "signedAt",
-                version.change_reason as "changeReason",version.created_at as "createdAt"
+                version.change_reason as "changeReason",version.created_at as "createdAt",version.gm_issued as "gmIssued"
          from (
            select source.*,lag(source.amount) over(order by source.version_no) as "previousAmount"
            from goal_versions source where source.goal_id=$1

@@ -12,10 +12,13 @@ const accountCursorSchema = z.strictObject({ version:z.literal(1), userId:postgr
 const roleUpdateSchema = z.strictObject({ roles:z.array(z.string().trim().min(1)).min(1) });
 const statusSchema = z.object({ isActive:z.boolean() });
 const resetSchema = z.strictObject({});
+const profileSchema = createUserSchema.pick({username:true,displayName:true});
+const deleteAccountSchema = z.strictObject({username:z.string().min(2).max(100)});
 const unitSchema = z.object({ name:z.string().trim().min(1).max(100), unitType:z.enum(["department","group"]), parentId:postgresBigintIdSchema.nullable().optional() });
 const assignmentSchema = z.strictObject({ personId:postgresBigintIdSchema, departmentId:postgresBigintIdSchema, groupId:postgresBigintIdSchema, leaderPersonId:postgresBigintIdSchema, supervisorPersonId:postgresBigintIdSchema, effectiveFrom:z.iso.date(), effectiveTo:z.iso.date().nullable().optional(), closePrevious:z.boolean().optional().default(false) });
 const membershipCloseSchema = z.strictObject({ effectiveOn:z.iso.date() });
 const responsibilityReplaceSchema = z.strictObject({ successorPersonId:postgresBigintIdSchema, effectiveOn:z.iso.date() });
+const supervisorSchema = z.strictObject({ personId:postgresBigintIdSchema, departmentId:postgresBigintIdSchema, effectiveFrom:z.iso.date() });
 const userIdParamsSchema = z.strictObject({ id:postgresBigintIdSchema });
 const ADMIN_USER_PAGE_SIZE=50;
 const fixedRoles=ROLE_PERMISSION_MATRIX.map(({code,name})=>({code,name}));
@@ -45,7 +48,7 @@ export async function registerAdmin(app:FastifyInstance,db:Database){
              select u.id as "__id",u.id::text,u.username,u.display_name as "displayName",u.is_active as "isActive",u.must_change_password as "mustChangePassword",
                     coalesce(array_agg(ur.role_code order by ur.role_code) filter(where ur.role_code is not null),'{}') as roles
              from users u left join user_roles ur on ur.user_id=u.id
-             where position(lower($1) in lower(u.username))>0 or position(lower($1) in lower(u.display_name))>0
+             where u.deleted_at is null and (position(lower($1) in lower(u.username))>0 or position(lower($1) in lower(u.display_name))>0)
              group by u.id
            ), page_rows as (
              select * from filtered order by "__id" limit $2 offset $3
@@ -63,7 +66,7 @@ export async function registerAdmin(app:FastifyInstance,db:Database){
          select u.id as "__id",u.id::text,u.username,u.display_name as "displayName",u.is_active as "isActive",u.must_change_password as "mustChangePassword",
                 coalesce(array_agg(ur.role_code order by ur.role_code) filter(where ur.role_code is not null),'{}') as roles
          from users u left join user_roles ur on ur.user_id=u.id cross join cutoff
-         where u.id<=cutoff.id and u.id>coalesce($2::bigint,0)
+         where u.deleted_at is null and u.id<=cutoff.id and u.id>coalesce($2::bigint,0)
            and (position(lower($1) in lower(u.username))>0 or position(lower($1) in lower(u.display_name))>0)
          group by u.id order by u.id limit $4
        )
@@ -85,6 +88,12 @@ export async function registerAdmin(app:FastifyInstance,db:Database){
     const temporaryPassword=generateTemporaryPassword();const temporaryPasswordExpiresAt=new Date(Date.now()+TEMPORARY_PASSWORD_TTL_MS);const client=await db.connect();
     try{
       await client.query("begin");
+      await client.query("set local lock_timeout='5s'");
+      await client.query("lock table people in share row exclusive mode");
+      if(!parsed.data.personId){
+        const existing=await client.query("select id from people where identity_source='performance_import' and lower(btrim(display_name))=lower($1)",[parsed.data.displayName]);
+        if(existing.rowCount){await client.query("rollback");return reply.code(409).send({message:"已有同名导入人员档案，请选择“绑定已有人员”，避免历史业绩与新账号分离"});}
+      }
       if(parsed.data.personId){
         const person=await client.query<{user_id:string|null}>("select user_id::text from people where id=$1 for update",[parsed.data.personId]);
         if(!person.rows[0]){await client.query("rollback");return reply.code(404).send({message:"待绑定人员身份不存在"});}
@@ -112,7 +121,7 @@ export async function registerAdmin(app:FastifyInstance,db:Database){
     try{
       await client.query("begin");
       await client.query("select pg_advisory_xact_lock(hashtext('sampleflow.active-system-admin'))");
-      const user=await client.query("select id from users where id=$1 for update",[params.data.id]);
+      const user=await client.query("select id from users where id=$1 and deleted_at is null for update",[params.data.id]);
       if(!user.rowCount){await client.query("rollback");return reply.code(404).send({message:"账号不存在"});}
       const before=await client.query<{role_code:string}>("select role_code from user_roles where user_id=$1 order by role_code for update",[params.data.id]);
       const previous=before.rows.map((row)=>row.role_code);
@@ -138,7 +147,7 @@ export async function registerAdmin(app:FastifyInstance,db:Database){
     try{
       await client.query("begin");
       await client.query("select pg_advisory_xact_lock(hashtext('sampleflow.active-system-admin'))");
-      const before=await client.query<{is_active:boolean}>("select is_active from users where id=$1 for update",[params.data.id]);
+      const before=await client.query<{is_active:boolean}>("select is_active from users where id=$1 and deleted_at is null for update",[params.data.id]);
       if(!before.rowCount){await client.query("rollback");return reply.code(404).send({message:"账号不存在"});}
       await client.query("update users set is_active=$2,updated_at=now() where id=$1",[params.data.id,parsed.data.isActive]);
       const activeAdmin=await client.query(`select 1 from users user_account join user_roles role on role.user_id=user_account.id where user_account.is_active and role.role_code='system_admin' limit 1`);
@@ -155,12 +164,48 @@ export async function registerAdmin(app:FastifyInstance,db:Database){
     const temporaryPassword=generateTemporaryPassword();const temporaryPasswordExpiresAt=new Date(Date.now()+TEMPORARY_PASSWORD_TTL_MS);const password=await hashPassword(temporaryPassword);const client=await db.connect();
     try{
       await client.query("begin");
-      const result=await client.query("update users set password_hash=$2,password_salt=$3,must_change_password=true,temporary_password_expires_at=$4,updated_at=now() where id=$1 returning id",[params.data.id,password.hash,password.salt,temporaryPasswordExpiresAt]);
+      const result=await client.query("update users set password_hash=$2,password_salt=$3,must_change_password=true,temporary_password_expires_at=$4,updated_at=now() where id=$1 and deleted_at is null returning id",[params.data.id,password.hash,password.salt,temporaryPasswordExpiresAt]);
       if(!result.rowCount){await client.query("rollback");return reply.code(404).send({message:"账号不存在"});}
       await client.query("update sessions set revoked_at=now() where user_id=$1 and revoked_at is null",[params.data.id]);
       await client.query(`insert into audit_logs(actor_user_id,action,entity_type,entity_id,ip_address) values($1,'auth.password_reset','user',$2,$3)`,[request.currentUser!.id,params.data.id,request.ip]);
       await client.query("commit");
       return{ok:true,temporaryPassword,temporaryPasswordExpiresAt:temporaryPasswordExpiresAt.toISOString()};
+    }catch(error){await client.query("rollback");throw error;}finally{client.release();}
+  });
+  app.patch("/api/admin/users/:id/profile",async(request,reply)=>{
+    const denied=requireAdmin(request,reply);if(denied)return denied;
+    const params=userIdParamsSchema.safeParse(request.params);const parsed=profileSchema.safeParse(request.body);
+    if(!params.success||!parsed.success)return reply.code(400).send({message:"账号或姓名格式无效"});
+    const client=await db.connect();
+    try{
+      await client.query("begin");
+      const result=await client.query<{username:string;displayName:string}>(`select username,display_name as "displayName" from users where id=$1 and deleted_at is null for update`,[params.data.id]);
+      const before=result.rows[0];if(!before){await client.query("rollback");return reply.code(404).send({message:"账号不存在或已删除"});}
+      if(before.username===parsed.data.username&&before.displayName===parsed.data.displayName){await client.query("commit");return{ok:true,changed:false};}
+      await client.query("update users set username=$2,display_name=$3,updated_at=now() where id=$1",[params.data.id,parsed.data.username,parsed.data.displayName]);
+      await client.query(`insert into audit_logs(actor_user_id,action,entity_type,entity_id,before_data,after_data,ip_address) values($1,'auth.account_profile_changed','user',$2,$3::jsonb,$4::jsonb,$5)`,[request.currentUser!.id,params.data.id,JSON.stringify(before),JSON.stringify(parsed.data),request.ip]);
+      await client.query("commit");return{ok:true,changed:true};
+    }catch(error){await client.query("rollback");if((error as{code?:string}).code==="23505")return reply.code(409).send({message:"账号名已存在或已保留，请使用其他账号名"});throw error;}finally{client.release();}
+  });
+  app.delete("/api/admin/users/:id",async(request,reply)=>{
+    const denied=requireAdmin(request,reply);if(denied)return denied;
+    const params=userIdParamsSchema.safeParse(request.params);const parsed=deleteAccountSchema.safeParse(request.body);
+    if(!params.success||!parsed.success)return reply.code(400).send({message:"请输入要删除的完整账号名"});
+    if(params.data.id===request.currentUser!.id)return reply.code(409).send({message:"不能删除当前登录账号"});
+    const client=await db.connect();
+    try{
+      await client.query("begin");
+      await client.query("select pg_advisory_xact_lock(hashtext('sampleflow.active-system-admin'))");
+      const result=await client.query<{username:string;displayName:string;isActive:boolean;deleted_at:Date|null}>(`select username,display_name as "displayName",is_active as "isActive",deleted_at from users where id=$1 for update`,[params.data.id]);
+      const before=result.rows[0];if(!before){await client.query("rollback");return reply.code(404).send({message:"账号不存在"});}
+      if(before.username!==parsed.data.username){await client.query("rollback");return reply.code(409).send({message:"账号名不匹配或已变更，请重新查询后确认"});}
+      if(before.deleted_at){await client.query("commit");return{ok:true,changed:false};}
+      await client.query("update users set deleted_at=now(),is_active=false,updated_at=now() where id=$1",[params.data.id]);
+      const activeAdmin=await client.query(`select 1 from users u join user_roles r on r.user_id=u.id where u.is_active and r.role_code='system_admin' limit 1`);
+      if(!activeAdmin.rowCount){await client.query("rollback");return reply.code(409).send({message:"必须至少保留一个启用的系统管理员"});}
+      await client.query("update sessions set revoked_at=now() where user_id=$1 and revoked_at is null",[params.data.id]);
+      await client.query(`insert into audit_logs(actor_user_id,action,entity_type,entity_id,before_data,after_data,ip_address) values($1,'auth.account_deleted','user',$2,$3::jsonb,'{"isActive":false,"result":"succeeded"}'::jsonb,$4)`,[request.currentUser!.id,params.data.id,JSON.stringify({username:before.username,displayName:before.displayName,isActive:before.isActive}),request.ip]);
+      await client.query("commit");return{ok:true,changed:true};
     }catch(error){await client.query("rollback");throw error;}finally{client.release();}
   });
   app.get("/api/organization",async(request,reply)=>{
@@ -296,6 +341,35 @@ export async function registerAdmin(app:FastifyInstance,db:Database){
       await client.query("commit");return{ok:true,effectiveTo:closed.rows[0]!.effectiveTo};
     }catch(error){await client.query("rollback");if(["23514","P0001"].includes((error as{code?:string}).code??""))return reply.code(409).send({message:"任职截止日期与组织有效期冲突"});throw error;}finally{client.release();}
   });
+  app.post("/api/admin/organization/supervisors",async(request,reply)=>{
+    const denied=requireAdmin(request,reply);if(denied)return denied;
+    const parsed=supervisorSchema.safeParse(request.body);
+    if(!parsed.success)return reply.code(400).send({message:"请选择主管、部门及有效的生效日期"});
+    const {personId,departmentId,effectiveFrom}=parsed.data;
+    const client=await db.connect();
+    try{
+      await client.query("begin");
+      const person=await client.query("select id from people where id=$1",[personId]);
+      const department=await client.query("select id from org_units where id=$1 and unit_type='department'",[departmentId]);
+      if(!person.rowCount||!department.rowCount){await client.query("rollback");return reply.code(404).send({message:"人员或部门不存在，请刷新后重新选择"});}
+      const created=await client.query<{id:string}>(
+        "insert into org_responsibilities(person_id,org_unit_id,responsibility_type,effective_from,created_by) values($1,$2,'supervisor',$3,$4) returning id::text",
+        [personId,departmentId,effectiveFrom,request.currentUser!.id],
+      );
+      await client.query(
+        "insert into audit_logs(actor_user_id,action,entity_type,entity_id,after_data,ip_address) values($1,'organization.responsibility_created','org_responsibility',$2,$3::jsonb,$4)",
+        [request.currentUser!.id,created.rows[0]!.id,JSON.stringify({personId,orgUnitId:departmentId,responsibilityType:"supervisor",effectiveFrom,effectiveTo:null}),request.ip],
+      );
+      await client.query("commit");return reply.code(201).send({id:created.rows[0]!.id});
+    }catch(error){
+      await client.query("rollback");
+      const code=(error as{code?:string}).code;
+      if(code==="23P01")return reply.code(409).send({message:"该期间已有部门主管，请在“负责人职责”中找到该部门，使用“更换负责人”，不要重复新增。"});
+      if(["23514","23503","P0001"].includes(code??""))return reply.code(409).send({message:"主管任职与现有组织记录冲突，请核对部门和生效日期"});
+      throw error;
+    }finally{client.release();}
+  });
+
   app.post("/api/admin/organization/responsibilities/:id/replace",async(request,reply)=>{
     const denied=requireAdmin(request,reply);if(denied)return denied;
     const params=z.strictObject({id:postgresBigintIdSchema}).safeParse(request.params);const parsed=responsibilityReplaceSchema.safeParse(request.body);

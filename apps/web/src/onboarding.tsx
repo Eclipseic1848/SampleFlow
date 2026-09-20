@@ -112,14 +112,14 @@ function goalActionDescription(user: User): string {
   if (user.roles.includes("sales_leader")) descriptions.push("业务员组长可向业务员下达目标并确认小组目标");
   if (user.roles.includes("salesperson")) descriptions.push("业务员可确认个人目标并申请修改");
   if (user.roles.includes("hr")) descriptions.push("人事部只读查看并在审批中心终审");
-  if (user.roles.includes("general_manager")) descriptions.push("总经理只读查看并在审批中心处理总目标");
+  if (user.roles.includes("general_manager")) descriptions.push("总经理可下达销售经理总目标，责任人确认后交人事终审；也可审批销售经理自行发起的总目标");
   return `${descriptions.join("；")}。`;
 }
 
 function approvalDescription(user: User): string {
   const descriptions = [];
   if (user.roles.includes("hr")) descriptions.push("人事部处理目标终审和修改申请终审");
-  if (user.roles.includes("general_manager")) descriptions.push("总经理处理销售经理总目标");
+  if (user.roles.includes("general_manager")) descriptions.push("总经理审批销售经理自行发起的总目标，不审批自己下达的版本");
   if (user.roles.some((role) => ["sales_manager", "sales_supervisor", "sales_leader"].includes(role))) descriptions.push("负责人处理直属下级修改和本级目标联动");
   if (user.roles.includes("salesperson")) descriptions.push("业务员处理本人确认和可撤回的修改申请");
   return `${descriptions.join("；")}。操作前先核对版本、确认人和既有意见。`;

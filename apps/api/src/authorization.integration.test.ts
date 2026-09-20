@@ -13,6 +13,37 @@ import { businessDate } from "./domain/business-time.js";
 const { Client, Pool } = pg;
 const TEST_ORIGIN = "http://127.0.0.1:4174";
 
+test("部门主管可独立任职，保留部门范围、权限拦截和冲突保护",async()=>{
+  await withMigratedTestDatabase(async(database)=>{
+    await seedTestUser(database.url,{username:"supervisor_admin",displayName:"管理员",password:"Role@123",roleCode:"system_admin",roleName:"系统管理员"});
+    const userId=await seedTestUser(database.url,{username:"supervisor_only",displayName:"主管",password:"Role@123",roleCode:"sales_supervisor",roleName:"业务主管"});
+    const client=new Client({connectionString:database.url});await client.connect();
+    try{
+      const personId=(await client.query("select id::text from people where user_id=$1",[userId])).rows[0].id;
+      const departmentId=(await client.query("insert into org_units(name,unit_type) values('主管测试部门','department') returning id::text")).rows[0].id;
+      const groupId=(await client.query("insert into org_units(name,unit_type,parent_id) values('主管测试一组','group',$1),('主管测试二组','group',$1) returning id::text",[departmentId])).rows[0].id;
+      await withTestApi(database.url,async(app)=>{
+        const headers=await loginWriteHeaders(app,"supervisor_admin");
+        const payload={personId,departmentId,effectiveFrom:"2020-01-01"};
+        const create=()=>app.inject({method:"POST",url:"/api/admin/organization/supervisors",headers,payload});
+        const denied=await app.inject({method:"POST",url:"/api/admin/organization/supervisors",headers:await loginWriteHeaders(app,"supervisor_only"),payload});
+        assert.equal(denied.statusCode,403);
+        const wrongUnit=await app.inject({method:"POST",url:"/api/admin/organization/supervisors",headers,payload:{...payload,departmentId:groupId}});
+        assert.equal(wrongUnit.statusCode,404);
+        const invalid=await app.inject({method:"POST",url:"/api/admin/organization/supervisors",headers,payload:{...payload,groupId}});
+        assert.equal(invalid.statusCode,400);
+        const result=await create();assert.equal(result.statusCode,201,result.body);
+        const duplicate=await create();assert.equal(duplicate.statusCode,409);assert.match(duplicate.json().message,/更换负责人/);
+        assert.equal((await client.query("select count(*)::int n from org_memberships where person_id=$1",[personId])).rows[0].n,0);
+        assert.equal((await client.query("select count(*)::int n from audit_logs where action='organization.responsibility_created' and entity_id=$1",[result.json().id])).rows[0].n,1);
+        const access=await resolvePerformanceAccess(client,{id:userId,personId,roles:["sales_supervisor"]} as Parameters<typeof resolvePerformanceAccess>[1]);
+        assert.deepEqual(access.departmentIds,[departmentId]);assert.deepEqual(access.groupIds,[]);assert.equal(access.all,false);
+        assert.equal((await client.query("select count(*)::int n from user_roles where user_id=$1",[userId])).rows[0].n,1);
+      });
+    }finally{await client.end();}
+  });
+});
+
 function moneyCents(value: string): bigint {
   const sign = value.startsWith("-") ? -1n : 1n;
   const [whole, fraction = ""] = value.replace("-", "").split(".");
@@ -1612,10 +1643,39 @@ test("订单组合筛选始终叠加服务端权限范围", async () => {
       assert.equal(matched.statusCode, 200, matched.body);
       assert.deepEqual((matched.json().orders as Array<{ orderNo: string }>).map((order) => order.orderNo), ["SCOPE-1"]);
 
+      const legacyPage=await app.inject({method:"GET",url:"/api/performance/orders?page=1",headers:{cookie:leaderCookie}});
+      assert.equal(legacyPage.statusCode,200,legacyPage.body);
+      const legacyFilters={search:"",orderNo:"",month:"",status:"",salesperson:"",department:"",group:"",region:"",customerUnit:""};
+      assert.equal(JSON.parse(Buffer.from(legacyPage.json().snapshot,"base64url").toString("utf8")).filterDigest,createHash("sha256").update(JSON.stringify(legacyFilters),"utf8").digest("base64url"));
+
       filters.set("group", "乙组");
       const empty = await app.inject({ method: "GET", url: `/api/performance/orders?${filters}`, headers: { cookie: leaderCookie } });
       assert.equal(empty.statusCode, 200, empty.body);
       assert.deepEqual(empty.json().orders, []);
+
+      const dated=new URLSearchParams({dateFrom:"2026-08-01",dateTo:"2026-08-01",orderNo:"SCOPE-1",salesperson:"业务员甲",page:"1",pageSize:"10"});
+      const dateList=await app.inject({method:"GET",url:`/api/performance/orders?${dated}`,headers:{cookie:leaderCookie}});
+      assert.equal(dateList.statusCode,200,dateList.body);assert.equal(dateList.json().totalCount,1);
+      dated.set("customerName",dateList.json().orders[0].customerName.slice(0,2));
+      const named=await app.inject({method:"GET",url:`/api/performance/orders?${dated}`,headers:{cookie:leaderCookie}});
+      assert.equal(named.statusCode,200,named.body);assert.equal(named.json().totalCount,1);
+      const exported=await app.inject({method:"GET",url:`/api/exports/performance.csv?${dated}`,headers:{cookie:leaderCookie}});
+      assert.equal(exported.statusCode,200,exported.body);assert.ok(exported.body.includes('"SCOPE-1"'));assert.ok(!exported.body.includes('"SCOPE-3"'));
+      dated.set("dateFrom","2026-08-02");dated.set("dateTo","2026-08-31");
+      assert.equal((await app.inject({method:"GET",url:`/api/performance/orders?${dated}`,headers:{cookie:leaderCookie}})).json().totalCount,0);
+      dated.set("dateFrom","2026-08-01");dated.set("orderNo","SCOPE-3");dated.delete("customerName");dated.delete("salesperson");
+      assert.equal((await app.inject({method:"GET",url:`/api/performance/orders?${dated}`,headers:{cookie:leaderCookie}})).json().totalCount,0,"日期和精确订单号不能绕过权限");
+      for(const query of ["dateFrom=0000-01-01","dateFrom=2026-02-30","dateFrom=2026-09-02&dateTo=2026-09-01"]){
+        for(const path of ["/api/performance/orders","/api/exports/performance.csv"]){
+          assert.equal((await app.inject({method:"GET",url:`${path}?${query}`,headers:{cookie:leaderCookie}})).statusCode,400);
+        }
+      }
+      for(const query of ["dateTo=2026-08-01&orderNo=SCOPE-1","dateFrom=2026-08-01&orderNo=SCOPE-1"]){
+        const boundary=await app.inject({method:"GET",url:`/api/performance/orders?${query}`,headers:{cookie:leaderCookie}});
+        assert.equal(boundary.statusCode,200,boundary.body);assert.equal(boundary.json().orders.length,1);
+      }
+      const literal=await app.inject({method:"GET",url:"/api/performance/orders?customerName=%25",headers:{cookie:leaderCookie}});
+      assert.equal(literal.statusCode,200,literal.body);assert.equal(literal.json().orders.length,0,"姓名百分号不是通配符");
 
       const forged = await app.inject({ method: "GET", url: "/api/performance/orders?department=乙部", headers: { cookie: leaderCookie } });
       assert.equal(forged.statusCode, 200, forged.body);
@@ -1641,6 +1701,7 @@ test("订单组合筛选始终叠加服务端权限范围", async () => {
       }
 
       const maximumFilters = new URLSearchParams({
+        dateFrom:"2026-08-15",dateTo:"2026-08-15",customerName:"最长筛选",
         search: maximumSearch,
         month: "2026-08",
         status: "active",
@@ -1658,6 +1719,8 @@ test("订单组合筛选始终叠加服务端权限范围", async () => {
       const maximumSecond = await app.inject({ method: "GET", url: `/api/performance/orders?${maximumFilters}`, headers: { cookie: leaderCookie } });
       assert.equal(maximumSecond.statusCode, 200, maximumSecond.body);
       assert.equal(maximumSecond.json().orders.length, 1);
+      maximumFilters.set("dateTo","2026-08-16");
+      assert.equal((await app.inject({method:"GET",url:`/api/performance/orders?${maximumFilters}`,headers:{cookie:leaderCookie}})).statusCode,400,"日期变化后必须重新分页");
     });
   });
 });

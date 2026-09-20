@@ -61,6 +61,8 @@ export function goalLevelName(level: string) { return ({ sales_manager:"销售�
 export function goalStatusName(status: string) { return ({ draft:"草稿", pending_signature:"待责任人确认", pending_gm:"待总经理审批", pending_hr:"待人事审批", active:"已生效", rejected:"已拒绝", superseded:"已替代" } as Record<string,string>)[status] ?? status; }
 export function workflowStatusName(status:string){return ({pending:"待处理",accepted:"已接受，待重新确认",rejected:"已拒绝",withdrawn:"已撤回",invalidated:"已失效",completed:"已完成"} as Record<string,string>)[status]??status;}
 const auditActionNames:Record<string,string>={
+  "import.statistical_setup":"确认导入人员与统计归属",
+  "auth.account_profile_changed":"修改账号资料","auth.account_deleted":"删除账号",
   "auth.account_created":"创建账号","auth.account_roles_changed":"修改账号角色","auth.account_status_changed":"修改账号状态","auth.admin_bootstrapped":"初始化管理员","auth.login_succeeded":"登录成功","auth.logout":"退出登录","auth.password_changed":"修改密码","auth.password_reset":"重置密码",
   "organization.pagination_fixture":"组织分页记录","organization.unit_created":"新增组织单元","organization.unit_activated":"启用组织单元","organization.assignment_created":"新增人员任职","organization.assignment_closed":"关闭人员任职","organization.assignment_closed_for_transfer":"组织异动关闭原任职","organization.responsibility_created":"新增负责人职责","organization.responsibility_replaced":"更换负责人",
   "performance.order_posted":"订单入账","performance.event_posted":"业绩事件入账","performance.order_export":"导出授权范围订单","performance.formal_report_export":"导出正式业绩报表","performance.cursor_test":"业绩分页记录",

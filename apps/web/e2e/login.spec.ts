@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import pg from "pg";
 import { parseImportWorkbook, type ImportLayout } from "../../api/src/domain/performance-import-xlsx.js";
 import { seedTestUser } from "../../api/src/test-support/fixtures.js";
@@ -68,8 +70,10 @@ test("销售助理可通过真实 API 登录", async ({ database, page }) => {
       await expect(page.getByRole("img", { name: "瑞源生物 Pronetbio" })).toBeVisible();
 });
 
-test("销售助理组长可用标准模板预检并确认整批入账", async ({ database, page }) => {
-    await seedTestUser(database.url,{username:"e2e_import_leader",displayName:"E2E 导入组长",password:"E2ePass@123",roleCode:"sales_assistant_leader",roleName:"销售助理组长"});
+for(const role of ["sales_assistant","sales_assistant_leader"]){
+test(`${role} 默认标准模板预检并按权限确认整批入账`, async ({ database, page }) => {
+    const pageErrors:string[]=[];page.on("pageerror",error=>pageErrors.push(error.message));
+    await seedTestUser(database.url,{username:"e2e_import_leader",displayName:"E2E 导入人员",password:"E2ePass@123",roleCode:role,roleName:role});
     const hr=await seedTestUser(database.url,{username:"e2e_import_hr",displayName:"E2E 导入人事",password:"E2ePass@123",roleCode:"hr",roleName:"人事部"});
     const client=new Client({connectionString:database.url});await client.connect();
     try{
@@ -80,16 +84,34 @@ test("销售助理组长可用标准模板预检并确认整批入账", async ({
       await client.query("insert into org_responsibilities(person_id,org_unit_id,responsibility_type,effective_from) values($1,$2,'leader','2026-01-01'),($3,$4,'supervisor','2026-01-01')",[personId("示例组长"),group.rows[0]!.id,personId("示例主管"),department.rows[0]!.id]);
       await client.query("insert into org_memberships(person_id,department_id,group_id,effective_from) values($1,$2,$3,'2026-01-01')",[personId("示例业务员"),department.rows[0]!.id,group.rows[0]!.id]);
       await client.query("update import_configs set status='approved',business_region_mapping='{\"外贸\":\"EXT-TRADE\"}',approved_by=$1,approved_at=now() where config_key='standard-performance'",[hr]);
+      await client.query(`insert into import_configs(config_key,version,name,status,sheet_name,expected_headers,column_mapping,required_columns,allowed_event_types,business_region_mapping,fixed_event_type,allow_legacy_source_key,approved_at)
+        select 'legacy-first',1,'测试历史配置','approved',sheet_name,expected_headers,column_mapping-'sourceRecordId',required_columns,'["legacy_adjustment"]',business_region_mapping,'legacy_adjustment',true,now()
+        from import_configs where config_key='standard-performance' and version=2`);
     }finally{await client.end();}
       await page.setViewportSize({width:390,height:844});
       await page.goto("/");await page.getByLabel("账号").fill("e2e_import_leader");await page.getByLabel("密码",{exact:true}).fill("E2ePass@123");await page.getByRole("button",{name:"进入 SampleFlow"}).click();
       await page.getByRole("link",{name:"订单业绩",exact:true}).click();await page.getByRole("button",{name:"Excel 导入"}).click();
-      await expect(page.getByRole("link",{name:"下载标准业绩模板"})).toHaveAttribute("href","/SampleFlow标准业绩导入模板.xlsx");
+      await expect(page.getByRole("link",{name:"下载新订单模板"})).toHaveAttribute("href","/SampleFlow标准业绩导入模板.xlsx");
+      const configSelect=page.getByLabel("导入模板类型");
+      await expect(configSelect).toHaveAccessibleDescription(/这些订单还没有录入系统/);
+      await expect(configSelect.locator("option:checked")).toHaveText("新增订单（标准模板） · 第 2 版");
+      await page.getByRole("radio",{name:/补充省份和客户单位/}).check();
+      await expect(configSelect.locator("option:checked")).toContainText("补充历史信息 — 测试历史配置");
+      await expect(configSelect).toHaveAccessibleDescription(/已有业绩金额保持不变/);
+      await page.getByRole("radio",{name:/导入订单业绩/}).check();
+      await expect(configSelect.locator("option:checked")).toHaveText("新增订单（标准模板） · 第 2 版");
+      await page.getByText("填写要求与常见问题",{exact:true}).click();
+      await expect(page.getByText("缺少业务员、部门或小组时",{exact:false})).toBeVisible();
+      await page.getByText("填写要求与常见问题",{exact:true}).click();
+      expect(await page.getByRole("dialog").evaluate(element=>element.scrollWidth<=element.clientWidth)).toBe(true);
+      await page.screenshot({path:join(tmpdir(),`sampleflow-import-purpose-${role}-390.png`)});
+      await page.setViewportSize({width:1280,height:900});
+      await page.screenshot({path:join(tmpdir(),`sampleflow-import-purpose-${role}-1280.png`)});
       let releasePreflight!:()=>void;const heldPreflight=new Promise<void>((resolve)=>{releasePreflight=resolve;});let preflightRequests=0;
       await page.route("**/api/imports/preflight",async(route)=>{preflightRequests+=1;await heldPreflight;await route.continue();});
-      await page.locator('input[type="file"]').setInputFiles(importTemplate);await page.getByRole("button",{name:"运行只读预检"}).click();
+      await page.locator('input[type="file"]').setInputFiles(importTemplate);await page.getByRole("button",{name:"检查文件（暂不入账）"}).click();
       const importDialog=page.getByRole("dialog",{name:"Excel 批量导入"});
-      await expect(importDialog.getByRole("button",{name:"正在预检…"})).toBeDisabled();
+      await expect(importDialog.getByRole("button",{name:"正在检查…"})).toBeDisabled();
       await expect(importDialog.getByRole("button",{name:"关闭"})).toBeDisabled();
       await page.keyboard.press("Escape");await page.locator(".modal-backdrop").dispatchEvent("mousedown");
       await expect(importDialog).toBeVisible();await expect.poll(()=>preflightRequests).toBe(1);releasePreflight();
@@ -97,9 +119,16 @@ test("销售助理组长可用标准模板预检并确认整批入账", async ({
       await page.unroute("**/api/imports/preflight");
       await expect(page.getByRole("heading",{name:"逐月对账"})).toBeVisible();
       await expect(page.getByRole("row",{name:/2026-03.*1.*100\.00/})).toBeVisible();
-      await page.getByRole("button",{name:"确认整批入账"}).click();
-      await expect(page.getByRole("heading",{name:"Excel 批量导入"})).toBeHidden();await expect(page.getByText("001-A",{exact:true})).toBeVisible();
+      if(role==="sales_assistant_leader"){
+        await page.getByRole("button",{name:"确认整批入账"}).click();
+        await expect(page.getByRole("heading",{name:"Excel 批量导入"})).toBeHidden();await expect(page.getByText("001-A",{exact:true})).toBeVisible();
+      }else{
+        await expect(page.getByText("请交由销售助理组长确认",{exact:true})).toBeVisible();
+        await expect(page.getByRole("button",{name:"确认整批入账"})).toHaveCount(0);
+      }
+      expect(pageErrors).toEqual([]);
 });
+}
 
 test("销售助理组长可在桌面端预检并确认合成历史分析维度补齐", async ({ database, page }) => {
     await seedTestUser(database.url,{username:"e2e_backfill_leader",displayName:"E2E 补齐组长",password:"E2ePass@123",roleCode:"sales_assistant_leader",roleName:"销售助理组长"});
@@ -140,11 +169,12 @@ test("销售助理组长可在桌面端预检并确认合成历史分析维度�
       );
       await page.setViewportSize({width:1280,height:900});await page.goto("/");await page.getByLabel("账号").fill("e2e_backfill_leader");await page.getByLabel("密码",{exact:true}).fill("E2ePass@123");await page.getByRole("button",{name:"进入 SampleFlow"}).click();
       await page.getByRole("link",{name:"订单业绩",exact:true}).click();await page.getByRole("button",{name:"Excel 导入"}).click();
-      await page.getByLabel("历史分析维度补齐").check();await expect(page.getByText("上传原始受控工作簿",{exact:false})).toBeVisible();
-      await page.locator('input[type="file"]').setInputFiles(importTemplate);await page.getByRole("button",{name:"运行只读预检"}).click();
+      await page.getByRole("radio",{name:/补充省份和客户单位/}).check();await expect(page.getByText("请使用最初导入这些业绩时的原始 Excel",{exact:false})).toBeVisible();
+      await page.screenshot({path:join(tmpdir(),"sampleflow-import-purpose-backfill.png")});
+      await page.locator('input[type="file"]').setInputFiles(importTemplate);await page.getByRole("button",{name:"检查文件（暂不入账）"}).click();
       await expect(page.getByRole("heading",{name:"预检通过，等待确认"})).toBeVisible();await expect(page.getByRole("heading",{name:"来源对账"})).toBeVisible();
       await expect(page.getByRole("row",{name:new RegExp(`${source.rowNumber}.*可补齐.*EXT-TRADE.*${source.customerUnit}`)})).toBeVisible();
-      await page.getByRole("button",{name:"确认补齐分析维度"}).click();await expect(page.getByRole("heading",{name:"Excel 批量导入"})).toBeHidden();
+      await page.getByRole("button",{name:"确认补充省份和客户单位"}).click();await expect(page.getByRole("heading",{name:"Excel 批量导入"})).toBeHidden();
       const dimensions=await client.query<{business_region_code:string;business_region_source_text:string;customer_unit:string}>("select business_region_code,business_region_source_text,customer_unit from performance_event_analysis_dimensions where event_id=$1",[event.rows[0]!.id]);
       expect(dimensions.rows[0]).toEqual({business_region_code:"EXT-TRADE",business_region_source_text:source.businessRegionSourceText,customer_unit:source.customerUnit});
     }finally{await client.query("rollback").catch(()=>{});await client.end();}
@@ -260,6 +290,7 @@ test("订单台账支持每页条数与可点击页码", async ({ database, page
 });
 
 test("订单组合筛选由 URL 恢复并区分空集、失败和无权限", async ({ database, page }) => {
+  const pageErrors:string[]=[];page.on("pageerror",error=>pageErrors.push(error.message));
   const userId = await seedTestUser(database.url, {
     username: "e2e_filter_assistant",
     displayName: "E2E 筛选销售助理",
@@ -347,6 +378,9 @@ test("订单组合筛选由 URL 恢复并区分空集、失败和无权限", asy
     await page.getByLabel("小组筛选").fill(matching.group);
     await page.getByLabel("标准业务区域筛选").selectOption(matching.region);
     await page.getByLabel("客户单位筛选").fill(matching.customerUnit);
+    await page.getByLabel("收样开始日期").fill("2026-08-15");
+    await page.getByLabel("收样结束日期").fill("2026-08-15");
+    await page.getByLabel("客户姓名",{exact:true}).fill("筛选客户");
     await page.getByRole("button", { name: "应用筛选" }).click();
     await expect(ledger.getByText("E2E-FILTER-0051", { exact: true })).toBeVisible();
     await expect.poll(()=>new URL(page.url()).searchParams.get("orderSnapshot")).toBeTruthy();
@@ -363,6 +397,8 @@ test("订单组合筛选由 URL 恢复并区分空集、失败和无权限", asy
     expect(new URL(secondPageUrl).searchParams.get("orderSnapshot")).toBeTruthy();
     await page.reload();
     await expect(ledger.getByText("E2E-FILTER-0001", { exact: true })).toBeVisible();
+    await expect(page.getByLabel("收样开始日期")).toHaveValue("2026-08-15");
+    await expect(page.getByLabel("客户姓名",{exact:true})).toHaveValue("筛选客户");
     await ledger.getByRole("button", { name: "查看 / 调整" }).click();
     await expect(page.getByRole("dialog", { name: "E2E-FILTER-0001" })).toBeVisible();
     await page.getByRole("button", { name: "关闭" }).click();
@@ -377,6 +413,7 @@ test("订单组合筛选由 URL 恢复并区分空集、失败和无权限", asy
     ]);
     const exportParams=new URL(exportRequest.url()).searchParams;
     expect(Object.fromEntries(exportParams)).toEqual({
+      dateFrom:"2026-08-15",dateTo:"2026-08-15",customerName:"筛选客户",
       search:"E2E-FILTER-",month:matching.month,status:matching.status,salesperson:matching.salesperson,
       department:matching.department,group:matching.group,region:matching.region,customerUnit:matching.customerUnit,
     });
@@ -393,6 +430,26 @@ test("订单组合筛选由 URL 恢复并区分空集、失败和无权限", asy
     await expect(ledger.getByText("E2E-FILTER-0051", { exact: true })).toBeVisible();
     await page.goForward();
     await expect(ledger.getByText("E2E-FILTER-0001", { exact: true })).toBeVisible();
+
+    await page.getByLabel("订单编号",{exact:true}).fill("E2E-FILTER-0001");
+    await page.getByRole("button",{name:"应用筛选"}).click();
+    await expect(ledger.getByText("本页 1 笔订单",{exact:true})).toBeVisible();
+    await expect(page).toHaveURL(/orderPage=1/);
+    await expect(page).toHaveURL(/orderNo=E2E-FILTER-0001/);
+    await page.getByLabel("收样开始日期").fill("2026-08-16");
+    await page.getByRole("button",{name:"应用筛选"}).click();
+    await expect(page.getByRole("alert")).toHaveText("开始日期不能晚于结束日期，请调整后再查询。");
+    await page.getByLabel("收样开始日期").fill("2026-08-15");
+    await page.getByRole("button",{name:"应用筛选"}).click();
+    for(const width of [1280,390]){
+      await page.setViewportSize({width,height:900});
+      await page.getByLabel("收样开始日期").scrollIntoViewIfNeeded();
+      expect(await page.evaluate(()=>document.documentElement.scrollWidth)).toBe(width);
+      await page.screenshot({path:join(tmpdir(),`sampleflow-order-date-filters-${width}.png`)});
+    }
+    await page.setViewportSize({width:1280,height:900});
+    await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+    expect(pageErrors).toEqual([]);
 
     let responseMode: "live" | "empty" | "failure" | "forbidden" = "live";
     await page.route("**/api/performance/orders*", async (route) => {

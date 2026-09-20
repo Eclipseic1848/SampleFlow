@@ -179,6 +179,10 @@ try {
     await client.query(`grant select on all tables in schema public to ${backupRole}`);
     await client.query(`grant select on all sequences in schema public to ${backupRole}`);
     await client.query(`revoke insert,update,delete on schema_migrations from ${appRole}`);
+    if ((await client.query("select to_regclass('public.acceptance_operator') as table_name")).rows[0]?.table_name) {
+      await client.query(`revoke insert,update,delete on acceptance_operator from ${appRole}`);
+      await client.query(`grant execute on function acceptance_operator_active(bigint) to ${appRole}`);
+    }
 
     await client.query(`alter default privileges for role ${migrationRole} in schema public
       grant select,insert,update,delete on tables to ${appRole}`);

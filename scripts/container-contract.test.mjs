@@ -5,9 +5,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { entryNginx } from "./acceptance-gate.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const compose = JSON.parse(execFileSync("docker", ["compose", "--profile", "operations", "--env-file", ".env.example", "config", "--format", "json"], {
+  cwd: root,
+  encoding: "utf8",
+}));
+const acceptanceCompose = JSON.parse(execFileSync("docker", ["compose", "--env-file", ".env.acceptance.example", "config", "--format", "json"], {
   cwd: root,
   encoding: "utf8",
 }));
@@ -17,6 +22,25 @@ const nginx = readFileSync(new URL("../apps/web/nginx.conf", import.meta.url), "
 const runtimeVerifier = readFileSync(new URL("./verify-container-runtime.mjs", import.meta.url), "utf8");
 const databaseOperations = readFileSync(new URL("./database-operations.sh", import.meta.url));
 const gitAttributes = readFileSync(new URL("../.gitattributes", import.meta.url), "utf8");
+const dockerIgnore = readFileSync(new URL("../.dockerignore", import.meta.url), "utf8");
+const protectedAcceptance = JSON.parse(execFileSync("docker", ["compose", "-p", "sampleflow-acceptance", "--env-file", ".env.acceptance.example", "-f", "docker-compose.yml", "-f", "docker-compose.acceptance.yml", "config", "--format", "json"], {cwd:root,encoding:"utf8"}));
+
+test("验收入口只使用隔离的 Cookie 会话，不重写业务错误或暴露数据库",()=>{
+  const gate=protectedAcceptance.services['acceptance-gate'];
+  assert.equal(gate.ports,undefined);assert.equal(gate.read_only,true);assert.deepEqual(Object.keys(gate.networks),['entry']);
+  assert.equal(protectedAcceptance.networks.entry.internal,true);
+  assert.equal(gate.environment,undefined);
+  const config=entryNginx(nginx);
+  assert.doesNotMatch(config,/auth_basic|proxy_intercept_errors\s+on/);
+  assert.match(config,/auth_request \/_entry\/check/);
+  assert.match(config,/location = \/_entry\/check \{\s+internal/);
+  assert.equal(protectedAcceptance.services.api.ports,undefined);assert.equal(protectedAcceptance.services.db.ports,undefined);
+});
+
+test("验收密码与运行记录不进入 Docker 构建上下文", () => {
+  assert.match(dockerIgnore, /^\.env\.\*\.local$/m);
+  assert.match(dockerIgnore, /^\.sampleflow\/$/m);
+});
 
 test("生产 API 和 Web 镜像显式使用非 root 用户", () => {
   assert.match(apiDockerfile, /^USER node$/m);
@@ -39,6 +63,13 @@ test("API readiness 与 Web 静态健康入口分别驱动容器健康检查", (
   assert.match(compose.services.web.healthcheck.test.join(" "), /\/healthz/);
   assert.equal(compose.services.web.ports[0].target, 8080);
   assert.match(nginx, /location = \/healthz/);
+});
+
+test("本地公网验收只把 Web 绑定到宿主机回环地址", () => {
+  assert.equal(acceptanceCompose.services.web.ports[0].host_ip, "127.0.0.1");
+  assert.equal(acceptanceCompose.services.web.ports[0].published, "18080");
+  assert.equal(acceptanceCompose.services.api.ports, undefined);
+  assert.equal(acceptanceCompose.services.db.ports, undefined);
 });
 
 test("只有 Web 与 API 进入专用可信代理网络", () => {

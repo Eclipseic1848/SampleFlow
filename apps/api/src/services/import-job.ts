@@ -152,7 +152,7 @@ function organizationKey(personId: string, occurredOn: string): string {
   return `${personId}:${occurredOn}`;
 }
 
-async function loadOrganizationSnapshots(
+export async function loadOrganizationSnapshots(
   database: Pick<PoolClient, "query">,
   pairs: readonly Readonly<{ personId: string; occurredOn: string }>[],
 ): Promise<ReadonlyMap<string, OrganizationSnapshot>> {
@@ -167,10 +167,10 @@ async function loadOrganizationSnapshots(
     department_name: string;
     group_id: string;
     group_name: string;
-    leader_person_id: string;
-    leader_name: string;
-    supervisor_person_id: string;
-    supervisor_name: string;
+    leader_person_id: string | null;
+    leader_name: string | null;
+    supervisor_person_id: string | null;
+    supervisor_name: string | null;
   }>(
     `with requested as (
        select * from unnest($1::bigint[],$2::date[]) as input(person_id,occurred_on)
@@ -180,16 +180,16 @@ async function loadOrganizationSnapshots(
             leader.id::text leader_person_id,leader.display_name leader_name,
             supervisor.id::text supervisor_person_id,supervisor.display_name supervisor_name
      from requested join people p on p.id=requested.person_id
-     join org_memberships membership on membership.person_id=p.id
+     join performance_organization_memberships membership on membership.person_id=p.id
        and membership.effective_from<=requested.occurred_on and (membership.effective_to is null or membership.effective_to>=requested.occurred_on)
      join org_units d on d.id=membership.department_id and d.unit_type='department'
      join org_units g on g.id=membership.group_id and g.unit_type='group' and g.parent_id=d.id
-     join org_responsibilities leader_role on leader_role.org_unit_id=g.id and leader_role.responsibility_type='leader'
+     left join org_responsibilities leader_role on leader_role.org_unit_id=g.id and leader_role.responsibility_type='leader'
        and leader_role.effective_from<=requested.occurred_on and (leader_role.effective_to is null or leader_role.effective_to>=requested.occurred_on)
-     join people leader on leader.id=leader_role.person_id
-     join org_responsibilities supervisor_role on supervisor_role.org_unit_id=d.id and supervisor_role.responsibility_type='supervisor'
+     left join people leader on leader.id=leader_role.person_id
+     left join org_responsibilities supervisor_role on supervisor_role.org_unit_id=d.id and supervisor_role.responsibility_type='supervisor'
        and supervisor_role.effective_from<=requested.occurred_on and (supervisor_role.effective_to is null or supervisor_role.effective_to>=requested.occurred_on)
-     join people supervisor on supervisor.id=supervisor_role.person_id`,
+     left join people supervisor on supervisor.id=supervisor_role.person_id`,
     [values.map((pair) => pair.personId), values.map((pair) => pair.occurredOn)],
   );
   return new Map(result.rows.map((row) => [organizationKey(row.person_id, String(row.occurred_on).slice(0, 10)), {
@@ -206,9 +206,10 @@ async function loadOrganizationSnapshots(
   }]));
 }
 
-async function loadPeopleBySourceIdentity(
+export async function loadPeopleBySourceIdentity(
   database: Pick<PoolClient, "query">,
   sourceIdentities: readonly string[],
+  configId?: string,
 ): Promise<ReadonlyMap<string, string>> {
   const requested = [...new Set(sourceIdentities.filter(Boolean))];
   if (!requested.length) return new Map();
@@ -217,7 +218,12 @@ async function loadPeopleBySourceIdentity(
     [requested],
   );
   const resolved = new Map<string, string>();
+  const links = configId ? await database.query<{source_identity:string;person_id:string}>(
+    "select source_identity,person_id::text from import_person_links where config_id=$1 and source_identity=any($2::text[])", [configId,requested],
+  ) : {rows:[]};
   for (const identity of requested) {
+    const linked = links.rows.find((link)=>link.source_identity===identity);
+    if(linked){resolved.set(identity,linked.person_id);continue;}
     const sourceKeyMatch = result.rows.find((person) => person.source_key === identity);
     if (sourceKeyMatch) {
       resolved.set(identity, sourceKeyMatch.id);
@@ -505,16 +511,16 @@ function normalizeRow(
   if (!personId) addIssue(issues, row, "PERSON_NOT_FOUND", "业务员来源标识无法唯一解析");
   const organization = personId && validDate(row.occurredOn) ? organizations.get(organizationKey(personId, row.occurredOn)) : undefined;
   if (personId && validDate(row.occurredOn) && !organization) {
-    addIssue(issues, row, "ORGANIZATION_NOT_RESOLVED", "发生日期找不到唯一有效组织任职及负责人");
+    addIssue(issues, row, "ORGANIZATION_NOT_RESOLVED", "该日期缺少业绩统计归属，请由销售助理组长在本窗口核对补齐");
   }
   if (row.sourceMonth !== undefined && validDate(row.occurredOn) && row.sourceMonth !== `${Number(row.occurredOn.slice(5, 7))}月`) {
     addIssue(issues, row, "SOURCE_MONTH_MISMATCH", "收样月份必须与日期月份一致");
   }
   if (organization && row.sourceDepartment !== undefined && row.sourceDepartment !== organization.departmentName) {
-    addIssue(issues, row, "SOURCE_DEPARTMENT_MISMATCH", "部门与日期当天的组织任职不一致");
+    addIssue(issues, row, "SOURCE_DEPARTMENT_MISMATCH", "文件部门与当天的统计归属不同；如已调组，请由销售助理组长在本窗口核对生效日期");
   }
   if (organization && row.sourceGroup !== undefined && row.sourceGroup !== organization.groupName) {
-    addIssue(issues, row, "SOURCE_GROUP_MISMATCH", "组别与日期当天的组织任职不一致");
+    addIssue(issues, row, "SOURCE_GROUP_MISMATCH", "文件小组与当天的统计归属不同；如已调组，请由销售助理组长在本窗口核对生效日期");
   }
   const hasCollaborator = Boolean(row.collaboratorSourceKey);
   const hasRatio = row.collaborationRatio !== undefined;
@@ -717,6 +723,9 @@ export async function preflightImportRows(database: Database, input: Readonly<{
   const config = await loadApprovedConfig(database, input.configId);
   const sourceHash = sha256(input.sourceBytes);
   const issues: ImportIssue[] = [];
+  if (config.config_key === "excel-ledger-continuation") {
+    addWarning(issues, { rowNumber: 0 }, "CONTINUATION_TOTAL_CONFIRMATION", "请核对本次文件日期、逐月金额及正负流水：每行金额会直接追加到业绩，不是调整后的订单总金额；不要包含已录入的流水。");
+  }
   const normalized: NormalizedRow[] = [];
   const seenSourceKeys = new Set<string>();
   const orderFacts = new Map<string, NormalizedRow>();
@@ -724,7 +733,7 @@ export async function preflightImportRows(database: Database, input: Readonly<{
   const initialOrderNos = new Set<string>();
   const reconciliationSourceKeys = new Set<string>();
   const sourceKeys = [...new Set(input.rows.flatMap((row) => [row.salespersonSourceKey, row.collaboratorSourceKey ?? ""]))];
-  const peopleBySourceKey = await loadPeopleBySourceIdentity(database, sourceKeys);
+  const peopleBySourceKey = await loadPeopleBySourceIdentity(database, sourceKeys, input.configId);
   const organizationPairs = input.rows.flatMap((row) => {
     const personId = peopleBySourceKey.get(row.salespersonSourceKey);
     const collaboratorPersonId = row.collaboratorSourceKey ? peopleBySourceKey.get(row.collaboratorSourceKey) : undefined;

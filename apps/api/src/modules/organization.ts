@@ -9,10 +9,10 @@ export type OrganizationSnapshot = Readonly<{
   departmentName: string;
   groupId: string;
   groupName: string;
-  leaderPersonId: string;
-  leaderName: string;
-  supervisorPersonId: string;
-  supervisorName: string;
+  leaderPersonId: string | null;
+  leaderName: string | null;
+  supervisorPersonId: string | null;
+  supervisorName: string | null;
 }>;
 
 export class OrganizationResolutionError extends Error {}
@@ -29,10 +29,10 @@ export async function resolveOrganization(
     department_name: string;
     group_id: string;
     group_name: string;
-    leader_person_id: string;
-    leader_name: string;
-    supervisor_person_id: string;
-    supervisor_name: string;
+    leader_person_id: string | null;
+    leader_name: string | null;
+    supervisor_person_id: string | null;
+    supervisor_name: string | null;
   }>(
     `select p.id::text as person_id,p.display_name as salesperson_name,
             d.id::text as department_id,d.name as department_name,
@@ -40,16 +40,16 @@ export async function resolveOrganization(
             leader.id::text as leader_person_id,leader.display_name as leader_name,
             supervisor.id::text as supervisor_person_id,supervisor.display_name as supervisor_name
      from people p
-     join org_memberships m on m.person_id=p.id
+     join performance_organization_memberships m on m.person_id=p.id
        and m.effective_from<=$2::date and (m.effective_to is null or m.effective_to>=$2::date)
      join org_units d on d.id=m.department_id and d.unit_type='department'
      join org_units g on g.id=m.group_id and g.unit_type='group' and g.parent_id=d.id
-     join org_responsibilities lr on lr.org_unit_id=g.id and lr.responsibility_type='leader'
+     left join org_responsibilities lr on lr.org_unit_id=g.id and lr.responsibility_type='leader'
        and lr.effective_from<=$2::date and (lr.effective_to is null or lr.effective_to>=$2::date)
-     join people leader on leader.id=lr.person_id
-     join org_responsibilities sr on sr.org_unit_id=d.id and sr.responsibility_type='supervisor'
+     left join people leader on leader.id=lr.person_id
+     left join org_responsibilities sr on sr.org_unit_id=d.id and sr.responsibility_type='supervisor'
        and sr.effective_from<=$2::date and (sr.effective_to is null or sr.effective_to>=$2::date)
-     join people supervisor on supervisor.id=sr.person_id
+     left join people supervisor on supervisor.id=sr.person_id
      where p.id=$1`,
     [personId, occurredOn],
   );

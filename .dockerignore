@@ -3,6 +3,8 @@ apps/*/node_modules
 apps/*/dist
 .git
 .env
+.env.*.local
+.sampleflow/
 *.log
 *.xlsx
 *.docx

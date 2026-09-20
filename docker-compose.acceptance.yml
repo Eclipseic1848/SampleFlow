@@ -1,0 +1,40 @@
+services:
+  api:
+    environment:
+      SAMPLEFLOW_ACCEPTANCE_OVERRIDE: ${SAMPLEFLOW_ACCEPTANCE_OVERRIDE:-}
+  acceptance-gate:
+    image: sampleflow-acceptance-api
+    pull_policy: never
+    user: node
+    command: ["node", "/entry/acceptance-gate.mjs"]
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    cpus: 0.5
+    mem_limit: 128m
+    logging:
+      driver: json-file
+      options: {max-size: "2m", max-file: "2"}
+    networks: [entry]
+    volumes:
+      - ./scripts/acceptance-gate.mjs:/entry/acceptance-gate.mjs:ro
+      - ./.sampleflow/acceptance/entry-config.json:/run/entry/config.json:ro
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8081/_entry/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+  web:
+    networks: [proxy, entry]
+    depends_on:
+      acceptance-gate:
+        condition: service_healthy
+    volumes:
+      - type: bind
+        source: ./.sampleflow/acceptance/nginx.conf
+        target: /etc/nginx/conf.d/default.conf
+        read_only: true
+networks:
+  entry:
+    internal: true

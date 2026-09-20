@@ -7,6 +7,7 @@ import { recordOperation } from "../observability.js";
 import { hashPassword, isPasswordAllowed, PASSWORD_POLICY_MESSAGE, verifyPassword } from "../security/password.js";
 import { createCsrfToken, createSessionToken, CSRF_COOKIE, hashSessionToken, SESSION_COOKIE, SESSION_TTL_MS } from "../security/session.js";
 import { capabilitiesForRoles } from "./authorization.js";
+import { acceptanceEnabled } from "../acceptance.js";
 
 export type CurrentUser = {
   id: string;
@@ -15,6 +16,7 @@ export type CurrentUser = {
   displayName: string;
   mustChangePassword: boolean;
   roles: string[];
+  acceptanceOperator?: boolean;
 };
 
 export const PERFORMANCE_EDITOR_ROLES = ["sales_assistant", "sales_assistant_leader"] as const;
@@ -163,6 +165,10 @@ export async function registerAuth(
       mustChangePassword: row.must_change_password,
       roles: row.roles,
     };
+    if (acceptanceEnabled()) {
+      const special=await db.query<{active:boolean}>("select acceptance_operator_active($1::bigint) as active",[row.id]);
+      request.currentUser.acceptanceOperator=special.rows[0]?.active===true;
+    }
     if (request.currentUser.mustChangePassword) {
       const allowedRoutes = new Set([
         "/api/auth/me",
@@ -193,6 +199,11 @@ export async function registerAuth(
       const origin = request.headers.origin;
       if (!origin || !config.allowedOrigins.includes(origin)) {
         return reply.code(403).send({ code: "ORIGIN_INVALID", message: "请求来源不受信任" });
+      }
+      if (request.currentUser.acceptanceOperator) {
+        await db.query(`insert into audit_logs(actor_user_id,action,entity_type,entity_id,after_data,ip_address)
+          values($1::bigint,'acceptance.operation_requested','acceptance_operator',$1::text,$2::jsonb,$3)`,
+          [row.id,JSON.stringify({acceptanceOverride:true,method:request.method,path:request.url.split("?")[0],actualActorUserId:row.id}),request.ip]);
       }
     }
     if (row.last_seen_at.getTime() <= now.getTime() - 5 * 60 * 1000) {

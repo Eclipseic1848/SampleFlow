@@ -262,7 +262,7 @@ services:
     logging: *default-logging
     networks: [proxy]
     ports:
-      - "${WEB_PORT:-8080}:8080"
+      - "${WEB_BIND_ADDRESS:-0.0.0.0}:${WEB_PORT:-8080}:8080"
     depends_on:
       api:
         condition: service_healthy
