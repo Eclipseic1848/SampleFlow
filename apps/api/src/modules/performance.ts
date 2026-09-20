@@ -68,7 +68,7 @@ const departmentAchievementQuerySchema = dashboardQuerySchema.extend({
 const ORDER_PAGE_SIZE = 50;
 const ANALYSIS_CUSTOMER_PAGE_SIZE = 50;
 const ANALYSIS_EVENT_PAGE_SIZE = 100;
-const orderListQuerySchema = orderFilterQuerySchema.extend({
+const orderListQuerySchema = orderFilterQuerySchema.safeExtend({
   cursor: z.string().min(1).max(2048).optional(),
   snapshot: z.string().min(1).max(2048).optional(),
   ...paginationQueryFields,
@@ -120,7 +120,9 @@ const analysisSnapshotSchema = z.strictObject({
 type AnalysisSnapshot = z.infer<typeof analysisSnapshotSchema>;
 
 function orderFilterDigest(filters: OrderFilters): string {
-  return createHash("sha256").update(JSON.stringify(filters), "utf8").digest("base64url");
+  const {dateFrom,dateTo,customerName,...existing}=filters;
+  // 未使用新条件时保留原摘要，已有分页链接仍可恢复。
+  return createHash("sha256").update(JSON.stringify({...existing,...(dateFrom?{dateFrom}:{}),...(dateTo?{dateTo}:{}),...(customerName?{customerName}:{})}), "utf8").digest("base64url");
 }
 
 function encodeOrderCursor(cursor: OrderCursor): string {
@@ -995,11 +997,19 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
     if (!parsed.success) return reply.code(400).send({ message: "日期格式无效" });
     const occurredOn = parsed.data.occurredOn ?? businessDate(clock());
     const result = await db.query(
-      `select p.id::text as id,p.display_name as "displayName",department.name as "departmentName",team.name as "groupName"
-       from people p join org_memberships m on m.person_id=p.id
-       join org_units department on department.id=m.department_id and department.unit_type='department'
-       join org_units team on team.id=m.group_id and team.unit_type='group'
-       where m.effective_from<=$1::date and (m.effective_to is null or m.effective_to>=$1::date)
+      `select p.id::text as id,p.display_name as "displayName",
+              case when assignment.total=1 then assignment.department_name end as "departmentName",
+              case when assignment.total=1 then assignment.group_name end as "groupName",
+              assignment.total=1 as "organizationAvailable"
+       from people p
+       left join lateral (
+         select count(*) as total,min(department.name) as department_name,min(team.name) as group_name
+         from performance_organization_memberships m
+         join org_units department on department.id=m.department_id and department.unit_type='department'
+         join org_units team on team.id=m.group_id and team.unit_type='group' and team.parent_id=department.id
+         where m.person_id=p.id and m.effective_from<=$1::date and (m.effective_to is null or m.effective_to>=$1::date)
+       ) assignment on true
+       where p.is_active
        order by "displayName",id`,
       [occurredOn],
     );
@@ -1508,6 +1518,7 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
     if((numbered&&query.data.cursor)||(!numbered&&query.data.snapshot))return reply.code(400).send({code:"ORDER_PAGINATION_INVALID",message:"页码快照只能与页码一起使用，且不能与游标混用"});
     const page=query.data.page??1;const pageSize=query.data.pageSize??10;
     const filters = normalizeOrderFilters(query.data);
+    const afterFilters = 6 + orderFilterValues(filters).length;
     const cursor = query.data.cursor ? decodeOrderCursor(query.data.cursor) : null;
     if (query.data.cursor && (!cursor || cursor.filterDigest !== orderFilterDigest(filters) || cursor.userId !== request.currentUser.id)) {
       return reply.code(400).send({ code: "ORDER_CURSOR_INVALID", message: "分页游标无效或已不适用于当前查询" });
@@ -1523,7 +1534,7 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
         orders:Array<Record<string,unknown>>;
       }>(
         `with cutoff as (
-           select coalesce($15::bigint,max(id),0) as id from performance_orders
+           select coalesce($${afterFilters}::bigint,max(id),0) as id from performance_orders
          ), filtered as materialized (
            select performance_orders.id as "__id",performance_orders.id::text,performance_orders.created_at as "__cursorCreatedAt",
                   qingflow_order_no as "orderNo",customer_name as "customerName",customer_unit as "customerUnit",
@@ -1542,7 +1553,7 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
              and ${performanceScopeSql("latest", 2)}
              and ${orderFilterSql("performance_orders", "latest", 6)}
          ), page_rows as (
-           select * from filtered order by "__cursorCreatedAt" desc,"__id" desc limit $1 offset $16
+           select * from filtered order by "__cursorCreatedAt" desc,"__id" desc limit $1 offset $${afterFilters + 1}
          )
          select cutoff.id::text as "cutoffId",(select count(*)::text from filtered) as "totalCount",
                 coalesce(jsonb_agg(to_jsonb(page_rows)-'__id'-'__cursorCreatedAt' order by page_rows."__cursorCreatedAt" desc,page_rows."__id" desc)
@@ -1575,8 +1586,8 @@ export async function registerPerformance(app: FastifyInstance, db: Database, cl
        ${latestOrderEventJoinSql("performance_orders", "latest")}
        where ${performanceScopeSql("latest", 2)}
          and ${orderFilterSql("performance_orders", "latest", 6)}
-          ${cursor ? `and (performance_orders.created_at,performance_orders.id)<=($15::timestamptz,$16::bigint)
-          and (performance_orders.created_at,performance_orders.id)${direction === "next" ? "<" : ">"}($17::timestamptz,$18::bigint)` : ""}
+          ${cursor ? `and (performance_orders.created_at,performance_orders.id)<=($${afterFilters}::timestamptz,$${afterFilters + 1}::bigint)
+          and (performance_orders.created_at,performance_orders.id)${direction === "next" ? "<" : ">"}($${afterFilters + 2}::timestamptz,$${afterFilters + 3}::bigint)` : ""}
        order by performance_orders.created_at ${direction === "previous" ? "asc" : "desc"},performance_orders.id ${direction === "previous" ? "asc" : "desc"}
        limit $1`,
       [

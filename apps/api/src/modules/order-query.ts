@@ -2,10 +2,14 @@ import { z } from "zod";
 import { standardBusinessRegionName } from "../domain/business-regions.js";
 
 const orderTextFilterSchema = z.string().trim().min(1).max(300);
+const orderDateFilterSchema = z.iso.date().refine((value) => !value.startsWith("0000-"));
 
 export const orderFilterQuerySchema = z.object({
   search: z.string().trim().max(100).optional(),
   orderNo: z.string().trim().min(1).max(100).optional(),
+  dateFrom: orderDateFilterSchema.optional(),
+  dateTo: orderDateFilterSchema.optional(),
+  customerName: orderTextFilterSchema.optional(),
   month: z.string().regex(/^[1-9]\d{3}-(0[1-9]|1[0-2])$/).optional(),
   status: z.enum(["draft", "active", "paused", "zero", "receivable_pending", "historical_review_required"]).optional(),
   salesperson: orderTextFilterSchema.optional(),
@@ -13,11 +17,14 @@ export const orderFilterQuerySchema = z.object({
   group: orderTextFilterSchema.optional(),
   region: z.string().refine((value) => standardBusinessRegionName(value) !== undefined).optional(),
   customerUnit: orderTextFilterSchema.optional(),
-});
+}).refine((value) => !value.dateFrom || !value.dateTo || value.dateFrom <= value.dateTo, { message: "开始日期不能晚于结束日期", path: ["dateTo"] });
 
 export type OrderFilters = Readonly<{
   search: string;
   orderNo: string;
+  dateFrom: string;
+  dateTo: string;
+  customerName: string;
   month: string;
   status: string;
   salesperson: string;
@@ -31,6 +38,9 @@ export function normalizeOrderFilters(input: z.infer<typeof orderFilterQuerySche
   return {
     search: input.search ?? "",
     orderNo: input.orderNo ?? "",
+    dateFrom: input.dateFrom ?? "",
+    dateTo: input.dateTo ?? "",
+    customerName: input.customerName ?? "",
     month: input.month ?? "",
     status: input.status ?? "",
     salesperson: input.salesperson ?? "",
@@ -66,7 +76,10 @@ export function orderFilterSql(orderAlias: string, eventAlias: string, firstPara
     and ($${firstParameter + 6}::text is null or ${orderAlias}.business_region_code=$${firstParameter + 6})
     and ($${firstParameter + 7}::text is null or ${orderAlias}.customer_unit=$${firstParameter + 7})
     and ($${firstParameter + 8}::text is null or regexp_replace(lower(normalize(${orderAlias}.qingflow_order_no,NFKC)),'[[:space:]]+','','g')
-      =regexp_replace(lower(normalize($${firstParameter + 8},NFKC)),'[[:space:]]+','','g'))`;
+      =regexp_replace(lower(normalize($${firstParameter + 8},NFKC)),'[[:space:]]+','','g'))
+    and ($${firstParameter + 9}::date is null or ${orderAlias}.source_received_on >= $${firstParameter + 9}::date)
+    and ($${firstParameter + 10}::date is null or ${orderAlias}.source_received_on <= $${firstParameter + 10}::date)
+    and ($${firstParameter + 11}::text is null or ${orderAlias}.customer_name ilike $${firstParameter + 11})`;
 }
 
 export function orderFilterValues(filters: OrderFilters): unknown[] {
@@ -80,5 +93,8 @@ export function orderFilterValues(filters: OrderFilters): unknown[] {
     filters.region || null,
     filters.customerUnit || null,
     filters.orderNo || null,
+    filters.dateFrom || null,
+    filters.dateTo || null,
+    filters.customerName ? `%${filters.customerName.replace(/[\\%_]/g, "\\$&")}%` : null,
   ];
 }

@@ -94,6 +94,11 @@ async function verifyLeastPrivilege(database: TestDatabase, roles: DatabaseRoles
     await assert.rejects(app.query("create table forbidden_ddl(id integer)"), /permission denied/);
     await assert.rejects(app.query("create role forbidden_role"), /permission denied/);
     await assert.rejects(app.query("update schema_migrations set name='tampered'"), /permission denied/);
+    await assert.rejects(app.query("delete from acceptance_operator"), /permission denied/);
+    await assert.rejects(app.query("update acceptance_operator set expires_at=now()+interval '1 year'"), /permission denied/);
+    assert.equal((await app.query("select acceptance_operator_active(0) as active")).rows[0]?.active,false);
+    await app.query("select * from performance_organization_memberships limit 1");
+    await backup.query("select * from performance_statistical_transfers limit 1");
     await assert.rejects(app.query("select setval('users_id_seq',1,false)"), /permission denied/);
     const functionPrivilege = await app.query<{ allowed: boolean; acl: string | null; owner: string }>(
       `select has_function_privilege(current_user,p.oid,'EXECUTE') allowed,p.proacl::text acl,owner.rolname owner
@@ -144,6 +149,8 @@ test("空库由迁移账号安装且应用和备份账号保持最小权限", as
       await provision(database, roles);
       await provision(database, roles);
       await migrate(roleUrl(database, roles.migration, roles.migrationPassword));
+      await verifyLeastPrivilege(database, roles);
+      await provision(database, roles);
       await verifyLeastPrivilege(database, roles);
     });
   } finally {

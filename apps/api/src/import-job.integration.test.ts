@@ -88,6 +88,38 @@ async function legacyConfig(pool: pg.Pool): Promise<string> {
   return config.rows[0]!.id;
 }
 
+test("Excel 续导保留冲回重录和旧账并阻止同文件及跨文件重复入账", async () => {
+  await withMigratedTestDatabase(async database => {
+    const context = await fixture(database.url);
+    try {
+      const legacyId = await legacyConfig(context.pool);
+      const first = await preflightImportRows(context.pool, { actorUserId: context.actorUserId, configId: legacyId, sourceFileName: "old.xlsx", sourceBytes: Buffer.from("old"), rows: [row({sourceRecordId:undefined,eventType:"legacy_adjustment",occurredOn:"2026-08-26"})] });
+      await confirmImportBatch(context.pool,first.batchId,context.actorUserId,[],"127.0.0.1");
+      const oldEvents = (await context.pool.query("select to_jsonb(e) data from performance_events e order by id")).rows;
+      const inserted = await context.pool.query<{id:string}>(`insert into import_configs(config_key,version,name,status,sheet_name,expected_headers,column_mapping,business_region_mapping,allowed_event_types,fixed_event_type,allow_legacy_source_key,approved_at)
+        values('excel-ledger-continuation',1,'续导','approved','分子','[]','{}','{"江苏省":"CN-JS"}','["legacy_adjustment"]','legacy_adjustment',true,now()) returning id::text`);
+      const input = {actorUserId:context.actorUserId,configId:inserted.rows[0]!.id,sourceFileName:"next.xlsx",sourceBytes:Buffer.from("next"),rows:[
+        row({sourceRecordId:undefined,eventType:"legacy_adjustment",occurredOn:"2026-08-27",amount:-100,reason:"冲回"}),
+        row({sourceRecordId:undefined,eventType:"legacy_adjustment",occurredOn:"2026-08-27",rowNumber:3,amount:120,reason:"重录"}),
+        row({sourceRecordId:undefined,eventType:"legacy_adjustment",occurredOn:"2026-08-27",rowNumber:4,orderNo:"002-B",amount:50}),
+      ]};
+      const report = await preflightImportRows(context.pool,input);
+      assert.equal(report.status,"preflight_ready",JSON.stringify(report.issues));
+      assert.equal(report.summary.totalAmount,70);
+      await assert.rejects(confirmImportBatch(context.pool,report.batchId,context.actorUserId,[],"127.0.0.1"),/警告/);
+      const warnings = report.issues.filter(i=>i.severity==="warning").map(i=>`${i.rowNumber}:${i.code}`);
+      await confirmImportBatch(context.pool,report.batchId,context.actorUserId,warnings,"127.0.0.1");
+      assert.deepEqual((await context.pool.query("select to_jsonb(e) data from performance_events e order by id limit 1")).rows,oldEvents);
+      assert.equal((await context.pool.query("select sum(delta_amount)::text total from performance_events")).rows[0].total,"170.00");
+      const replay = await preflightImportRows(context.pool,input);
+      assert.equal(replay.summary.events,0);
+      const duplicate = await preflightImportRows(context.pool,{...input,sourceBytes:Buffer.from("changed-file")});
+      assert.equal(duplicate.status,"blocked");
+      assert.ok(duplicate.issues.some(i=>i.code==="CROSS_FILE_DUPLICATE_CANDIDATE"));
+    } finally {await context.pool.end();}
+  });
+});
+
 test("标准业绩模板只能导入首次入账事件", async () => {
   await withMigratedTestDatabase(async (database) => {
     const context = await fixture(database.url);

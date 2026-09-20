@@ -1,3 +1,4 @@
+import { isAcceptanceOperator } from "../acceptance.js";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { Database } from "../db.js";
@@ -7,6 +8,7 @@ import { standardBusinessRegionName } from "../domain/business-regions.js";
 import { ImportWorkbookError, parseImportWorkbook, type ImportColumn, type ImportLayout } from "../domain/performance-import-xlsx.js";
 import { confirmDimensionBackfillBatch, confirmImportBatch, ImportJobError, preflightDimensionBackfillRows, preflightImportRows, type ImportEventType } from "../services/import-job.js";
 import { hasAnyRole, PERFORMANCE_EDITOR_ROLES } from "./auth.js";
+import { completeImportSetup, importSetupOptions, importSetupSchema } from "../services/import-setup.js";
 
 const columnNames = [
   "sourceRecordId", "orderNo", "occurredOn", "customerName", "customerUnit", "businessRegionSourceText",
@@ -55,6 +57,7 @@ const preflightSchema = z.strictObject({
   fileName: z.string().min(1).max(255),
   contentBase64: z.string().min(1).max(40_000_000),
 });
+const ledgerPreflightSchema = z.union([preflightSchema, preflightSchema.omit({ configId: true }).extend({ purpose: z.literal("continuation") })]);
 const confirmSchema = z.strictObject({ confirmedWarnings: z.array(z.string().min(1).max(100)).max(5_000).default([]) });
 
 function denyPerformanceEditor(request: FastifyRequest, reply: { code: (status: number) => { send: (body: unknown) => unknown } }) {
@@ -77,6 +80,10 @@ function decodeBase64(value: string): Buffer {
 }
 
 function configInputError(input: ConfigInput): string | null {
+  const continuation = input.configKey === "excel-ledger-continuation";
+  if (continuation && (input.fixedEventType !== "legacy_adjustment" || !input.allowLegacySourceKey || input.columnMapping.sourceRecordId || input.expectedReconciliation)) {
+    return "Excel 流水续导必须保留正负流水、使用文件来源键，不得把订单号当流水号或沿用固定历史对账基准";
+  }
   const mappedHeaders = Object.values(input.columnMapping).filter((header): header is string => Boolean(header));
   const namedExpectedHeaders = input.expectedHeaders.filter((header): header is string => header !== null);
   const duplicatedMappedHeaders = mappedHeaders.filter((header, index) => mappedHeaders.indexOf(header) !== index);
@@ -93,7 +100,7 @@ function configInputError(input: ConfigInput): string | null {
   if (input.fixedEventType && (input.allowedEventTypes.length !== 1 || input.allowedEventTypes[0] !== input.fixedEventType)) return "允许事件类型必须与固定事件类型完全一致";
   if (input.fixedEventType !== "legacy_adjustment" && input.allowedEventTypes.includes("legacy_adjustment")) return "普通配置不能允许 legacy_adjustment";
   if (input.expectedReconciliation && input.fixedEventType !== "legacy_adjustment") return "预期迁移对账基准只能用于专用历史配置";
-  if (input.fixedEventType === "legacy_adjustment" && !input.expectedReconciliation) return "专用历史配置必须固化整体和逐月迁移对账基准";
+  if (input.fixedEventType === "legacy_adjustment" && !input.expectedReconciliation && !continuation) return "专用历史配置必须固化整体和逐月迁移对账基准";
   if (input.expectedReconciliation) {
     const months = input.expectedReconciliation.monthly;
     if (new Set(months.map((item) => item.month)).size !== months.length) return "逐月迁移对账基准不能包含重复月份";
@@ -107,7 +114,72 @@ function configInputError(input: ConfigInput): string | null {
   return null;
 }
 
+async function prepareContinuation(database: Database, fileName: string, bytes: Buffer, actorId: string, ip: string) {
+  const client = await database.connect();
+  try {
+    await client.query("begin");
+    const source = (await client.query(
+      `select * from import_configs where config_key='standard-performance' and status='approved' and fixed_event_type='initial'
+       order by version desc limit 1 for share`,
+    )).rows[0];
+    if (!source) throw new ImportJobError("系统标准模板不可用，请联系维护人员；无需提交续导审批");
+    const { sourceRecordId: _source, eventType: _event, ...columnMapping } = source.column_mapping;
+    const requiredColumns = (source.required_columns as string[]).filter(column => column !== "sourceRecordId" && column !== "eventType");
+    const input = configSchema.parse({configKey:"excel-ledger-continuation",name:`系统续导（标准模板 #${source.id}）`,
+      sheetName:source.sheet_name,expectedHeaders:source.expected_headers,columnMapping,requiredColumns,
+      allowedEventTypes:["legacy_adjustment"],fixedEventType:"legacy_adjustment",allowLegacySourceKey:true,
+      businessRegionMapping:source.business_region_mapping,personMapping:source.person_mapping});
+    const invalid = configInputError(input);
+    if (invalid) throw new ImportJobError(invalid);
+    // 先检查文件格式；固定规则来自系统已批准模板，不批准或修改任何用户草稿。
+    const rows = await parseImportWorkbook(fileName, bytes, {sheetName:input.sheetName,expectedHeaders:input.expectedHeaders,
+      columnMapping:columnMapping as ImportLayout["columnMapping"],personMapping:input.personMapping,fixedEventType:"legacy_adjustment"});
+    await client.query("select pg_advisory_xact_lock(hashtext('sampleflow:import-config'))");
+    let configId = (await client.query<{id:string}>(
+      "select id::text from import_configs where config_key='excel-ledger-continuation' and name=$1 and status='approved' and created_by is null and approved_by is null order by version desc limit 1", [input.name],
+    )).rows[0]?.id;
+    if (!configId) {
+      configId = (await client.query<{id:string}>(
+        `insert into import_configs(config_key,version,name,status,sheet_name,expected_headers,column_mapping,required_columns,
+           allowed_event_types,business_region_mapping,person_mapping,fixed_event_type,allow_legacy_source_key,approved_at)
+         select 'excel-ledger-continuation',coalesce(max(version),0)+1,$1,'approved',$2,$3::jsonb,$4::jsonb,$5::jsonb,
+           '["legacy_adjustment"]',$6::jsonb,$7::jsonb,'legacy_adjustment',true,now()
+         from import_configs where config_key='excel-ledger-continuation' returning id::text`,
+        [input.name,input.sheetName,JSON.stringify(input.expectedHeaders),JSON.stringify(input.columnMapping),JSON.stringify(input.requiredColumns),
+          JSON.stringify(input.businessRegionMapping),JSON.stringify(input.personMapping)],
+      )).rows[0]!.id;
+      await client.query(
+        `insert into audit_logs(actor_user_id,action,entity_type,entity_id,after_data,ip_address)
+         values($1,'import.continuation_rule_initialized','import_config',$2,jsonb_build_object('sourceConfigId',$3::text,'systemDefined',true),$4)`,
+        [actorId,configId,String(source.id),ip],
+      );
+    }
+    await client.query("commit");
+    return {configId,rows};
+  } catch (error) {
+    await client.query("rollback");
+    throw error;
+  } finally { client.release(); }
+}
+
 export async function registerImports(app: FastifyInstance, database: Database) {
+  app.get("/api/imports/batches/:id/setup", async(request,reply)=>{
+    if(!request.currentUser)return reply.code(401).send({message:"尚未登录"});
+    if(!hasAnyRole(request.currentUser,["sales_assistant_leader"]))return reply.code(403).send({message:"仅销售助理组长可以补齐导入资料"});
+    const params=z.strictObject({id:postgresBigintIdSchema}).safeParse(request.params);
+    if(!params.success)return reply.code(400).send({message:"批次标识无效"});
+    try{return await importSetupOptions(database,String(params.data.id));}
+    catch(error){if(error instanceof ImportJobError||error instanceof ImportWorkbookError)return reply.code(409).send({message:error.message});throw error;}
+  });
+  app.post("/api/imports/batches/:id/setup", async(request,reply)=>{
+    if(!request.currentUser)return reply.code(401).send({message:"尚未登录"});
+    if(!hasAnyRole(request.currentUser,["sales_assistant_leader"]))return reply.code(403).send({message:"仅销售助理组长可以补齐导入资料"});
+    const params=z.strictObject({id:postgresBigintIdSchema}).safeParse(request.params);
+    const body=importSetupSchema.safeParse(request.body);
+    if(!params.success||!body.success)return reply.code(400).send({message:"请完整核对人员、部门、小组并确认"});
+    try{return await completeImportSetup(database,String(params.data.id),request.currentUser.id,body.data,request.ip);}
+    catch(error){if(error instanceof ImportJobError||error instanceof ImportWorkbookError)return reply.code(409).send({message:error.message});throw error;}
+  });
   app.get("/api/imports/configs", async (request, reply) => {
     if (!request.currentUser) return reply.code(401).send({ message: "尚未登录" });
     if (!hasAnyRole(request.currentUser, [...PERFORMANCE_EDITOR_ROLES, "hr"])) {
@@ -118,6 +190,8 @@ export async function registerImports(app: FastifyInstance, database: Database) 
       `select id::text,config_key as "configKey",version,name,status,sheet_name as "sheetName",
               column_mapping as "columnMapping",required_columns as "requiredColumns",allowed_event_types as "allowedEventTypes",business_region_mapping as "businessRegionMapping",
               expected_reconciliation as "expectedReconciliation",allow_legacy_source_key as "allowLegacySourceKey",fixed_event_type as "fixedEventType",
+              expected_headers as "expectedHeaders",person_mapping as "personMapping",created_by::text as "createdBy",
+              (select display_name from users where users.id=import_configs.created_by) as "createdByName",
               created_at as "createdAt",approved_at as "approvedAt"
        from import_configs where status='approved' or $1::boolean order by config_key,version desc`,
       [includeDrafts],
@@ -137,6 +211,13 @@ export async function registerImports(app: FastifyInstance, database: Database) 
     try {
       await client.query("begin");
       await client.query("select pg_advisory_xact_lock(hashtext('sampleflow:import-config'))");
+      if (input.configKey === "excel-ledger-continuation") {
+        const existing = await client.query("select id from import_configs where config_key=$1 and status in ('draft','approved')", [input.configKey]);
+        if (existing.rowCount) {
+          await client.query("rollback");
+          return reply.code(409).send({ message: "已有待审批或已启用的续导规则，请刷新状态，不要重复提交" });
+        }
+      }
       const version = await client.query<{ next_version: number }>("select coalesce(max(version),0)+1 as next_version from import_configs where config_key=$1", [input.configKey]);
       const inserted = await client.query<{ id: string }>(
         `insert into import_configs(config_key,version,name,status,sheet_name,expected_headers,column_mapping,required_columns,allowed_event_types,business_region_mapping,person_mapping,expected_reconciliation,fixed_event_type,allow_legacy_source_key,created_by)
@@ -193,10 +274,11 @@ export async function registerImports(app: FastifyInstance, database: Database) 
       await client.query("begin");
       const result = await client.query(
         `update import_configs set status='approved',approved_by=$2,approved_at=now()
-         where id=$1 and status='draft' and created_by is distinct from $2 and business_region_mapping<>'{}'::jsonb
-           and (fixed_event_type is distinct from 'legacy_adjustment' or expected_reconciliation is not null)
+         where id=$1 and status='draft' and (created_by is distinct from $2 or $3::boolean) and business_region_mapping<>'{}'::jsonb
+           and (fixed_event_type is distinct from 'legacy_adjustment' or expected_reconciliation is not null
+             or (config_key='excel-ledger-continuation' and allow_legacy_source_key and not column_mapping ? 'sourceRecordId'))
          returning id`,
-        [params.data.id, request.currentUser.id],
+        [params.data.id, request.currentUser.id, isAcceptanceOperator(request.currentUser)],
       );
       if (!result.rowCount) {
         await client.query("rollback");
@@ -220,12 +302,20 @@ export async function registerImports(app: FastifyInstance, database: Database) 
   app.post("/api/imports/preflight", { bodyLimit: 30_000_000 }, async (request, reply) => {
     const denied = denyPerformanceEditor(request, reply);
     if (denied) return denied;
-    const parsed = preflightSchema.safeParse(request.body);
+    const parsed = ledgerPreflightSchema.safeParse(request.body);
     if (!parsed.success) {
       recordOperation(request, "import", "failure", "IMPORT_INPUT_INVALID");
       return reply.code(400).send({ message: "上传参数无效" });
     }
     try {
+      if ("purpose" in parsed.data) {
+        const bytes = decodeBase64(parsed.data.contentBase64);
+        const prepared = await prepareContinuation(database, parsed.data.fileName, bytes, request.currentUser!.id, request.ip);
+        const result = await preflightImportRows(database, {actorUserId:request.currentUser!.id,configId:prepared.configId,
+          sourceFileName:parsed.data.fileName,sourceBytes:bytes,rows:prepared.rows});
+        recordOperation(request,"import",result.status === "blocked" ? "failure" : "success",result.status === "blocked" ? "IMPORT_PREFLIGHT_BLOCKED" : "IMPORT_PREFLIGHT_READY");
+        return result;
+      }
       const config = await database.query<{ sheet_name: string; expected_headers: unknown[]; column_mapping: ImportLayout["columnMapping"]; person_mapping: Record<string, string>; fixed_event_type:ImportEventType|null }>(
         "select sheet_name,expected_headers,column_mapping,person_mapping,fixed_event_type from import_configs where id=$1 and status='approved'",
         [parsed.data.configId],

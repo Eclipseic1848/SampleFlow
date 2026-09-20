@@ -35,7 +35,7 @@ async function login(page: import("@playwright/test").Page, username: string) {
   await page.getByRole("button", { name: "进入 SampleFlow" }).click();
   await expect.poll(async()=>{
     await page.locator("body").press("Shift");
-    return page.evaluate(()=>Object.keys(window.localStorage).some((key)=>key.startsWith("sampleflow:onboarding:v2:")&&key.endsWith(":all")&&window.localStorage.getItem(key)==="completed"));
+    return page.evaluate(()=>Object.keys(window.localStorage).some((key)=>key.startsWith("sampleflow:onboarding:v3:")&&key.endsWith(":all")&&window.localStorage.getItem(key)==="completed"));
   }).toBe(true);
   await expect(page.locator(".onboarding-bubble")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "退出登录" })).toBeVisible();

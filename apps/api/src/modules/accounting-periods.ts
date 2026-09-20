@@ -1,3 +1,4 @@
+import { isAcceptanceOperator, isAcceptancePerson } from "../acceptance.js";
 import type { FastifyInstance } from "fastify";
 import type { PoolClient } from "pg";
 import { z } from "zod";
@@ -122,7 +123,7 @@ export async function lockApprovedCorrection(client: PoolClient, correctionReque
   const correction = result.rows[0];
   if (!correction) throw new AccountingPeriodError("更正申请不存在或范围不匹配");
   if (correction.status !== "approved") throw new AccountingPeriodError("更正申请不是可执行状态");
-  if (correction.reviewed_by_person_id === actorPersonId) throw new AccountingPeriodError("审批人与执行人必须是不同人员");
+  if (correction.reviewed_by_person_id === actorPersonId && !await isAcceptancePerson(client, actorPersonId)) throw new AccountingPeriodError("审批人与执行人必须是不同人员");
   if (!correction.expires_at || correction.expires_at.getTime() <= now.getTime()) throw new AccountingPeriodError("更正批准已过期");
   if (!correction.business_region_code || !correction.business_region_source_text || !correction.customer_unit) {
     throw new AccountingPeriodError("更正申请缺少事件发生时分析维度证据");
@@ -252,7 +253,7 @@ export async function registerAccountingPeriods(app: FastifyInstance, db: Databa
         await client.query("rollback");
         return reply.code(409).send({ message: "关闭前必须由销售助理组长确认核对" });
       }
-      if (period.verification_confirmed_by_person_id === request.currentUser!.personId) {
+      if (!isAcceptanceOperator(request.currentUser) && period.verification_confirmed_by_person_id === request.currentUser!.personId) {
         await client.query("rollback");
         return reply.code(409).send({ message: "核对人与关闭人必须是不同人员" });
       }
@@ -348,7 +349,7 @@ export async function registerAccountingPeriods(app: FastifyInstance, db: Databa
         await client.query("rollback");
         return reply.code(409).send({ message: "旧更正申请缺少事件发生时分析维度证据，请重新提交" });
       }
-      if (row.requested_by_person_id === request.currentUser!.personId) {
+      if (!isAcceptanceOperator(request.currentUser) && row.requested_by_person_id === request.currentUser!.personId) {
         await client.query("rollback");
         return reply.code(409).send({ message: "申请人与审批人必须是不同人员" });
       }
@@ -377,8 +378,8 @@ export async function registerAccountingPeriods(app: FastifyInstance, db: Databa
       const rejected = await client.query(
         `update accounting_correction_requests set status='rejected',reviewed_by_user_id=$2,
          reviewed_by_person_id=$3,reviewed_at=$4,review_note=$5
-         where id=$1 and status='pending' and requested_by_person_id<>$3`,
-        [params.data.id, request.currentUser!.id, request.currentUser!.personId, now, body.data.note],
+         where id=$1 and status='pending' and (requested_by_person_id<>$3 or $6::boolean)`,
+        [params.data.id, request.currentUser!.id, request.currentUser!.personId, now, body.data.note, isAcceptanceOperator(request.currentUser)],
       );
       if (!rejected.rowCount) { await client.query("rollback"); return reply.code(409).send({ message: "更正申请不存在、已处理或不满足职责分离" }); }
       await writeAudit(client, request.currentUser!.id, "accounting.correction_rejected", "accounting_correction", String(params.data.id), body.data, request.ip);
@@ -494,7 +495,7 @@ export async function registerAccountingPeriods(app: FastifyInstance, db: Databa
       const row = review.rows[0];
       if (!row) { await client.query("rollback"); return reply.code(404).send({ message: "历史核对不存在" }); }
       if (row.status !== "pending") { await client.query("rollback"); return reply.code(409).send({ message: "历史核对已处理" }); }
-      if (row.requested_by_person_id === request.currentUser!.personId) {
+      if (!isAcceptanceOperator(request.currentUser) && row.requested_by_person_id === request.currentUser!.personId) {
         await client.query("rollback");
         return reply.code(409).send({ message: "核对人与审批人必须是不同人员" });
       }
@@ -577,8 +578,8 @@ export async function registerAccountingPeriods(app: FastifyInstance, db: Databa
       const rejected = await client.query(
         `update historical_order_reviews set status='rejected',reviewed_by_user_id=$2,
          reviewed_by_person_id=$3,reviewed_at=$4,review_note=$5
-         where id=$1 and status='pending' and requested_by_person_id<>$3`,
-        [params.data.id, request.currentUser!.id, request.currentUser!.personId, now, body.data.note],
+         where id=$1 and status='pending' and (requested_by_person_id<>$3 or $6::boolean)`,
+        [params.data.id, request.currentUser!.id, request.currentUser!.personId, now, body.data.note, isAcceptanceOperator(request.currentUser)],
       );
       if (!rejected.rowCount) { await client.query("rollback"); return reply.code(409).send({ message: "历史核对不存在、已处理或不满足职责分离" }); }
       await writeAudit(client, request.currentUser!.id, "performance.historical_review_rejected", "historical_order_review", String(params.data.id), body.data, request.ip);

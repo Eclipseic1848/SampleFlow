@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import pg from "pg";
 import { fileURLToPath } from "node:url";
 import { seedTestUser } from "./test-support/fixtures.js";
 import { withTestApi } from "./test-support/test-api.js";
@@ -8,6 +9,50 @@ import { withMigratedTestDatabase } from "./test-support/test-database.js";
 
 const ORIGIN = "http://127.0.0.1:4174";
 const standardTemplate = fileURLToPath(new URL("../../web/public/SampleFlow标准业绩导入模板.xlsx", import.meta.url));
+
+test("系统续导无需配置审批，保留角色边界、来源校验、并发幂等和用户草稿", async () => {
+  await withMigratedTestDatabase(async database => {
+    for (const role of ["sales_assistant_leader","sales_assistant","hr","salesperson"]) {
+      await seedTestUser(database.url,{username:role,displayName:role,password:"Role@123",roleCode:role,roleName:role});
+    }
+    const client = new pg.Client({connectionString:database.url});await client.connect();
+    try {
+      await client.query(`insert into import_configs(config_key,version,name,status,sheet_name,expected_headers,column_mapping,required_columns)
+        select 'excel-ledger-continuation',1,'旧草稿','draft',sheet_name,expected_headers,column_mapping,required_columns
+        from import_configs where config_key='standard-performance' and version=2`);
+      const before = (await client.query("select row_to_json(c) as data from import_configs c order by id")).rows;
+      await withTestApi(database.url,async app => {
+        const leader=await loginHeaders(app,"sales_assistant_leader");const assistant=await loginHeaders(app,"sales_assistant");
+        const payload={purpose:"continuation",fileName:"续导.xlsx",contentBase64:(await readFile(standardTemplate)).toString("base64")};
+        const send=(headers:Record<string,string>,body:Record<string,unknown>=payload)=>app.inject({method:"POST",url:"/api/imports/preflight",headers,payload:body});
+        for (const role of ["hr","salesperson"]) assert.equal((await send(await loginHeaders(app,role))).statusCode,403);
+        assert.equal((await send({})).statusCode,401);
+        assert.equal((await send(leader,{...payload,configId:"1"})).statusCode,400);
+        assert.equal((await send(leader,{...payload,allowedEventTypes:["initial"]})).statusCode,400);
+        assert.equal((await send(leader,{...payload,contentBase64:"invalid"})).statusCode,409);
+        assert.deepEqual((await client.query("select row_to_json(c) as data from import_configs c order by id")).rows,before);
+        const results=await Promise.all([send(leader),send(assistant)]);
+        for(const result of results) {
+          assert.equal(result.statusCode,200,result.body);
+          assert.ok(result.json().issues.some((issue:{code:string})=>issue.code==="CONTINUATION_TOTAL_CONFIRMATION"));
+        }
+        const system=(await client.query("select * from import_configs where config_key='excel-ledger-continuation' and status='approved'")).rows;
+        assert.equal(system.length,1);assert.equal(system[0].created_by,null);assert.equal(system[0].approved_by,null);
+        assert.equal(system[0].fixed_event_type,"legacy_adjustment");assert.equal(system[0].column_mapping.sourceRecordId,undefined);
+        assert.equal(system[0].expected_reconciliation,null);
+        assert.deepEqual((await client.query("select row_to_json(c) as data from import_configs c where id<>$1 order by id",[system[0].id])).rows,before);
+        assert.equal((await client.query("select count(*) from audit_logs where action='import.continuation_rule_initialized'")).rows[0].count,"1");
+        assert.equal((await client.query("select count(*) from performance_events")).rows[0].count,"0");
+        const denied=await app.inject({method:"POST",url:`/api/imports/batches/${results[1]!.json().batchId}/confirm`,headers:assistant,payload:{confirmedWarnings:[]}});
+        assert.equal(denied.statusCode,403);
+        assert.equal((await send(leader)).statusCode,200);
+        assert.equal((await client.query("select count(*) from import_configs where config_key='excel-ledger-continuation' and status='approved'")).rows[0].count,"1");
+        await client.query("update import_configs set status='retired' where config_key='standard-performance'");
+        const unavailable=await send(leader);assert.equal(unavailable.statusCode,409);assert.match(unavailable.body,/系统标准模板不可用/);
+      });
+    } finally { await client.end(); }
+  });
+});
 
 async function loginHeaders(app: Parameters<Parameters<typeof withTestApi>[1]>[0], username: string) {
   const response = await app.inject({
@@ -104,6 +149,24 @@ test("导入配置草稿与批准遵守销售助理组长/人事职责分离", a
       const missingHistoricalBaseline = await app.inject({ method: "POST", url: "/api/imports/configs", headers: leader, payload: historicalWithoutBaseline });
       assert.equal(missingHistoricalBaseline.statusCode, 400);
       assert.match(missingHistoricalBaseline.json<{ message: string }>().message, /历史配置必须固化/);
+      const continuation = { ...historicalWithoutBaseline, configKey: "excel-ledger-continuation", name: "接着导入 Excel 业绩流水" };
+      const continuationCreated = await app.inject({ method: "POST", url: "/api/imports/configs", headers: leader, payload: continuation });
+      assert.equal(continuationCreated.statusCode, 201, continuationCreated.body);
+      const continuationId = continuationCreated.json<{id:string}>().id;
+      const duplicateContinuation = await app.inject({method:"POST",url:"/api/imports/configs",headers:leader,payload:continuation});
+      assert.equal(duplicateContinuation.statusCode,409,duplicateContinuation.body);
+      const continuationDenied = await app.inject({ method: "POST", url: `/api/imports/configs/${continuationId}/approve`, headers: leader, payload: {} });
+      assert.equal(continuationDenied.statusCode, 403);
+      const continuationApproved = await app.inject({ method: "POST", url: `/api/imports/configs/${continuationId}/approve`, headers: hr, payload: {} });
+      assert.equal(continuationApproved.statusCode, 200, continuationApproved.body);
+      for (const invalid of [
+        { ...continuation, expectedReconciliation: historicalConfig.expectedReconciliation },
+        { ...continuation, columnMapping: { ...continuation.columnMapping, sourceRecordId: "订单号" } },
+        { ...config, configKey: "excel-ledger-continuation" },
+      ]) {
+        const rejected = await app.inject({ method: "POST", url: "/api/imports/configs", headers: leader, payload: invalid });
+        assert.equal(rejected.statusCode, 400, rejected.body);
+      }
       const inconsistentHistoricalBaseline = await app.inject({
         method: "POST", url: "/api/imports/configs", headers: leader,
         payload: { ...historicalConfig, configKey: "historical-invalid", expectedReconciliation: { ...historicalConfig.expectedReconciliation, totalAmount: 151 } },

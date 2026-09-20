@@ -1,14 +1,103 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readdir, readFile } from "node:fs/promises";
 import pg from "pg";
 import { seedTestUser } from "./test-support/fixtures.js";
 import { withTestApi } from "./test-support/test-api.js";
-import { withMigratedTestDatabase } from "./test-support/test-database.js";
+import { withMigratedTestDatabase, withTestDatabase } from "./test-support/test-database.js";
 
 const { Client }=pg;
 const TEST_ORIGIN="http://127.0.0.1:4174";
 const GOAL_CONFIRMATION_STATEMENT="本人已核对并确认承担本目标版本。";
 type GoalActor = "manager"|"supervisor"|"leader"|"salesperson"|"hr"|"gm"|"outsider";
+
+test("总经理下达迁移保留旧目标全部字段，旧版本默认沿用原审批路径",async()=>{
+  await withTestDatabase(async(database)=>{
+    const client=new Client({connectionString:database.url});await client.connect();
+    try{
+      const root=new URL("../migrations/",import.meta.url);
+      for(const name of (await readdir(root)).filter(name=>name.endsWith(".sql")&&name<"033_").sort()){
+        await client.query(await readFile(new URL(name,root),"utf8"));
+      }
+      const userId=await seedTestUser(database.url,{username:"old_goal_owner",displayName:"原销售经理",password:"Goal@123",roleCode:"sales_manager",roleName:"销售经理"});
+      const goal=(await client.query<{id:string}>("insert into goals(period_month,goal_level,owner_user_id,owner_person_id) select '2026-09-01','sales_manager',$1,id from people where user_id=$1 returning id::text",[userId])).rows[0]!.id;
+      await client.query(`insert into goal_versions(goal_id,version_no,amount,status,created_by,created_by_person_id,signed_by,signed_by_person_id,signed_at,signature_text,change_reason)
+        select $1,1,1000,'pending_gm',$2,id,$2,id,now(),'本人已确认','迁移前原目标' from people where user_id=$2`,[goal,userId]);
+      const before=(await client.query("select to_jsonb(v) as data from goal_versions v")).rows;
+      await client.query(await readFile(new URL("033_general_manager_issued_goals.sql",root),"utf8"));
+      assert.deepEqual((await client.query("select to_jsonb(v)-'gm_issued' as data from goal_versions v")).rows,before);
+      assert.equal((await client.query("select gm_issued from goal_versions")).rows[0].gm_issued,false);
+    }finally{await client.end();}
+  });
+});
+
+test("总经理下达总目标由责任销售经理确认后交人事，审批路径绑定版本且不能自批",async()=>{
+  await withMigratedTestDatabase(async(database)=>{
+    const scenario=await seedGoalScenario(database.url);
+    const secondId=await seedTestUser(database.url,{username:"goal_second_manager",displayName:"另一销售经理",password:"Goal@123",roleCode:"sales_manager",roleName:"销售经理"});
+    const disabledId=await seedTestUser(database.url,{username:"goal_disabled_manager",displayName:"停用销售经理",password:"Goal@123",roleCode:"sales_manager",roleName:"销售经理"});
+    const client=new Client({connectionString:database.url});await client.connect();
+    try{
+      await client.query("update users set is_active=false where id=$1",[disabledId]);
+      const secondPerson=(await client.query<{id:string}>("select id::text from people where user_id=$1",[secondId])).rows[0]!.id;
+      await withTestApi(database.url,async(app)=>{
+        const gm=await headers(app,"goal_gm"),manager=await headers(app,"goal_manager"),hr=await headers(app,"goal_hr"),second=await headers(app,"goal_second_manager"),outsider=await headers(app,"goal_outsider");
+        const options=async(actor:typeof gm)=>app.inject({method:"GET",url:"/api/goals/options?periodMonth=2026-09&level=sales_manager",headers:actor});
+        const gmOptions=await options(gm);assert.equal(gmOptions.statusCode,200,gmOptions.body);
+        assert.deepEqual(gmOptions.json().owners.map((row:{personId:string})=>row.personId).sort(),[scenario.personIds.manager,secondPerson].sort());
+        assert.deepEqual((await options(second)).json().owners.map((row:{personId:string})=>row.personId),[secondPerson]);
+        assert.equal((await options(outsider)).statusCode,403);
+        const input={periodMonth:"2026-09",level:"sales_manager",ownerPersonId:scenario.personIds.manager,amount:1000,changeReason:"总经理下达九月目标"};
+        const create=async(actor:typeof gm,payload:Record<string,unknown>)=>app.inject({method:"POST",url:"/api/goals",headers:actor,payload});
+        assert.equal((await create(second,input)).statusCode,403,"普通销售经理不能替其他经理下达总目标");
+        assert.equal((await create(outsider,input)).statusCode,403);
+        assert.equal((await create(gm,{...input,level:"department",orgUnitId:scenario.departmentId})).statusCode,403,"总经理不直接越级下达部门目标");
+        assert.equal((await create(gm,{...input,ownerPersonId:scenario.personIds.gm})).statusCode,409,"纯总经理不是销售经理责任人");
+        const created=await create(gm,{...input,gmIssued:false});assert.equal(created.statusCode,201,created.body);
+        const goalId=created.json().id as string;let versionId=created.json().versionId as string;
+        const goals=async(actor:typeof gm,pending=false)=>{const response=await app.inject({method:"GET",url:`/api/goals${pending?"?pendingOnly=true":""}`,headers:actor});assert.equal(response.statusCode,200,response.body);return response.json().goals as Array<{id:string;gmIssued:boolean;canDecide:boolean;status:string}>;};
+        const sign=async(actor:typeof gm)=>app.inject({method:"POST",url:`/api/goal-versions/${versionId}/confirm`,headers:actor,payload:{}});
+        const decide=async(actor:typeof gm,decision="approved")=>app.inject({method:"POST",url:`/api/goals/${goalId}/decision`,headers:actor,payload:{expectedVersionId:versionId,decision,comment:"已核对目标"}});
+        assert.equal((await goals(gm))[0]!.gmIssued,true,"客户端不能指定审批路径");
+        assert.equal((await goals(manager,true))[0]!.id,goalId);
+        assert.equal((await goals(gm,true)).length,0);
+        assert.equal((await sign(gm)).statusCode,403,"下达人不能代责任人确认");
+        assert.equal((await sign(second)).statusCode,403);
+        assert.equal((await decide(hr)).statusCode,409,"未经本人确认不得终审");
+        assert.equal((await sign(manager)).statusCode,200);
+        assert.equal((await goals(hr,true))[0]!.status,"pending_hr");
+        assert.equal((await goals(hr,true))[0]!.canDecide,true);
+        const dashboard=await app.inject({method:"GET",url:"/api/performance/dashboard",headers:hr});assert.equal(dashboard.statusCode,200,dashboard.body);assert.equal(dashboard.json().metrics.pendingApprovals,1);
+        assert.equal((await goals(manager,true)).length,0,"确认人即使兼任人事也没有自批待办");
+        assert.equal((await decide(manager)).statusCode,409);
+        await client.query("insert into user_roles(user_id,role_code) values($1,'hr')",[scenario.users.gm]);
+        assert.equal((await goals(gm))[0]!.canDecide,false);
+        assert.equal((await goals(gm,true)).length,0);
+        assert.equal((await decide(gm)).statusCode,409,"下达人增加人事角色也不能审批自己的版本");
+        const rejected=await decide(hr,"rejected");assert.equal(rejected.statusCode,200,rejected.body);
+        const replacement=await create(gm,{...input,amount:1200,changeReason:"按人事意见修改后重新下达"});assert.equal(replacement.statusCode,201,replacement.body);
+        assert.equal(replacement.json().id,goalId);assert.notEqual(replacement.json().versionId,versionId);versionId=replacement.json().versionId;
+        await assert.rejects(client.query("update goal_versions set gm_issued=false where id=$1",[versionId]),/目标版本下达方式不可修改/);
+        // 下达人角色变化不能重新解释已下达版本的审批路径。
+        await client.query("delete from user_roles where user_id=$1 and role_code='general_manager'",[scenario.users.gm]);
+        assert.equal((await sign(manager)).statusCode,200);
+        assert.equal((await goals(hr,true))[0]!.status,"pending_hr");
+        const approved=await decide(hr);assert.equal(approved.statusCode,200,approved.body);
+        const history=await app.inject({method:"GET",url:`/api/goals/${goalId}/history`,headers:hr});assert.equal(history.statusCode,200,history.body);
+        assert.deepEqual(history.json().versions.map((v:{status:string;gmIssued:boolean})=>[v.status,v.gmIssued]),[["active",true],["rejected",true]]);
+        assert.equal(history.json().approvals.every((row:{stage:string})=>row.stage==="hr"),true,"不伪造总经理审批记录");
+        const child=await create(manager,{periodMonth:"2026-09",level:"department",ownerPersonId:scenario.personIds.supervisor,parentGoalId:goalId,orgUnitId:scenario.departmentId,amount:800,changeReason:"销售经理分配部门目标"});assert.equal(child.statusCode,201,child.body);
+        assert.equal((await create(manager,{...input,amount:1500})).statusCode,409,"不能覆盖已生效目标");
+        // 即使提交伪造标记，销售经理自行发起仍必须经总经理审批。
+        const self=await create(second,{...input,periodMonth:"2026-10",ownerPersonId:secondPerson,gmIssued:true});assert.equal(self.statusCode,201,self.body);
+        const selfSign=await app.inject({method:"POST",url:`/api/goal-versions/${self.json().versionId}/confirm`,headers:second,payload:{}});assert.equal(selfSign.statusCode,200,selfSign.body);
+        const selfGoal=(await goals(hr)).find((g)=>g.id===self.json().id)!;assert.equal(selfGoal.gmIssued,false);assert.equal(selfGoal.status,"pending_gm");assert.equal(selfGoal.canDecide,false);
+        await assert.rejects(client.query(`insert into goal_versions(goal_id,version_no,amount,status,created_by,created_by_person_id,gm_issued)
+          values($1,2,100,'pending_signature',$2,$3,true)`,[self.json().id,secondId,secondPerson]),/只有总经理/);
+      });
+    }finally{await client.end();}
+  });
+});
 
 async function headers(app:Parameters<Parameters<typeof withTestApi>[1]>[0],username:string){
   const login=await app.inject({method:"POST",url:"/api/auth/login",headers:{origin:TEST_ORIGIN},payload:{username,password:"Goal@123"}});
